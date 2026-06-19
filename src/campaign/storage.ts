@@ -1,0 +1,1619 @@
+import type {
+  ActiveConstruction,
+  ActiveManufacturing,
+  ActiveResearch,
+  CampaignArmory,
+  BaseLocation,
+  CampaignClock,
+  CampaignStatus,
+  FundingReport,
+  InterceptionReport,
+  InterceptorState,
+  CampaignSoldier,
+  CampaignResources,
+  CampaignState,
+  CampaignWeaponId,
+  CouncilRegion,
+  ManufacturingProjectId,
+  SoldierRank,
+  SoldierStatBonus,
+  StrategicState,
+  MissionReport,
+  MissionResult,
+  OperationPlan,
+  OperationTheme,
+  ProjectReport,
+  ResearchId,
+  UfoContact,
+} from "./types";
+import {
+  BASE_FACILITIES,
+  facilitiesForIds,
+  facilityCost,
+  findBaseFacility,
+  starterFacilityIds,
+  summarizeBaseFacilities,
+  type BaseFacility,
+} from "./base";
+
+export const CAMPAIGN_STORAGE_KEY = "blacksite.campaign.v1";
+export const CAMPAIGN_VICTORY_OPERATIONS = 5;
+export const DEPLOYMENT_SIZE = 4;
+export const RECRUIT_COST = 120;
+export const MEDBAY_FACILITY_ID = "medbay-2";
+export const MEDBAY_WOUND_RECOVERY_MULTIPLIER = 0.75;
+export const WOUND_RECOVERY_MIN_HOURS = 12;
+export const WOUND_RECOVERY_MAX_HOURS = 72;
+export const PROJECT_REPORT_LIMIT = 6;
+export const CAMPAIGN_WEAPON_IDS = ["rifle", "pistol", "plasma"] as const satisfies readonly CampaignWeaponId[];
+export const STARTING_INTERCEPTOR: InterceptorState = {
+  damage: 0,
+  sorties: 0,
+};
+
+export const STARTING_RESOURCES: CampaignResources = {
+  credits: 650,
+  alloys: 0,
+  elerium: 0,
+  alienData: 0,
+};
+
+export const STARTING_STRATEGIC: StrategicState = {
+  status: "active",
+  threat: 25,
+  funding: 600,
+  score: 0,
+};
+
+export const COUNCIL_REGIONS = [
+  "North America",
+  "South America",
+  "Europe",
+  "Africa",
+  "Middle East",
+  "South Asia",
+  "East Asia",
+  "Oceania",
+] as const satisfies readonly CouncilRegion[];
+
+export const STARTING_REGIONAL_PANIC: Record<CouncilRegion, number> = {
+  "North America": 20,
+  "South America": 20,
+  Europe: 20,
+  Africa: 20,
+  "Middle East": 20,
+  "South Asia": 20,
+  "East Asia": 20,
+  Oceania: 20,
+};
+
+export const STARTING_CLOCK: CampaignClock = {
+  day: 1,
+  hour: 0,
+  elapsedHours: 0,
+  lastContactHour: 0,
+  lastFundingHour: 0,
+};
+
+export const RESEARCH_COSTS: Record<ResearchId, CampaignResources> = {
+  plasmaWeapons: {
+    credits: 200,
+    alloys: 8,
+    elerium: 2,
+    alienData: 3,
+  },
+  alloyArmor: {
+    credits: 180,
+    alloys: 10,
+    elerium: 0,
+    alienData: 2,
+  },
+};
+
+export interface ResearchProject {
+  id: ResearchId;
+  title: string;
+  description: string;
+  completedDescription: string;
+  durationHours: number;
+}
+
+export interface ManufacturingProject {
+  id: ManufacturingProjectId;
+  weaponId: CampaignWeaponId;
+  title: string;
+  description: string;
+  durationHours: number;
+  cost: CampaignResources;
+  requiresResearch?: ResearchId;
+}
+
+export interface CampaignObjectiveProgress {
+  completed: number;
+  required: number;
+  remaining: number;
+  percent: number;
+  status: CampaignStatus;
+  title: string;
+  summary: string;
+}
+
+export const RESEARCH_PROJECTS: readonly ResearchProject[] = [
+  {
+    id: "plasmaWeapons",
+    title: "Plasma weapons",
+    description: "Reverse-engineer recovered emitters. Adds one plasma caster to the armory.",
+    completedDescription: "One plasma caster is available in the armory for squad assignment.",
+    durationHours: 24,
+  },
+  {
+    id: "alloyArmor",
+    title: "Alloy armor",
+    description: "Fabricate composite armor plates from recovered alloys. All deployed operatives gain durability.",
+    completedDescription: "All deployed operatives gain +6 health and +2 reactions from alloy plate inserts.",
+    durationHours: 18,
+  },
+] as const;
+
+export const MANUFACTURING_PROJECTS: readonly ManufacturingProject[] = [
+  {
+    id: "pistol",
+    weaponId: "pistol",
+    title: "Sidearm",
+    description: "Machine a compact backup weapon for rookies, scouts, or wounded veterans.",
+    durationHours: 8,
+    cost: { credits: 45, alloys: 2, elerium: 0, alienData: 0 },
+  },
+  {
+    id: "rifle",
+    weaponId: "rifle",
+    title: "Service rifle",
+    description: "Assemble another standard long arm for replacement troops.",
+    durationHours: 12,
+    cost: { credits: 80, alloys: 4, elerium: 0, alienData: 0 },
+  },
+  {
+    id: "plasma",
+    weaponId: "plasma",
+    title: "Plasma caster",
+    description: "Fabricate a recovered emitter around an alien alloy frame.",
+    durationHours: 36,
+    cost: { credits: 160, alloys: 8, elerium: 2, alienData: 2 },
+    requiresResearch: "plasmaWeapons",
+  },
+] as const;
+
+const STARTING_SOLDIER_NAMES = ["Vega", "Rook", "Mason", "Pike", "Cole", "Reyes"] as const;
+const RECRUIT_NAMES = ["Knox", "Drake", "Sloane", "Hart", "Frost", "Wren"] as const;
+export const STARTING_ARMORY: CampaignArmory = {
+  weapons: {
+    rifle: STARTING_SOLDIER_NAMES.length,
+    pistol: 2,
+    plasma: 0,
+  },
+};
+
+const RANKS: readonly { rank: SoldierRank; minSurvived: number; bonus: SoldierStatBonus }[] = [
+  { rank: "rookie", minSurvived: 0, bonus: { timeUnits: 0, health: 0, reactions: 0, firingAccuracy: 0 } },
+  { rank: "squaddie", minSurvived: 1, bonus: { timeUnits: 2, health: 2, reactions: 4, firingAccuracy: 4 } },
+  { rank: "sergeant", minSurvived: 3, bonus: { timeUnits: 4, health: 5, reactions: 7, firingAccuracy: 8 } },
+  { rank: "captain", minSurvived: 5, bonus: { timeUnits: 6, health: 8, reactions: 10, firingAccuracy: 12 } },
+];
+
+function campaignId(seed: number): string {
+  return `campaign-${seed.toString(16).padStart(8, "0")}`;
+}
+
+function soldierId(index: number): string {
+  return `soldier-${String(index + 1).padStart(2, "0")}`;
+}
+
+function makeSoldier(id: string, name: string): CampaignSoldier {
+  return {
+    id,
+    name,
+    status: "active",
+    rank: "rookie",
+    missions: 0,
+    survivedMissions: 0,
+  };
+}
+
+function startingSoldiers(): CampaignSoldier[] {
+  return STARTING_SOLDIER_NAMES.map((name, index) => makeSoldier(soldierId(index), name));
+}
+
+function startingLoadouts(soldiers: readonly CampaignSoldier[]): Record<string, CampaignWeaponId> {
+  return Object.fromEntries(soldiers.map((soldier) => [soldier.id, "rifle" as CampaignWeaponId]));
+}
+
+function startingDeployment(soldiers: readonly CampaignSoldier[]): string[] {
+  return soldiers.slice(0, DEPLOYMENT_SIZE).map((soldier) => soldier.id);
+}
+
+export function createCampaign(base: BaseLocation, seed: number): CampaignState {
+  const soldiers = startingSoldiers();
+  return {
+    version: 1,
+    id: campaignId(seed),
+    seed: seed >>> 0,
+    createdAt: new Date().toISOString(),
+    base,
+    strategic: { ...STARTING_STRATEGIC },
+    regionalPanic: { ...STARTING_REGIONAL_PANIC },
+    clock: { ...STARTING_CLOCK },
+    lastFundingReport: undefined,
+    interceptor: { ...STARTING_INTERCEPTOR },
+    lastInterceptionReport: undefined,
+    resources: { ...STARTING_RESOURCES },
+    armory: cloneArmory(STARTING_ARMORY),
+    soldierLoadouts: startingLoadouts(soldiers),
+    deploymentSoldierIds: startingDeployment(soldiers),
+    facilities: starterFacilityIds(),
+    soldiers,
+    completedResearch: [],
+    activeResearch: undefined,
+    activeManufacturing: undefined,
+    activeConstruction: undefined,
+    missionsCompleted: 0,
+    missionsAttempted: 0,
+    projectReports: [],
+  };
+}
+
+export function updateCampaignBase(campaign: CampaignState, base: BaseLocation): CampaignState {
+  return { ...campaign, base };
+}
+
+export function campaignMissionSeed(campaign: CampaignState): number {
+  return (campaign.seed ^ 0x9e3779b9 ^ campaign.missionsAttempted) >>> 0;
+}
+
+export function campaignObjectiveProgress(campaign: CampaignState): CampaignObjectiveProgress {
+  const required = CAMPAIGN_VICTORY_OPERATIONS;
+  const completed = Math.max(0, Math.min(required, Math.floor(campaign.missionsCompleted)));
+  const remaining = Math.max(0, required - completed);
+  const percent = Math.round((completed / required) * 100);
+  if (campaign.strategic.status === "won" || remaining === 0) {
+    return {
+      completed,
+      required,
+      remaining,
+      percent,
+      status: campaign.strategic.status,
+      title: "Containment achieved",
+      summary: `Recovered ${required}/${required} UFO cores. Alien command cell is broken.`,
+    };
+  }
+  if (campaign.strategic.status === "lost") {
+    return {
+      completed,
+      required,
+      remaining,
+      percent,
+      status: campaign.strategic.status,
+      title: "Containment failed",
+      summary: `Recovered ${completed}/${required} UFO cores before command collapse.`,
+    };
+  }
+  return {
+    completed,
+    required,
+    remaining,
+    percent,
+    status: campaign.strategic.status,
+    title: "Containment objective",
+    summary: `Recover ${remaining} more UFO core${remaining === 1 ? "" : "s"} to expose the invasion cell.`,
+  };
+}
+
+export function activeSoldiers(campaign: CampaignState): CampaignSoldier[] {
+  return campaign.soldiers.filter((soldier) => soldier.status === "active");
+}
+
+export function councilRegionFor(region: string): CouncilRegion | undefined {
+  if ((COUNCIL_REGIONS as readonly string[]).includes(region)) return region as CouncilRegion;
+  if (region === "Central America") return "North America";
+  if (region === "Siberia") return "East Asia";
+  if (region === "Pacific sector" || region === "Antarctic perimeter") return "Oceania";
+  if (region === "Atlantic sector") return "Europe";
+  if (region === "Open ocean sector") return undefined;
+  return undefined;
+}
+
+export function highestRegionalPanic(
+  campaign: CampaignState,
+): { region: CouncilRegion; panic: number } {
+  return COUNCIL_REGIONS.reduce<{ region: CouncilRegion; panic: number }>(
+    (worst, region) => {
+      const panic = campaign.regionalPanic[region] ?? STARTING_REGIONAL_PANIC[region];
+      return panic > worst.panic ? { region, panic } : worst;
+    },
+    {
+      region: COUNCIL_REGIONS[0]!,
+      panic: campaign.regionalPanic[COUNCIL_REGIONS[0]!] ?? STARTING_REGIONAL_PANIC[COUNCIL_REGIONS[0]!],
+    },
+  );
+}
+
+export function regionalPanicFor(campaign: CampaignState, region: string): number | undefined {
+  const councilRegion = councilRegionFor(region);
+  return councilRegion ? campaign.regionalPanic[councilRegion] : undefined;
+}
+
+export function adjustRegionalPanic(
+  regionalPanic: Record<CouncilRegion, number>,
+  region: string,
+  localDelta: number,
+  spilloverDelta = 0,
+): Record<CouncilRegion, number> {
+  const councilRegion = councilRegionFor(region);
+  const next = { ...regionalPanic };
+  for (const one of COUNCIL_REGIONS) {
+    const delta = one === councilRegion ? localDelta : spilloverDelta;
+    next[one] = Math.max(0, Math.min(100, Math.round((next[one] ?? STARTING_REGIONAL_PANIC[one]) + delta)));
+  }
+  return next;
+}
+
+export function livingSoldiers(campaign: CampaignState): CampaignSoldier[] {
+  return campaign.soldiers.filter((soldier) => soldier.status !== "kia");
+}
+
+export function recoverWoundedSoldiers(campaign: CampaignState): CampaignState {
+  let changed = false;
+  const soldiers = campaign.soldiers.map((soldier) => {
+    if (
+      soldier.status !== "wounded" ||
+      typeof soldier.woundedUntilHour !== "number" ||
+      soldier.woundedUntilHour > campaign.clock.elapsedHours
+    ) {
+      return soldier;
+    }
+    changed = true;
+    return {
+      ...soldier,
+      status: "active" as const,
+      woundedUntilHour: undefined,
+    };
+  });
+  return changed ? { ...campaign, soldiers } : campaign;
+}
+
+function campaignClockAt(
+  clock: CampaignClock,
+  elapsedHours: number,
+  lastContactHour = clock.lastContactHour,
+): CampaignClock {
+  const elapsed = Math.max(0, Math.floor(elapsedHours));
+  return {
+    day: 1 + Math.floor(elapsed / 24),
+    hour: elapsed % 24,
+    elapsedHours: elapsed,
+    lastContactHour: Math.max(0, Math.floor(lastContactHour)),
+    lastFundingHour: Math.max(0, Math.floor(clock.lastFundingHour)),
+  };
+}
+
+function completedOperationDuration(operation: OperationPlan): number {
+  return Number.isFinite(operation.durationHours)
+    ? Math.max(0, Math.floor(operation.durationHours))
+    : 0;
+}
+
+function resolveInterceptorRepair(campaign: CampaignState): CampaignState {
+  const repairedAt = campaign.interceptor.repairedAtHour;
+  if (repairedAt === undefined || repairedAt > campaign.clock.elapsedHours) return campaign;
+  return {
+    ...campaign,
+    interceptor: {
+      damage: 0,
+      sorties: campaign.interceptor.sorties,
+    },
+  };
+}
+
+function completeStrategicProgress(campaign: CampaignState): CampaignState {
+  return completeFinishedConstruction(
+    completeFinishedManufacturing(
+      recoverWoundedSoldiers(completeFinishedResearch(resolveInterceptorRepair(campaign))),
+    ),
+  );
+}
+
+export function deploymentSoldiers(campaign: CampaignState): CampaignSoldier[] {
+  const activeById = new Map(activeSoldiers(campaign).map((soldier) => [soldier.id, soldier]));
+  return campaign.deploymentSoldierIds
+    .flatMap((id) => {
+      const soldier = activeById.get(id);
+      return soldier ? [soldier] : [];
+    })
+    .slice(0, DEPLOYMENT_SIZE);
+}
+
+export function canDeploySoldier(campaign: CampaignState, soldierId: string): boolean {
+  if (campaign.strategic.status !== "active") return false;
+  const soldier = campaign.soldiers.find((candidate) => candidate.id === soldierId);
+  if (!soldier || soldier.status !== "active") return false;
+  return campaign.deploymentSoldierIds.includes(soldierId) ||
+    deploymentSoldiers(campaign).length < DEPLOYMENT_SIZE;
+}
+
+export function setSoldierDeployment(
+  campaign: CampaignState,
+  soldierId: string,
+  deployed: boolean,
+): CampaignState {
+  const current = normalizeDeploymentSoldierIds(campaign.deploymentSoldierIds, campaign.soldiers);
+  const alreadyDeployed = current.includes(soldierId);
+  if (!deployed) {
+    if (!alreadyDeployed) return campaign;
+    return { ...campaign, deploymentSoldierIds: current.filter((id) => id !== soldierId) };
+  }
+  if (alreadyDeployed || !canDeploySoldier({ ...campaign, deploymentSoldierIds: current }, soldierId)) {
+    return { ...campaign, deploymentSoldierIds: current };
+  }
+  return { ...campaign, deploymentSoldierIds: [...current, soldierId].slice(0, DEPLOYMENT_SIZE) };
+}
+
+export function soldierRank(survivedMissions: number): SoldierRank {
+  let rank: SoldierRank = "rookie";
+  for (const spec of RANKS) {
+    if (survivedMissions >= spec.minSurvived) rank = spec.rank;
+  }
+  return rank;
+}
+
+export function soldierStatBonus(soldier: CampaignSoldier): SoldierStatBonus {
+  return RANKS.find((spec) => spec.rank === soldier.rank)?.bonus ?? RANKS[0]!.bonus;
+}
+
+export function campaignSoldierStatBonus(campaign: CampaignState, soldier: CampaignSoldier): SoldierStatBonus {
+  const rankBonus = soldierStatBonus(soldier);
+  const armorBonus = hasResearch(campaign, "alloyArmor")
+    ? { timeUnits: 0, health: 6, reactions: 2, firingAccuracy: 0 }
+    : { timeUnits: 0, health: 0, reactions: 0, firingAccuracy: 0 };
+  return {
+    timeUnits: rankBonus.timeUnits + armorBonus.timeUnits,
+    health: rankBonus.health + armorBonus.health,
+    reactions: rankBonus.reactions + armorBonus.reactions,
+    firingAccuracy: rankBonus.firingAccuracy + armorBonus.firingAccuracy,
+  };
+}
+
+export function canRecruitSoldier(campaign: CampaignState): boolean {
+  return campaign.resources.credits >= RECRUIT_COST;
+}
+
+export function recruitSoldier(campaign: CampaignState): CampaignState {
+  if (!canRecruitSoldier(campaign)) return campaign;
+  const usedNames = new Set(campaign.soldiers.map((soldier) => soldier.name));
+  const name =
+    RECRUIT_NAMES.find((candidate) => !usedNames.has(candidate)) ??
+    `Operative-${campaign.soldiers.length + 1}`;
+  const recruit = makeSoldier(soldierId(campaign.soldiers.length), name);
+  return {
+    ...campaign,
+    armory: addWeapon(campaign.armory, "rifle", 1),
+    soldierLoadouts: {
+      ...campaign.soldierLoadouts,
+      [recruit.id]: "rifle",
+    },
+    resources: {
+      ...campaign.resources,
+      credits: campaign.resources.credits - RECRUIT_COST,
+    },
+    soldiers: [...campaign.soldiers, recruit],
+  };
+}
+
+export function soldierWeaponId(campaign: CampaignState, soldierId: string): CampaignWeaponId {
+  const assigned = campaign.soldierLoadouts[soldierId];
+  return isCampaignWeaponId(assigned) && campaign.armory.weapons[assigned] > 0 ? assigned : "rifle";
+}
+
+export function assignedWeaponCounts(
+  campaign: CampaignState,
+  ignoreSoldierId?: string,
+): Record<CampaignWeaponId, number> {
+  const counts = emptyWeaponCounts();
+  for (const soldier of livingSoldiers(campaign)) {
+    if (soldier.id === ignoreSoldierId) continue;
+    counts[soldierWeaponId(campaign, soldier.id)] += 1;
+  }
+  return counts;
+}
+
+export function availableWeaponCount(
+  campaign: CampaignState,
+  weaponId: CampaignWeaponId,
+  ignoreSoldierId?: string,
+): number {
+  return Math.max(0, campaign.armory.weapons[weaponId] - assignedWeaponCounts(campaign, ignoreSoldierId)[weaponId]);
+}
+
+export function canAssignSoldierWeapon(
+  campaign: CampaignState,
+  soldierId: string,
+  weaponId: CampaignWeaponId,
+): boolean {
+  if (campaign.strategic.status !== "active") return false;
+  const soldier = campaign.soldiers.find((candidate) => candidate.id === soldierId);
+  if (!soldier || soldier.status === "kia") return false;
+  if (!isCampaignWeaponId(weaponId) || campaign.armory.weapons[weaponId] <= 0) return false;
+  return soldierWeaponId(campaign, soldierId) === weaponId || availableWeaponCount(campaign, weaponId, soldierId) > 0;
+}
+
+export function assignSoldierWeapon(
+  campaign: CampaignState,
+  soldierId: string,
+  weaponId: CampaignWeaponId,
+): CampaignState {
+  if (!canAssignSoldierWeapon(campaign, soldierId, weaponId)) return campaign;
+  return {
+    ...campaign,
+    soldierLoadouts: {
+      ...campaign.soldierLoadouts,
+      [soldierId]: weaponId,
+    },
+  };
+}
+
+export function deploymentWeaponIds(campaign: CampaignState): CampaignWeaponId[] {
+  return deploymentSoldiers(campaign).map((soldier) => soldierWeaponId(campaign, soldier.id));
+}
+
+export function constructedFacilities(campaign: CampaignState): BaseFacility[] {
+  return facilitiesForIds(campaign.facilities);
+}
+
+export function hasBaseFacility(campaign: CampaignState, id: string): boolean {
+  return campaign.facilities.includes(id) && findBaseFacility(id) !== undefined;
+}
+
+export function availableBaseFacilities(campaign: CampaignState): BaseFacility[] {
+  return BASE_FACILITIES.filter(
+    (facility) =>
+      facility.cost &&
+      !hasBaseFacility(campaign, facility.id) &&
+      campaign.activeConstruction?.facilityId !== facility.id,
+  );
+}
+
+export function canBuildFacility(campaign: CampaignState, id: string): boolean {
+  if (
+    campaign.strategic.status !== "active" ||
+    hasBaseFacility(campaign, id) ||
+    !!campaign.activeConstruction
+  ) {
+    return false;
+  }
+  const facility = findBaseFacility(id);
+  if (!facility?.cost || !canAfford(campaign.resources, facility.cost)) return false;
+  return hasPowerForFacility(campaign, facility);
+}
+
+export function buildFacility(campaign: CampaignState, id: string): CampaignState {
+  if (!canBuildFacility(campaign, id)) return campaign;
+  const facility = findBaseFacility(id)!;
+  return {
+    ...campaign,
+    resources: spend(campaign.resources, facilityCost(facility)),
+    activeConstruction: {
+      facilityId: facility.id,
+      startedAtHour: campaign.clock.elapsedHours,
+      completesAtHour: campaign.clock.elapsedHours + facilityConstructionDuration(campaign, facility.id),
+    },
+  };
+}
+
+export function facilityConstructionDuration(campaign: CampaignState, id: string): number {
+  const base = findBaseFacility(id)?.constructionHours ?? 24;
+  return Math.max(6, base - (hasBaseFacility(campaign, "workshop-2") ? 6 : 0));
+}
+
+export function completeFacilityConstruction(campaign: CampaignState, id: string): CampaignState {
+  if (hasBaseFacility(campaign, id)) return campaign;
+  const facility = findBaseFacility(id);
+  if (!facility?.cost) return campaign;
+  if (campaign.activeConstruction?.facilityId === id) {
+    return addProjectReport({
+      ...campaign,
+      activeConstruction: undefined,
+      facilities: [...campaign.facilities, id],
+    }, constructionReport(facility, campaign.clock.elapsedHours));
+  }
+  if (!canBuildFacility(campaign, id)) return campaign;
+  return addProjectReport({
+    ...campaign,
+    resources: spend(campaign.resources, facilityCost(facility)),
+    facilities: [...campaign.facilities, id],
+  }, constructionReport(facility, campaign.clock.elapsedHours));
+}
+
+export function completeFinishedConstruction(campaign: CampaignState): CampaignState {
+  const active = campaign.activeConstruction;
+  if (!active || campaign.clock.elapsedHours < active.completesAtHour) return campaign;
+  const facility = findBaseFacility(active.facilityId);
+  if (!facility || hasBaseFacility(campaign, active.facilityId)) {
+    return { ...campaign, activeConstruction: undefined };
+  }
+  return addProjectReport({
+    ...campaign,
+    activeConstruction: undefined,
+    facilities: [...campaign.facilities, active.facilityId],
+  }, constructionReport(facility, campaign.clock.elapsedHours));
+}
+
+export function manufacturingProject(id: ManufacturingProjectId): ManufacturingProject {
+  return MANUFACTURING_PROJECTS.find((project) => project.id === id)!;
+}
+
+export function manufacturingDuration(campaign: CampaignState, id: ManufacturingProjectId): number {
+  const base = manufacturingProject(id).durationHours;
+  return Math.max(4, base - (hasBaseFacility(campaign, "workshop-2") ? 8 : 0));
+}
+
+export function manufacturingCost(campaign: CampaignState, id: ManufacturingProjectId): CampaignResources {
+  const base = manufacturingProject(id).cost;
+  if (!hasBaseFacility(campaign, "workshop-2")) return { ...base };
+  return {
+    credits: Math.max(0, base.credits - 20),
+    alloys: base.alloys,
+    elerium: base.elerium,
+    alienData: base.alienData,
+  };
+}
+
+export function canStartManufacturing(campaign: CampaignState, id: ManufacturingProjectId): boolean {
+  const project = manufacturingProject(id);
+  return (
+    campaign.strategic.status === "active" &&
+    !campaign.activeManufacturing &&
+    (!project.requiresResearch || hasResearch(campaign, project.requiresResearch)) &&
+    canAfford(campaign.resources, manufacturingCost(campaign, id))
+  );
+}
+
+export function startManufacturing(campaign: CampaignState, id: ManufacturingProjectId): CampaignState {
+  if (!canStartManufacturing(campaign, id)) return campaign;
+  return {
+    ...campaign,
+    resources: spend(campaign.resources, manufacturingCost(campaign, id)),
+    activeManufacturing: {
+      projectId: id,
+      startedAtHour: campaign.clock.elapsedHours,
+      completesAtHour: campaign.clock.elapsedHours + manufacturingDuration(campaign, id),
+    },
+  };
+}
+
+export function completeFinishedManufacturing(campaign: CampaignState): CampaignState {
+  const active = campaign.activeManufacturing;
+  if (!active || campaign.clock.elapsedHours < active.completesAtHour) return campaign;
+  const project = manufacturingProject(active.projectId);
+  return addProjectReport({
+    ...campaign,
+    activeManufacturing: undefined,
+    armory: addWeapon(campaign.armory, project.weaponId, 1),
+  }, manufacturingReport(project, campaign.clock.elapsedHours));
+}
+
+function addProjectReport(campaign: CampaignState, report: ProjectReport): CampaignState {
+  return {
+    ...campaign,
+    projectReports: [report, ...campaign.projectReports].slice(0, PROJECT_REPORT_LIMIT),
+  };
+}
+
+function constructionReport(facility: BaseFacility, completedAtHour: number): ProjectReport {
+  return {
+    kind: "construction",
+    id: facility.id,
+    title: `${facility.label} online`,
+    summary: facility.effect,
+    completedAtHour,
+  };
+}
+
+function manufacturingReport(project: ManufacturingProject, completedAtHour: number): ProjectReport {
+  return {
+    kind: "manufacturing",
+    id: project.id,
+    title: `${project.title} complete`,
+    summary: `Workshop delivered one ${project.title.toLowerCase()} to the armory.`,
+    completedAtHour,
+  };
+}
+
+function researchReport(project: ResearchProject, completedAtHour: number): ProjectReport {
+  return {
+    kind: "research",
+    id: project.id,
+    title: `${project.title} complete`,
+    summary: project.completedDescription,
+    completedAtHour,
+  };
+}
+
+export interface MissionRosterOutcome {
+  deployedSoldierIds: readonly string[];
+  survivingSoldierIds: readonly string[];
+  survivorHealth?: Readonly<Record<string, { hp: number; maxHp: number }>>;
+}
+
+export function recordMissionResult(
+  campaign: CampaignState,
+  result: MissionResult,
+  operation: OperationPlan,
+  rosterOutcomeOrCompletedAt?: MissionRosterOutcome | string,
+  completedAtArg = new Date().toISOString(),
+): CampaignState {
+  const rosterOutcome =
+    typeof rosterOutcomeOrCompletedAt === "string" ? undefined : rosterOutcomeOrCompletedAt;
+  const completedAt =
+    typeof rosterOutcomeOrCompletedAt === "string" ? rosterOutcomeOrCompletedAt : completedAtArg;
+  const durationHours = completedOperationDuration(operation);
+  const completedHour = campaign.clock.elapsedHours + durationHours;
+  const completedClock = campaignClockAt(campaign.clock, completedHour, completedHour);
+  const deployedSoldierIds = rosterOutcome?.deployedSoldierIds ?? [];
+  const survivingSoldierIds = new Set(rosterOutcome?.survivingSoldierIds ?? []);
+  const kiaSoldierIds = deployedSoldierIds.filter((id) => !survivingSoldierIds.has(id));
+  const woundRecovery = woundedSoldierRecovery(
+    campaign,
+    deployedSoldierIds,
+    survivingSoldierIds,
+    rosterOutcome?.survivorHealth,
+    completedHour,
+  );
+  const woundedSoldierIds = [...woundRecovery.keys()];
+  const updatedSoldiers = updateRoster(
+    campaign.soldiers,
+    deployedSoldierIds,
+    survivingSoldierIds,
+    result,
+    woundRecovery,
+  );
+  const report: MissionReport = {
+    missionNumber: operation.missionNumber,
+    missionSeed: operation.missionSeed,
+    codename: operation.codename,
+    result,
+    region: operation.region,
+    themeId: operation.themeId,
+    enemyCount: operation.enemyCount,
+    durationHours,
+    reward: result === "success" ? operation.reward : failureReward(),
+    deployedSoldierIds: [...deployedSoldierIds],
+    kiaSoldierIds,
+    woundedSoldierIds,
+    completedAt,
+    summary:
+      result === "success"
+        ? missionSuccessSummary(
+            operation.codename,
+            kiaSoldierIds.length,
+            woundedSoldierIds.length,
+            promotionSummary(campaign.soldiers, updatedSoldiers, deployedSoldierIds),
+          )
+        : missionFailureSummary(kiaSoldierIds.length, deployedSoldierIds.length - kiaSoldierIds.length),
+  };
+  const missionsCompleted = campaign.missionsCompleted + (result === "success" ? 1 : 0);
+  const resources = awardMissionResources(campaign.resources, report.reward);
+  const regionalPanic = updateRegionalPanicForMission(campaign.regionalPanic, operation.region, result);
+  return completeStrategicProgress({
+    ...campaign,
+    clock: completedClock,
+    ufoContact: undefined,
+    strategic: updateStrategic(
+      campaign,
+      result,
+      operation,
+      missionsCompleted,
+      resources,
+      updatedSoldiers,
+      regionalPanic,
+    ),
+    regionalPanic,
+    resources,
+    soldiers: updatedSoldiers,
+    deploymentSoldierIds: normalizeDeploymentSoldierIds(campaign.deploymentSoldierIds, updatedSoldiers),
+    missionsAttempted: operation.missionNumber,
+    missionsCompleted,
+    lastMission: report,
+  });
+}
+
+function updateRegionalPanicForMission(
+  regionalPanic: Record<CouncilRegion, number>,
+  region: string,
+  result: MissionResult,
+): Record<CouncilRegion, number> {
+  return result === "success"
+    ? adjustRegionalPanic(regionalPanic, region, -18)
+    : adjustRegionalPanic(regionalPanic, region, 18, 2);
+}
+
+function missionFailureSummary(casualties: number, survivors: number): string {
+  if (survivors > 0) {
+    const casualtyText =
+      casualties === 0
+        ? "No operatives were lost."
+        : casualties === 1
+          ? "One operative was lost."
+          : `${casualties} operatives were lost.`;
+    return `Operation aborted before recovery. ${survivors} operatives returned to base. ${casualtyText}`;
+  }
+  return "Strike team lost. Command staff are preparing a replacement operation.";
+}
+
+function missionSuccessSummary(codename: string, casualties: number, wounded: number, promotionText: string): string {
+  const casualtyText =
+    casualties === 0
+      ? "No operatives lost."
+      : casualties === 1
+        ? "One operative was lost."
+        : `${casualties} operatives were lost.`;
+  const woundText =
+    wounded === 0
+      ? ""
+      : wounded === 1
+        ? " One survivor is in medical recovery."
+        : ` ${wounded} survivors are in medical recovery.`;
+  return `Operation ${codename} secured. Recovered material is ready for analysis. ${casualtyText}${woundText}${promotionText}`;
+}
+
+function promotionSummary(
+  before: readonly CampaignSoldier[],
+  after: readonly CampaignSoldier[],
+  deployedSoldierIds: readonly string[],
+): string {
+  const deployed = new Set(deployedSoldierIds);
+  const promotions = after.flatMap((soldier) => {
+    if (!deployed.has(soldier.id)) return [];
+    const previous = before.find((candidate) => candidate.id === soldier.id);
+    if (!previous || previous.rank === soldier.rank) return [];
+    return [`${soldier.name} to ${soldier.rank}`];
+  });
+  return promotions.length > 0 ? ` Promotions: ${promotions.join(", ")}.` : "";
+}
+
+function updateRoster(
+  soldiers: readonly CampaignSoldier[],
+  deployedSoldierIds: readonly string[],
+  survivingSoldierIds: ReadonlySet<string>,
+  result: MissionResult,
+  woundRecovery: ReadonlyMap<string, number>,
+): CampaignSoldier[] {
+  const deployed = new Set(deployedSoldierIds);
+  return soldiers.map((soldier) => {
+    if (!deployed.has(soldier.id) || soldier.status === "kia") return soldier;
+    const survived = survivingSoldierIds.has(soldier.id);
+    const creditedSurvival = result === "success" && survived;
+    const survivedMissions = soldier.survivedMissions + (creditedSurvival ? 1 : 0);
+    const woundedUntilHour = woundRecovery.get(soldier.id);
+    return {
+      ...soldier,
+      status: survived ? (woundedUntilHour ? "wounded" : "active") : "kia",
+      missions: soldier.missions + 1,
+      survivedMissions,
+      rank: creditedSurvival ? soldierRank(survivedMissions) : soldier.rank,
+      woundedUntilHour: survived ? woundedUntilHour : undefined,
+    };
+  });
+}
+
+function woundedSoldierRecovery(
+  campaign: CampaignState,
+  deployedSoldierIds: readonly string[],
+  survivingSoldierIds: ReadonlySet<string>,
+  survivorHealth: Readonly<Record<string, { hp: number; maxHp: number }>> | undefined,
+  currentHour: number,
+): Map<string, number> {
+  const recovery = new Map<string, number>();
+  for (const id of deployedSoldierIds) {
+    if (!survivingSoldierIds.has(id)) continue;
+    const health = survivorHealth?.[id];
+    if (!health || health.maxHp <= 0 || health.hp >= health.maxHp) continue;
+    const missingRatio = Math.max(0, Math.min(1, (health.maxHp - Math.max(0, health.hp)) / health.maxHp));
+    const baseHours = Math.min(
+      WOUND_RECOVERY_MAX_HOURS,
+      Math.max(WOUND_RECOVERY_MIN_HOURS, Math.ceil(missingRatio * WOUND_RECOVERY_MAX_HOURS)),
+    );
+    const hours = hasBaseFacility(campaign, MEDBAY_FACILITY_ID)
+      ? Math.max(WOUND_RECOVERY_MIN_HOURS, Math.ceil(baseHours * MEDBAY_WOUND_RECOVERY_MULTIPLIER))
+      : baseHours;
+    recovery.set(id, currentHour + hours);
+  }
+  return recovery;
+}
+
+function updateStrategic(
+  campaign: CampaignState,
+  result: MissionResult,
+  operation: OperationPlan,
+  missionsCompleted: number,
+  resources: CampaignResources,
+  soldiers: readonly CampaignSoldier[],
+  regionalPanic: Record<CouncilRegion, number>,
+): StrategicState {
+  const strategic = campaign.strategic;
+  if (strategic.status !== "active") return strategic;
+
+  const success = result === "success";
+  const trackingUplink = hasBaseFacility(campaign, "radar-2");
+  const threatDelta = success ? (trackingUplink ? -15 : -12) : trackingUplink ? 18 : 24;
+  const threat = Math.max(0, Math.min(100, strategic.threat + threatDelta));
+  const funding = Math.max(0, strategic.funding + (success ? 75 : -120));
+  const score = strategic.score + (success ? 100 + operation.enemyCount * 10 : -50);
+  const canFieldSquad =
+    soldiers.some((soldier) => soldier.status !== "kia") ||
+    resources.credits >= RECRUIT_COST;
+  const panicCollapse = Math.max(...Object.values(regionalPanic)) >= 100;
+  const status =
+    missionsCompleted >= CAMPAIGN_VICTORY_OPERATIONS
+      ? "won"
+      : threat >= 100 || funding <= 0 || !canFieldSquad || panicCollapse
+        ? "lost"
+        : "active";
+
+  return { status, threat, funding, score };
+}
+
+function failureReward(): CampaignResources {
+  return { credits: 50, alloys: 0, elerium: 0, alienData: 0 };
+}
+
+function awardMissionResources(resources: CampaignResources, reward: CampaignResources): CampaignResources {
+  return {
+    credits: resources.credits + reward.credits,
+    alloys: resources.alloys + reward.alloys,
+    elerium: resources.elerium + reward.elerium,
+    alienData: resources.alienData + reward.alienData,
+  };
+}
+
+function canAfford(resources: CampaignResources, cost: CampaignResources): boolean {
+  return (
+    resources.credits >= cost.credits &&
+    resources.alloys >= cost.alloys &&
+    resources.elerium >= cost.elerium &&
+    resources.alienData >= cost.alienData
+  );
+}
+
+function spend(resources: CampaignResources, cost: CampaignResources): CampaignResources {
+  return {
+    credits: resources.credits - cost.credits,
+    alloys: resources.alloys - cost.alloys,
+    elerium: resources.elerium - cost.elerium,
+    alienData: resources.alienData - cost.alienData,
+  };
+}
+
+export function canStartResearch(campaign: CampaignState, id: ResearchId): boolean {
+  return (
+    campaign.strategic.status === "active" &&
+    !campaign.activeResearch &&
+    !campaign.completedResearch.includes(id) &&
+    canAfford(campaign.resources, researchCost(campaign, id))
+  );
+}
+
+export function canCompleteResearch(campaign: CampaignState, id: ResearchId): boolean {
+  return canStartResearch(campaign, id);
+}
+
+export function startResearch(campaign: CampaignState, id: ResearchId): CampaignState {
+  if (!canStartResearch(campaign, id)) return campaign;
+  return {
+    ...campaign,
+    resources: spend(campaign.resources, researchCost(campaign, id)),
+    activeResearch: {
+      projectId: id,
+      startedAtHour: campaign.clock.elapsedHours,
+      completesAtHour: campaign.clock.elapsedHours + researchDuration(campaign, id),
+    },
+  };
+}
+
+export function completeResearch(campaign: CampaignState, id: ResearchId): CampaignState {
+  if (campaign.completedResearch.includes(id)) return campaign;
+  if (campaign.activeResearch?.projectId === id) {
+    return completeResearchProject({
+      ...campaign,
+      activeResearch: undefined,
+      completedResearch: [...campaign.completedResearch, id],
+    }, id);
+  }
+  if (!canStartResearch(campaign, id)) return campaign;
+  return completeResearchProject({
+    ...campaign,
+    resources: spend(campaign.resources, researchCost(campaign, id)),
+    completedResearch: [...campaign.completedResearch, id],
+  }, id);
+}
+
+export function hasResearch(campaign: CampaignState, id: ResearchId): boolean {
+  return campaign.completedResearch.includes(id);
+}
+
+export function completeFinishedResearch(campaign: CampaignState): CampaignState {
+  const active = campaign.activeResearch;
+  if (!active || campaign.clock.elapsedHours < active.completesAtHour) return campaign;
+  if (campaign.completedResearch.includes(active.projectId)) {
+    return { ...campaign, activeResearch: undefined };
+  }
+  return completeResearchProject({
+    ...campaign,
+    activeResearch: undefined,
+    completedResearch: [...campaign.completedResearch, active.projectId],
+  }, active.projectId);
+}
+
+export function researchDuration(campaign: CampaignState, id: ResearchId): number {
+  const base = RESEARCH_PROJECTS.find((project) => project.id === id)?.durationHours ?? 24;
+  return Math.max(6, base - (hasBaseFacility(campaign, "lab-2") ? 6 : 0));
+}
+
+export function researchCost(campaign: CampaignState, id: ResearchId): CampaignResources {
+  const base = RESEARCH_COSTS[id];
+  if (!hasBaseFacility(campaign, "lab-2")) return { ...base };
+  return {
+    credits: Math.max(0, base.credits - 40),
+    alloys: base.alloys,
+    elerium: base.elerium,
+    alienData: Math.max(0, base.alienData - 1),
+  };
+}
+
+function emptyWeaponCounts(): Record<CampaignWeaponId, number> {
+  return { rifle: 0, pistol: 0, plasma: 0 };
+}
+
+function cloneArmory(armory: CampaignArmory): CampaignArmory {
+  return {
+    weapons: { ...armory.weapons },
+  };
+}
+
+function isCampaignWeaponId(value: unknown): value is CampaignWeaponId {
+  return value === "rifle" || value === "pistol" || value === "plasma";
+}
+
+function isManufacturingProjectId(value: unknown): value is ManufacturingProjectId {
+  return value === "rifle" || value === "pistol" || value === "plasma";
+}
+
+function addWeapon(armory: CampaignArmory, weaponId: CampaignWeaponId, count: number): CampaignArmory {
+  return {
+    weapons: {
+      ...armory.weapons,
+      [weaponId]: Math.max(0, armory.weapons[weaponId] + Math.floor(count)),
+    },
+  };
+}
+
+function applyResearchReward(campaign: CampaignState, id: ResearchId): CampaignState {
+  if (id !== "plasmaWeapons") return campaign;
+  return {
+    ...campaign,
+    armory: addWeapon(campaign.armory, "plasma", 1),
+  };
+}
+
+function completeResearchProject(campaign: CampaignState, id: ResearchId): CampaignState {
+  const project = RESEARCH_PROJECTS.find((candidate) => candidate.id === id);
+  if (!project) return campaign;
+  return addProjectReport(applyResearchReward(campaign, id), researchReport(project, campaign.clock.elapsedHours));
+}
+
+export function loadCampaign(): CampaignState | null {
+  if (typeof localStorage === "undefined") return null;
+  const raw = localStorage.getItem(CAMPAIGN_STORAGE_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<CampaignState>;
+    if (
+      parsed.version !== 1 ||
+      typeof parsed.id !== "string" ||
+      typeof parsed.seed !== "number" ||
+      typeof parsed.createdAt !== "string" ||
+      typeof parsed.missionsCompleted !== "number" ||
+      !parsed.base ||
+      typeof parsed.base.lat !== "number" ||
+      typeof parsed.base.lon !== "number" ||
+      typeof parsed.base.region !== "string"
+    ) {
+      return null;
+    }
+    const resources = normalizeResources(parsed.resources);
+    const soldiers = normalizeSoldiers(parsed.soldiers);
+    const regionalPanic = normalizeRegionalPanic(parsed.regionalPanic);
+    const strategic = normalizeCampaignStatus(normalizeStrategic(parsed.strategic), resources, soldiers, regionalPanic);
+    const clock = normalizeClock(parsed.clock);
+    const completedResearch = normalizeResearch(parsed.completedResearch);
+    const armory = normalizeArmory(parsed.armory, soldiers, completedResearch);
+    const normalized: CampaignState = {
+      version: 1,
+      id: parsed.id,
+      seed: parsed.seed,
+      createdAt: parsed.createdAt,
+      base: parsed.base,
+      strategic,
+      regionalPanic,
+      clock,
+      lastFundingReport: normalizeFundingReport(parsed.lastFundingReport),
+      interceptor: normalizeInterceptor(parsed.interceptor, clock),
+      lastInterceptionReport: normalizeInterceptionReport(parsed.lastInterceptionReport),
+      ufoContact: normalizeUfoContact(parsed.ufoContact, clock),
+      resources,
+      armory,
+      soldierLoadouts: normalizeSoldierLoadouts(parsed.soldierLoadouts, soldiers, armory),
+      deploymentSoldierIds: normalizeDeploymentSoldierIds(parsed.deploymentSoldierIds, soldiers),
+      facilities: normalizeFacilities(parsed.facilities),
+      soldiers,
+      completedResearch,
+      activeResearch: normalizeActiveResearch(parsed.activeResearch, clock, completedResearch),
+      activeManufacturing: normalizeActiveManufacturing(parsed.activeManufacturing, clock),
+      activeConstruction: normalizeActiveConstruction(parsed.activeConstruction, clock, parsed.facilities),
+      missionsCompleted: parsed.missionsCompleted,
+      missionsAttempted:
+        typeof parsed.missionsAttempted === "number"
+          ? parsed.missionsAttempted
+          : parsed.missionsCompleted,
+      lastMission:
+        parsed.lastMission &&
+        typeof parsed.lastMission.missionNumber === "number" &&
+        typeof parsed.lastMission.missionSeed === "number" &&
+        (parsed.lastMission.result === "success" || parsed.lastMission.result === "failure") &&
+        typeof parsed.lastMission.region === "string" &&
+        typeof parsed.lastMission.completedAt === "string" &&
+        typeof parsed.lastMission.summary === "string"
+          ? normalizeMissionReport(parsed.lastMission)
+          : undefined,
+      projectReports: normalizeProjectReports(parsed.projectReports),
+    };
+    return completeFinishedConstruction(completeFinishedManufacturing(recoverWoundedSoldiers(completeFinishedResearch(normalized))));
+  } catch {
+    return null;
+  }
+}
+
+function normalizeCampaignStatus(
+  strategic: StrategicState,
+  resources: CampaignResources,
+  soldiers: readonly CampaignSoldier[],
+  regionalPanic: Record<CouncilRegion, number>,
+): StrategicState {
+  if (strategic.status !== "active") return strategic;
+  const canFieldSquad =
+    soldiers.some((soldier) => soldier.status !== "kia") ||
+    resources.credits >= RECRUIT_COST;
+  const panicCollapse = Math.max(...Object.values(regionalPanic)) >= 100;
+  return canFieldSquad && !panicCollapse ? strategic : { ...strategic, status: "lost" };
+}
+
+function normalizeStrategic(value: unknown): StrategicState {
+  if (!value || typeof value !== "object") return { ...STARTING_STRATEGIC };
+  const maybe = value as Partial<StrategicState>;
+  const status =
+    maybe.status === "active" || maybe.status === "won" || maybe.status === "lost"
+      ? maybe.status
+      : STARTING_STRATEGIC.status;
+  return {
+    status,
+    threat: typeof maybe.threat === "number" ? Math.max(0, Math.min(100, maybe.threat)) : STARTING_STRATEGIC.threat,
+    funding: typeof maybe.funding === "number" ? Math.max(0, maybe.funding) : STARTING_STRATEGIC.funding,
+    score: typeof maybe.score === "number" ? maybe.score : STARTING_STRATEGIC.score,
+  };
+}
+
+function normalizeRegionalPanic(value: unknown): Record<CouncilRegion, number> {
+  if (!value || typeof value !== "object") return { ...STARTING_REGIONAL_PANIC };
+  const maybe = value as Partial<Record<CouncilRegion, unknown>>;
+  const result = { ...STARTING_REGIONAL_PANIC };
+  for (const region of COUNCIL_REGIONS) {
+    const panic = maybe[region];
+    result[region] = typeof panic === "number"
+      ? Math.max(0, Math.min(100, Math.round(panic)))
+      : STARTING_REGIONAL_PANIC[region];
+  }
+  return result;
+}
+
+function normalizeClock(value: unknown): CampaignClock {
+  if (!value || typeof value !== "object") return { ...STARTING_CLOCK };
+  const maybe = value as Partial<CampaignClock>;
+  const elapsedHours =
+    typeof maybe.elapsedHours === "number" ? Math.max(0, Math.floor(maybe.elapsedHours)) : STARTING_CLOCK.elapsedHours;
+  return {
+    day: typeof maybe.day === "number" ? Math.max(1, Math.floor(maybe.day)) : 1 + Math.floor(elapsedHours / 24),
+    hour: typeof maybe.hour === "number" ? Math.max(0, Math.min(23, Math.floor(maybe.hour))) : elapsedHours % 24,
+    elapsedHours,
+    lastContactHour:
+      typeof maybe.lastContactHour === "number" ? Math.max(0, Math.floor(maybe.lastContactHour)) : 0,
+    lastFundingHour:
+      typeof maybe.lastFundingHour === "number" ? Math.max(0, Math.floor(maybe.lastFundingHour)) : 0,
+  };
+}
+
+function normalizeFundingReport(value: unknown): FundingReport | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const maybe = value as Partial<FundingReport>;
+  if (
+    typeof maybe.reportNumber !== "number" ||
+    typeof maybe.completedAtHour !== "number" ||
+    typeof maybe.income !== "number" ||
+    typeof maybe.upkeep !== "number" ||
+    typeof maybe.net !== "number" ||
+    typeof maybe.funding !== "number" ||
+    typeof maybe.threat !== "number" ||
+    typeof maybe.score !== "number" ||
+    typeof maybe.summary !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    reportNumber: Math.max(1, Math.floor(maybe.reportNumber)),
+    completedAtHour: Math.max(0, Math.floor(maybe.completedAtHour)),
+    income: Math.floor(maybe.income),
+    upkeep: Math.max(0, Math.floor(maybe.upkeep)),
+    net: Math.floor(maybe.net),
+    funding: Math.max(0, Math.floor(maybe.funding)),
+    threat: Math.max(0, Math.min(100, Math.floor(maybe.threat))),
+    score: Math.floor(maybe.score),
+    summary: maybe.summary,
+  };
+}
+
+function normalizeInterceptionReport(value: unknown): InterceptionReport | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const maybe = value as Partial<InterceptionReport>;
+  if (
+    typeof maybe.contactId !== "string" ||
+    (maybe.result !== "crashed" && maybe.result !== "escaped") ||
+    typeof maybe.region !== "string" ||
+    typeof maybe.strength !== "number" ||
+    typeof maybe.interceptorDamage !== "number" ||
+    typeof maybe.completedAtHour !== "number" ||
+    typeof maybe.summary !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    contactId: maybe.contactId,
+    result: maybe.result,
+    region: maybe.region,
+    strength: Math.max(1, Math.floor(maybe.strength)),
+    interceptorDamage: Math.max(0, Math.min(100, Math.floor(maybe.interceptorDamage))),
+    completedAtHour: Math.max(0, Math.floor(maybe.completedAtHour)),
+    summary: maybe.summary,
+  };
+}
+
+function normalizeInterceptor(value: unknown, clock: CampaignClock): InterceptorState {
+  if (!value || typeof value !== "object") return { ...STARTING_INTERCEPTOR };
+  const maybe = value as Partial<InterceptorState>;
+  const repairedAtHour =
+    typeof maybe.repairedAtHour === "number" ? Math.max(0, Math.floor(maybe.repairedAtHour)) : undefined;
+  const damage = typeof maybe.damage === "number" ? Math.max(0, Math.min(100, Math.floor(maybe.damage))) : 0;
+  if (repairedAtHour !== undefined && repairedAtHour <= clock.elapsedHours) {
+    return {
+      damage: 0,
+      sorties: typeof maybe.sorties === "number" ? Math.max(0, Math.floor(maybe.sorties)) : 0,
+    };
+  }
+  return {
+    damage,
+    sorties: typeof maybe.sorties === "number" ? Math.max(0, Math.floor(maybe.sorties)) : 0,
+    repairedAtHour,
+  };
+}
+
+function normalizeUfoContact(value: unknown, clock: CampaignClock): UfoContact | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const maybe = value as Partial<UfoContact>;
+  if (
+    typeof maybe.id !== "string" ||
+    typeof maybe.lat !== "number" ||
+    typeof maybe.lon !== "number" ||
+    typeof maybe.region !== "string" ||
+    typeof maybe.detectedAtHour !== "number" ||
+    typeof maybe.expiresAtHour !== "number" ||
+    typeof maybe.missionSeed !== "number" ||
+    typeof maybe.strength !== "number" ||
+    maybe.expiresAtHour <= clock.elapsedHours
+  ) {
+    return undefined;
+  }
+  return {
+    id: maybe.id,
+    status: maybe.status === "crashed" ? "crashed" : "tracked",
+    lat: Math.max(-90, Math.min(90, Math.round(maybe.lat * 10) / 10)),
+    lon: Math.max(-180, Math.min(180, Math.round(maybe.lon * 10) / 10)),
+    region: maybe.region,
+    detectedAtHour: Math.max(0, Math.floor(maybe.detectedAtHour)),
+    interceptedAtHour:
+      typeof maybe.interceptedAtHour === "number" ? Math.max(0, Math.floor(maybe.interceptedAtHour)) : undefined,
+    expiresAtHour: Math.max(0, Math.floor(maybe.expiresAtHour)),
+    missionSeed: maybe.missionSeed >>> 0,
+    strength: Math.max(1, Math.floor(maybe.strength)),
+    interceptorDamage:
+      typeof maybe.interceptorDamage === "number" ? Math.max(0, Math.floor(maybe.interceptorDamage)) : undefined,
+  };
+}
+
+function normalizeMissionReport(report: MissionReport): MissionReport {
+  return {
+    missionNumber: report.missionNumber,
+    missionSeed: report.missionSeed,
+    codename: typeof report.codename === "string" ? report.codename : `Mission ${report.missionNumber}`,
+    result: report.result,
+    region: report.region,
+    themeId: normalizeTheme(report.themeId),
+    enemyCount: typeof report.enemyCount === "number" ? report.enemyCount : 0,
+    durationHours: typeof report.durationHours === "number" ? Math.max(0, Math.floor(report.durationHours)) : 0,
+    reward: normalizeResources(report.reward),
+    deployedSoldierIds: normalizeStringList(report.deployedSoldierIds),
+    kiaSoldierIds: normalizeStringList(report.kiaSoldierIds),
+    woundedSoldierIds: normalizeStringList(report.woundedSoldierIds),
+    completedAt: report.completedAt,
+    summary: report.summary,
+  };
+}
+
+function normalizeProjectReports(value: unknown): ProjectReport[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): ProjectReport[] => {
+    if (!item || typeof item !== "object") return [];
+    const maybe = item as Partial<ProjectReport>;
+    if (
+      (maybe.kind !== "research" && maybe.kind !== "manufacturing" && maybe.kind !== "construction") ||
+      typeof maybe.id !== "string" ||
+      typeof maybe.title !== "string" ||
+      typeof maybe.summary !== "string" ||
+      typeof maybe.completedAtHour !== "number"
+    ) {
+      return [];
+    }
+    return [{
+      kind: maybe.kind,
+      id: maybe.id,
+      title: maybe.title,
+      summary: maybe.summary,
+      completedAtHour: Math.max(0, Math.floor(maybe.completedAtHour)),
+    }];
+  }).slice(0, PROJECT_REPORT_LIMIT);
+}
+
+function normalizeTheme(value: unknown): OperationTheme {
+  return value === "farmland" || value === "urban" || value === "desert" ? value : "farmland";
+}
+
+function normalizeResources(value: unknown): CampaignResources {
+  if (!value || typeof value !== "object") return { ...STARTING_RESOURCES };
+  const maybe = value as Partial<CampaignResources>;
+  return {
+    credits: typeof maybe.credits === "number" ? maybe.credits : STARTING_RESOURCES.credits,
+    alloys: typeof maybe.alloys === "number" ? maybe.alloys : STARTING_RESOURCES.alloys,
+    elerium: typeof maybe.elerium === "number" ? maybe.elerium : STARTING_RESOURCES.elerium,
+    alienData: typeof maybe.alienData === "number" ? maybe.alienData : STARTING_RESOURCES.alienData,
+  };
+}
+
+function normalizeArmory(
+  value: unknown,
+  soldiers: readonly CampaignSoldier[],
+  completedResearch: readonly ResearchId[],
+): CampaignArmory {
+  const defaultArmory = cloneArmory(STARTING_ARMORY);
+  defaultArmory.weapons.rifle = Math.max(defaultArmory.weapons.rifle, soldiers.length);
+  defaultArmory.weapons.plasma = completedResearch.includes("plasmaWeapons") ? 1 : 0;
+
+  if (!value || typeof value !== "object") return defaultArmory;
+  const maybe = value as Partial<CampaignArmory>;
+  const weapons = maybe.weapons && typeof maybe.weapons === "object"
+    ? (maybe.weapons as Partial<Record<CampaignWeaponId, number>>)
+    : {};
+  return {
+    weapons: {
+      rifle: Math.max(
+        soldiers.length,
+        typeof weapons.rifle === "number" ? Math.floor(weapons.rifle) : defaultArmory.weapons.rifle,
+      ),
+      pistol: Math.max(
+        0,
+        typeof weapons.pistol === "number" ? Math.floor(weapons.pistol) : defaultArmory.weapons.pistol,
+      ),
+      plasma: Math.max(
+        completedResearch.includes("plasmaWeapons") ? 1 : 0,
+        typeof weapons.plasma === "number" ? Math.floor(weapons.plasma) : defaultArmory.weapons.plasma,
+      ),
+    },
+  };
+}
+
+function normalizeSoldierLoadouts(
+  value: unknown,
+  soldiers: readonly CampaignSoldier[],
+  armory: CampaignArmory,
+): Record<string, CampaignWeaponId> {
+  const raw = value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : {};
+  const result: Record<string, CampaignWeaponId> = {};
+  const used = emptyWeaponCounts();
+
+  for (const soldier of soldiers) {
+    const rawWeapon = raw[soldier.id];
+    const preferred: CampaignWeaponId = isCampaignWeaponId(rawWeapon) ? rawWeapon : "rifle";
+    const weaponId =
+      used[preferred] < armory.weapons[preferred] && soldier.status !== "kia"
+        ? preferred
+        : "rifle";
+    result[soldier.id] = weaponId;
+    if (soldier.status !== "kia") used[weaponId] += 1;
+  }
+
+  return result;
+}
+
+function normalizeDeploymentSoldierIds(
+  value: unknown,
+  soldiers: readonly CampaignSoldier[],
+): string[] {
+  const activeIds = new Set(soldiers.filter((soldier) => soldier.status === "active").map((soldier) => soldier.id));
+  if (!Array.isArray(value)) {
+    return startingDeployment(soldiers.filter((soldier) => activeIds.has(soldier.id)));
+  }
+  const seen = new Set<string>();
+  return value.flatMap((id): string[] => {
+    if (typeof id !== "string" || seen.has(id) || !activeIds.has(id) || seen.size >= DEPLOYMENT_SIZE) return [];
+    seen.add(id);
+    return [id];
+  });
+}
+
+function normalizeSoldiers(value: unknown): CampaignSoldier[] {
+  if (!Array.isArray(value)) return startingSoldiers();
+  const seen = new Set<string>();
+  const soldiers = value.flatMap((item, index): CampaignSoldier[] => {
+    if (!item || typeof item !== "object") return [];
+    const maybe = item as Partial<CampaignSoldier>;
+    if (typeof maybe.id !== "string" || typeof maybe.name !== "string" || seen.has(maybe.id)) {
+      return [];
+    }
+    seen.add(maybe.id);
+    return [
+      {
+        id: maybe.id,
+        name: maybe.name,
+        status:
+          maybe.status === "kia"
+            ? "kia"
+            : maybe.status === "wounded"
+              ? "wounded"
+              : "active",
+        rank:
+          maybe.rank === "rookie" ||
+          maybe.rank === "squaddie" ||
+          maybe.rank === "sergeant" ||
+          maybe.rank === "captain"
+            ? maybe.rank
+            : soldierRank(
+                typeof maybe.survivedMissions === "number"
+                  ? Math.max(0, Math.floor(maybe.survivedMissions))
+                  : 0,
+              ),
+        missions: typeof maybe.missions === "number" ? Math.max(0, Math.floor(maybe.missions)) : 0,
+        survivedMissions:
+          typeof maybe.survivedMissions === "number"
+            ? Math.max(0, Math.floor(maybe.survivedMissions))
+            : 0,
+        woundedUntilHour:
+          maybe.status === "wounded" && typeof maybe.woundedUntilHour === "number"
+            ? Math.max(0, Math.floor(maybe.woundedUntilHour))
+            : undefined,
+      },
+    ];
+  });
+  return soldiers.length > 0 ? soldiers : startingSoldiers();
+}
+
+function normalizeResearch(value: unknown): ResearchId[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((id): id is ResearchId => id === "plasmaWeapons" || id === "alloyArmor");
+}
+
+function normalizeActiveResearch(
+  value: unknown,
+  clock: CampaignClock,
+  completedResearch: readonly ResearchId[],
+): ActiveResearch | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const maybe = value as Partial<ActiveResearch>;
+  const projectId = maybe.projectId;
+  if (
+    (projectId !== "plasmaWeapons" && projectId !== "alloyArmor") ||
+    completedResearch.includes(projectId) ||
+    typeof maybe.startedAtHour !== "number" ||
+    typeof maybe.completesAtHour !== "number"
+  ) {
+    return undefined;
+  }
+  return {
+    projectId,
+    startedAtHour: Math.max(0, Math.floor(maybe.startedAtHour)),
+    completesAtHour: Math.max(clock.elapsedHours, Math.floor(maybe.completesAtHour)),
+  };
+}
+
+function normalizeActiveManufacturing(
+  value: unknown,
+  clock: CampaignClock,
+): ActiveManufacturing | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const maybe = value as Partial<ActiveManufacturing>;
+  if (
+    !isManufacturingProjectId(maybe.projectId) ||
+    typeof maybe.startedAtHour !== "number" ||
+    typeof maybe.completesAtHour !== "number"
+  ) {
+    return undefined;
+  }
+  return {
+    projectId: maybe.projectId,
+    startedAtHour: Math.max(0, Math.floor(maybe.startedAtHour)),
+    completesAtHour: Math.max(clock.elapsedHours, Math.floor(maybe.completesAtHour)),
+  };
+}
+
+function normalizeActiveConstruction(
+  value: unknown,
+  clock: CampaignClock,
+  facilities: unknown,
+): ActiveConstruction | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const maybe = value as Partial<ActiveConstruction>;
+  if (
+    typeof maybe.facilityId !== "string" ||
+    findBaseFacility(maybe.facilityId) === undefined ||
+    normalizeFacilities(facilities).includes(maybe.facilityId) ||
+    typeof maybe.startedAtHour !== "number" ||
+    typeof maybe.completesAtHour !== "number"
+  ) {
+    return undefined;
+  }
+  return {
+    facilityId: maybe.facilityId,
+    startedAtHour: Math.max(0, Math.floor(maybe.startedAtHour)),
+    completesAtHour: Math.max(clock.elapsedHours, Math.floor(maybe.completesAtHour)),
+  };
+}
+
+function normalizeFacilities(value: unknown): string[] {
+  if (!Array.isArray(value)) return starterFacilityIds();
+  const stored = value.filter((item): item is string => typeof item === "string");
+  return facilitiesForIds([...starterFacilityIds(), ...stored]).map((facility) => facility.id);
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function hasPowerForFacility(campaign: CampaignState, facility: BaseFacility): boolean {
+  const summary = summarizeBaseFacilities(constructedFacilities(campaign));
+  return summary.powerUsed + facility.powerUse <= summary.powerCapacity + facility.powerOutput;
+}
+
+export function saveCampaign(campaign: CampaignState): void {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(CAMPAIGN_STORAGE_KEY, JSON.stringify(campaign));
+}
+
+export function clearCampaign(): void {
+  if (typeof localStorage === "undefined") return;
+  localStorage.removeItem(CAMPAIGN_STORAGE_KEY);
+}
