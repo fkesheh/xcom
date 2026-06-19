@@ -17,6 +17,7 @@ import {
   MeshStandardMaterial,
   PerspectiveCamera,
   PointLight,
+  Raycaster,
   RingGeometry,
   Scene,
   SphereGeometry,
@@ -25,6 +26,7 @@ import {
   SRGBColorSpace,
   type Material,
   type Texture,
+  Vector2,
   Vector3,
   WebGLRenderer,
 } from "three";
@@ -54,7 +56,6 @@ import {
   difficultyConfig,
   facilityConstructionDuration,
   hasResearch,
-  highestRegionalPanic,
   RECRUIT_COST,
   type ManufacturingProject,
   MANUFACTURING_PROJECTS,
@@ -141,451 +142,166 @@ const CSS = `
   overflow: hidden;
   color: #e7f7ff;
   background:
-    radial-gradient(circle at 54% 40%, rgba(22,60,76,.55), transparent 36%),
+    radial-gradient(circle at 42% 48%, rgba(22,60,76,.5), transparent 40%),
     linear-gradient(160deg, #02070d, #07131d 54%, #010308);
-  font: 12px/1.4 Inter, ui-sans-serif, system-ui, sans-serif;
-  letter-spacing: .02em;
+  font: 13px/1.45 Inter, ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: .01em;
 }
 #base-view::before {
   content: "";
   position: absolute;
   inset: 0;
-  z-index: 2;
+  z-index: 1;
   pointer-events: none;
-  background:
-    linear-gradient(90deg, rgba(103,232,249,.035) 1px, transparent 1px),
-    linear-gradient(rgba(103,232,249,.03) 1px, transparent 1px),
-    radial-gradient(circle at 50% 48%, transparent 44%, rgba(0,0,0,.58) 100%);
-  background-size: 38px 38px, 38px 38px, auto;
-  mix-blend-mode: screen;
+  background: radial-gradient(circle at 46% 54%, transparent 36%, rgba(0,0,0,.68) 100%);
 }
-#base-view canvas {
+#base-view canvas,
+#base-view .base-canvas {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
 }
-#base-view .base-canvas {
+#base-view .base-canvas { z-index: 0; }
+#base-view .base-topbar {
   position: absolute;
-  inset: 0;
-}
-#base-view .base-panel {
-  position: absolute;
-  z-index: 4;
-  width: min(390px, calc(100vw - 28px));
-  padding: 16px;
-  overflow: hidden;
-  border: 1px solid rgba(103,232,249,.28);
-  border-radius: 10px;
-  background:
-    linear-gradient(145deg, rgba(13,31,43,.93), rgba(4,10,16,.94) 62%),
-    rgba(4,10,16,.94);
-  box-shadow: 0 24px 80px rgba(0,0,0,.42), inset 0 1px rgba(255,255,255,.035);
+  top: 0; left: 0; right: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 52px;
+  padding: 0 16px;
+  box-sizing: border-box;
+  border-bottom: 1px solid rgba(103,232,249,.22);
+  background: linear-gradient(180deg, rgba(6,14,22,.9), rgba(6,14,22,.62));
   backdrop-filter: blur(10px);
 }
-#base-view .base-panel::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 38%;
-  height: 2px;
-  background: linear-gradient(90deg, #67e8f9, transparent);
+#base-view .topbar-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
 }
-#base-view .base-left {
-  top: max(18px, env(safe-area-inset-top));
-  left: max(18px, env(safe-area-inset-left));
-}
-#base-view .base-right {
-  right: max(18px, env(safe-area-inset-right));
-  bottom: max(18px, env(safe-area-inset-bottom));
-  max-height: calc(100vh - 36px);
-  overflow: auto;
-}
-#base-view .eyebrow {
+#base-view .brand-name {
   color: #67e8f9;
-  font: 800 9px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
-  letter-spacing: .2em;
+  font: 800 13px/1 ui-monospace, "SF Mono", Menlo, monospace;
+  letter-spacing: .22em;
   text-transform: uppercase;
 }
-#base-view h1 {
-  margin: 7px 0 10px;
-  font-size: clamp(34px, 5vw, 58px);
-  line-height: .88;
-  letter-spacing: .04em;
-  text-transform: uppercase;
-}
-#base-view h2 {
-  margin: 7px 0 8px;
-  font-size: 21px;
-  line-height: 1;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-}
-#base-view p {
-  margin: 0;
+#base-view .brand-region {
   color: #9db5c5;
+  font: 700 12px/1 ui-monospace, monospace;
+  letter-spacing: .1em;
+  text-transform: uppercase;
 }
-#base-view .base-coords {
-  margin-top: 11px;
+#base-view .brand-clock {
   color: #fbbf24;
-  font: 850 13px/1.3 ui-monospace, monospace;
-  text-transform: uppercase;
+  font: 700 12px/1 ui-monospace, monospace;
+  letter-spacing: .06em;
 }
-#base-view .base-stats {
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
+#base-view .topbar-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
   gap: 7px;
-  margin-top: 15px;
 }
-#base-view .base-stat {
-  padding: 9px;
-  border: 1px solid rgba(255,255,255,.07);
-  border-radius: 7px;
-  background: rgba(0,0,0,.16);
+#base-view .top-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid rgba(103,232,249,.24);
+  border-radius: 999px;
+  color: #e7f7ff;
+  background: rgba(8,28,40,.55);
+  font: 700 12px/1 ui-monospace, monospace;
+  letter-spacing: .03em;
+  white-space: nowrap;
 }
-#base-view .base-stat span {
-  display: block;
-  color: #7190a4;
-  font: 750 8px/1 ui-monospace, monospace;
-  letter-spacing: .12em;
-  text-transform: uppercase;
-}
-#base-view .base-stat b {
-  display: block;
-  margin-top: 5px;
-  color: #e8fbff;
-  font: 800 12px/1 ui-monospace, monospace;
-}
-#base-view .facility-list {
-  display: grid;
-  gap: 7px;
-  max-height: min(360px, 45vh);
-  margin: 13px 0;
+#base-view .top-chip .chip-icon { color: #67e8f9; font-size: 13px; }
+#base-view .top-chip.warn { border-color: rgba(251,191,36,.5); }
+#base-view .top-chip.warn .chip-icon { color: #fbbf24; }
+#base-view .top-chip.danger { border-color: rgba(251,113,133,.5); color: #fecaca; }
+#base-view .top-chip.danger .chip-icon { color: #fb7185; }
+#base-view .base-sidebar {
+  position: absolute;
+  top: 64px;
+  right: 12px;
+  bottom: 12px;
+  width: min(380px, calc(100vw - 24px));
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
   overflow: auto;
-  padding-right: 3px;
-}
-#base-view .facility {
-  padding: 10px;
-  border: 1px solid rgba(103,232,249,.16);
-  border-radius: 8px;
-  background: rgba(2,12,20,.48);
-}
-#base-view .facility strong {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  color: #f1fbff;
-  font: 850 11px/1.2 ui-monospace, monospace;
-  text-transform: uppercase;
-}
-#base-view .facility em {
-  color: #4ade80;
-  font-style: normal;
-}
-#base-view .facility p {
-  margin-top: 6px;
-  font-size: 10px;
-}
-#base-view .expansion-list {
-  display: grid;
-  gap: 8px;
-  margin: 13px 0;
-}
-#base-view .expansion-card {
-  padding: 11px;
-  border: 1px solid rgba(251,191,36,.24);
-  border-radius: 8px;
-  background: rgba(35,24,4,.18);
-}
-#base-view .expansion-card strong {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  color: #fef3c7;
-  font: 850 11px/1.2 ui-monospace, monospace;
-  text-transform: uppercase;
-}
-#base-view .expansion-card em {
-  color: #fbbf24;
-  font-style: normal;
-}
-#base-view .expansion-card p {
-  margin-top: 7px;
-  color: #b9c7d2;
-  font-size: 10px;
-}
-#base-view .expansion-card button {
-  width: 100%;
-  margin-top: 9px;
-}
-#base-view .expansion-card.blocked {
-  border-color: rgba(148,163,184,.18);
-  background: rgba(2,12,20,.34);
-}
-#base-view .expansion-card.active {
-  border-color: rgba(103,232,249,.38);
-  background: rgba(8,35,47,.36);
-}
-#base-view .base-report {
-  margin: 13px 0;
-  padding: 12px;
-  border: 1px solid rgba(251,191,36,.24);
-  border-radius: 8px;
-  background: rgba(35,24,4,.22);
-}
-#base-view .strategic-card {
-  margin-top: 13px;
-  padding: 12px;
-  border: 1px solid rgba(103,232,249,.18);
-  border-radius: 8px;
-  background: rgba(2,12,20,.48);
-}
-#base-view .strategic-card strong {
-  display: block;
-  color: #e8fbff;
-  font: 850 12px/1.2 ui-monospace, monospace;
-  text-transform: uppercase;
-}
-#base-view .strategic-card p {
-  margin-top: 7px;
-  color: #adc5d2;
-  font-size: 10px;
-}
-#base-view .strategic-card.won {
-  border-color: rgba(74,222,128,.35);
-  background: rgba(10,35,22,.35);
-}
-#base-view .strategic-card.lost {
-  border-color: rgba(251,113,133,.42);
-  background: rgba(45,11,18,.36);
+  border: 1px solid rgba(103,232,249,.22);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(8,18,28,.86), rgba(4,10,16,.9));
+  box-shadow: 0 24px 80px rgba(0,0,0,.5);
+  backdrop-filter: blur(10px);
 }
 #base-view .operation-card {
-  margin: 13px 0;
-  padding: 12px;
-  border: 1px solid rgba(103,232,249,.24);
-  border-radius: 8px;
-  background: rgba(2,12,20,.58);
+  position: relative;
+  padding: 14px;
+  border: 1px solid rgba(103,232,249,.5);
+  border-radius: 12px;
+  background: linear-gradient(160deg, rgba(10,34,46,.92), rgba(4,16,24,.94));
+  box-shadow: 0 0 0 1px rgba(103,232,249,.1), 0 10px 38px rgba(8,80,100,.26);
 }
-#base-view .operation-card strong {
-  display: block;
+#base-view .op-eyebrow {
   color: #67e8f9;
-  font: 850 12px/1.2 ui-monospace, monospace;
+  font: 800 12px/1 ui-monospace, monospace;
+  letter-spacing: .18em;
   text-transform: uppercase;
 }
-#base-view .operation-card p {
-  margin-top: 7px;
-  color: #adc5d2;
-  font-size: 10px;
+#base-view .op-title {
+  margin: 6px 0 4px;
+  color: #e7f7ff;
+  font: 800 18px/1.15 Inter, ui-sans-serif, sans-serif;
+  letter-spacing: .02em;
 }
-#base-view .operation-meta {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-  margin-top: 9px;
+#base-view .op-region {
+  color: #9db5c5;
+  font: 700 12px/1.3 ui-monospace, monospace;
 }
-#base-view .operation-meta span {
-  padding: 6px;
-  border: 1px solid rgba(255,255,255,.07);
-  border-radius: 6px;
-  color: #e8fbff;
-  background: rgba(0,0,0,.15);
-  font: 800 9px/1.1 ui-monospace, monospace;
-  text-transform: uppercase;
-}
-#base-view .research-card,
-#base-view .manufacturing-card {
-  margin: 13px 0;
-  padding: 12px;
-  border: 1px solid rgba(103,232,249,.18);
-  border-radius: 8px;
-  background: rgba(2,12,20,.48);
-}
-#base-view .roster-card {
-  margin: 13px 0;
-  padding: 12px;
-  border: 1px solid rgba(103,232,249,.18);
-  border-radius: 8px;
-  background: rgba(2,12,20,.48);
-}
-#base-view .roster-head {
+#base-view .op-chips {
   display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  color: #e8fbff;
-  font: 850 12px/1.2 ui-monospace, monospace;
-  text-transform: uppercase;
-}
-#base-view .roster-list {
-  display: grid;
+  flex-wrap: wrap;
   gap: 6px;
-  margin-top: 9px;
+  margin: 9px 0;
 }
-#base-view .soldier-row {
-  display: grid;
-  grid-template-columns: auto minmax(74px, 1fr) auto auto minmax(98px, .8fr);
-  gap: 8px;
-  align-items: center;
-  padding: 7px;
-  border: 1px solid rgba(255,255,255,.07);
-  border-radius: 6px;
-  color: #e8fbff;
-  background: rgba(0,0,0,.16);
-  font: 800 9px/1.1 ui-monospace, monospace;
-  text-transform: uppercase;
-}
-#base-view .soldier-row.kia {
-  color: #fb7185;
-  opacity: .72;
-}
-#base-view .soldier-row.wounded {
-  color: #fbbf24;
-}
-#base-view .deploy-toggle {
+#base-view .op-chip {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: 4px;
-  color: #67e8f9;
-  font: 850 8px/1 ui-monospace, monospace;
-}
-#base-view .deploy-toggle input {
-  width: 13px;
-  height: 13px;
-  accent-color: #67e8f9;
-}
-#base-view .deploy-toggle:has(input:disabled) {
-  color: #64748b;
-  opacity: .65;
-}
-#base-view .soldier-row select {
-  min-width: 98px;
-  color: #e8fbff;
-  border: 1px solid rgba(103,232,249,.22);
-  border-radius: 6px;
-  background: rgba(1,9,15,.85);
-  font: 800 9px/1 ui-monospace, monospace;
-  letter-spacing: .05em;
-  text-transform: uppercase;
-}
-#base-view .soldier-row select:disabled {
-  opacity: .45;
-}
-#base-view .roster-card button {
-  width: 100%;
-  margin-top: 10px;
-}
-#base-view .research-card strong,
-#base-view .manufacturing-card strong {
-  display: block;
-  color: #e8fbff;
-  font: 850 12px/1.2 ui-monospace, monospace;
-  text-transform: uppercase;
-}
-#base-view .research-card p,
-#base-view .manufacturing-card p {
-  margin-top: 7px;
-  color: #adc5d2;
-  font-size: 10px;
-}
-#base-view .research-card button,
-#base-view .manufacturing-card button {
-  width: 100%;
-  margin-top: 10px;
-}
-#base-view .base-report strong {
-  display: block;
-  color: #fbbf24;
-  font: 850 12px/1.2 ui-monospace, monospace;
-  text-transform: uppercase;
-}
-#base-view .base-report p {
-  margin-top: 7px;
-  color: #adc5d2;
-  font-size: 10px;
-}
-#base-view .base-actions {
-  display: flex;
-  gap: 8px;
-}
-#base-view button {
-  min-height: 42px;
-  padding: 0 13px;
-  cursor: pointer;
-  color: #ecfeff;
-  border: 1px solid rgba(132,165,188,.32);
-  border-radius: 7px;
-  background: linear-gradient(180deg, rgba(34,51,65,.95), rgba(11,24,34,.96));
-  font: 800 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
-  letter-spacing: .07em;
-  text-transform: uppercase;
-}
-#base-view button.primary {
-  flex: 1;
-  border-color: rgba(103,232,249,.78);
-  background: linear-gradient(180deg, rgba(17,94,117,.98), rgba(8,49,65,.98));
-}
-#base-view button:hover {
-  border-color: rgba(103,232,249,.9);
-  background: linear-gradient(180deg, rgba(38,76,92,.98), rgba(11,39,52,.98));
-}
-#base-view button:disabled {
-  cursor: default;
-  opacity: .42;
-}
-#base-view .base-hint {
-  position: absolute;
-  left: 50%;
-  bottom: max(22px, env(safe-area-inset-bottom));
-  z-index: 3;
-  width: min(600px, calc(100vw - 36px));
-  padding: 10px 14px;
-  border: 1px solid rgba(103,232,249,.16);
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid rgba(103,232,249,.26);
   border-radius: 999px;
-  color: #94aebe;
-  background: rgba(0,0,0,.3);
-  text-align: center;
-  transform: translateX(-50%);
-  font: 700 10px/1.3 ui-monospace, monospace;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-#base-view .difficulty-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 8px;
-  padding: 4px 10px;
-  border: 1px solid rgba(251,191,36,.42);
-  border-radius: 999px;
-  color: #fbbf24;
-  background: rgba(35,24,4,.32);
-  font: 800 9px/1 ui-monospace, monospace;
-  letter-spacing: .12em;
-  text-transform: uppercase;
-}
-#base-view .difficulty-chip::before {
-  content: "◆";
-  color: #fbbf24;
+  color: #cfeaf6;
+  background: rgba(8,28,40,.5);
+  font: 700 12px/1 ui-monospace, monospace;
+  letter-spacing: .03em;
+  white-space: nowrap;
 }
 #base-view .mission-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin: 9px 0 0;
-  padding: 4px 10px;
+  margin: 8px 0 0;
+  padding: 5px 11px;
   border: 1px solid rgba(103,232,249,.4);
   border-radius: 999px;
-  color: #e8fbff;
+  color: #e7f7ff;
   background: rgba(8,35,47,.5);
-  font: 800 9px/1 ui-monospace, monospace;
-  letter-spacing: .12em;
+  font: 700 12px/1 ui-monospace, monospace;
+  letter-spacing: .1em;
   text-transform: uppercase;
 }
-#base-view .mission-chip .mission-icon {
-  color: #67e8f9;
-  font-size: 11px;
-}
+#base-view .mission-chip .mission-icon { color: #67e8f9; font-size: 13px; }
 #base-view .mission-chip.crashSite { border-color: rgba(103,232,249,.4); }
 #base-view .mission-chip.terror { border-color: rgba(251,113,133,.55); color: #fecaca; }
 #base-view .mission-chip.terror .mission-icon { color: #fb7185; }
@@ -593,82 +309,439 @@ const CSS = `
 #base-view .mission-chip.landedUfo .mission-icon { color: #a78bfa; }
 #base-view .mission-chip.baseDefense { border-color: rgba(251,191,36,.55); color: #fde68a; }
 #base-view .mission-chip.baseDefense .mission-icon { color: #fbbf24; }
-#base-view .operation-objective {
-  margin-top: 7px;
+#base-view .airborne-banner {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 11px;
+  align-items: start;
+  margin-top: 4px;
+  padding: 11px;
+  border: 1px solid rgba(251,191,36,.45);
+  border-radius: 10px;
+  background: rgba(35,24,4,.26);
+}
+#base-view .airborne-banner.engaging { border-color: rgba(251,113,133,.5); background: rgba(45,11,18,.28); }
+#base-view .airborne-banner.escaped { border-color: rgba(148,163,184,.32); background: rgba(2,12,20,.4); }
+#base-view .airborne-banner .banner-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px; height: 32px;
+  border: 1px solid rgba(251,191,36,.6);
+  border-radius: 8px;
   color: #fbbf24;
-  font: 800 9px/1.3 ui-monospace, monospace;
+  font-size: 16px;
+}
+#base-view .airborne-banner.engaging .banner-icon { border-color: rgba(251,113,133,.6); color: #fb7185; }
+#base-view .airborne-banner.escaped .banner-icon { border-color: rgba(148,163,184,.4); color: #94a3b8; }
+#base-view .airborne-banner .banner-body strong {
+  display: block;
+  color: #fef3c7;
+  font: 800 13px/1.2 ui-monospace, monospace;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+#base-view .airborne-banner.engaging .banner-body strong { color: #fecaca; }
+#base-view .airborne-banner.escaped .banner-body strong { color: #cbd5e1; }
+#base-view .airborne-banner .banner-body p {
+  margin: 5px 0 0;
+  color: #c2d2dd;
+  font: 500 12px/1.4 Inter, sans-serif;
+  letter-spacing: 0;
+  text-transform: none;
+}
+#base-view .airborne-banner .banner-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 9px;
+}
+#base-view .airborne-banner .banner-actions button { flex: 1; }
+#base-view .objective-strip {
+  padding: 11px 12px;
+  border: 1px solid rgba(103,232,249,.2);
+  border-radius: 10px;
+  background: rgba(2,12,20,.45);
+}
+#base-view .objective-strip .obj-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  color: #cfeaf6;
+  font: 700 12px/1.2 ui-monospace, monospace;
   letter-spacing: .06em;
   text-transform: uppercase;
 }
-#base-view .market-card {
-  margin: 13px 0;
-  padding: 12px;
+#base-view .objective-strip .obj-head b { color: #67e8f9; }
+#base-view .progress {
+  position: relative;
+  height: 7px;
+  margin: 7px 0;
+  border-radius: 999px;
+  background: rgba(103,232,249,.14);
+  overflow: hidden;
+}
+#base-view .progress > i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #22d3ee, #67e8f9);
+}
+#base-view .progress.danger > i { background: linear-gradient(90deg, #fb7185, #f43f5e); }
+#base-view .objective-strip .obj-summary {
+  margin: 0;
+  color: #9db5c5;
+  font: 500 12px/1.4 Inter, sans-serif;
+  letter-spacing: 0;
+  text-transform: none;
+}
+#base-view .tablist {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
   border: 1px solid rgba(103,232,249,.18);
+  border-radius: 10px;
+  background: rgba(2,12,20,.5);
+}
+#base-view .tab {
+  flex: 1;
+  min-height: 34px;
+  padding: 0 6px;
+  cursor: pointer;
+  color: #9db5c5;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  font: 700 12px/1 ui-monospace, monospace;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+#base-view .tab:hover { color: #cfeaf6; background: rgba(103,232,249,.08); }
+#base-view .tab[aria-selected="true"] {
+  color: #04141c;
+  border-color: rgba(103,232,249,.6);
+  background: linear-gradient(180deg, #8feffb, #22d3ee);
+}
+#base-view .tabpanel {
+  flex: 1;
+  min-height: 0;
+  padding: 2px 1px;
+  overflow: auto;
+}
+#base-view .panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 2px 0 9px;
+}
+#base-view .panel-head .panel-title {
+  color: #cfeaf6;
+  font: 800 13px/1 ui-monospace, monospace;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+#base-view .panel-head button {
+  min-height: 32px;
+  padding: 0 11px;
+  font-size: 12px;
+}
+#base-view .section-label {
+  margin: 6px 0 7px;
+  color: #67e8f9;
+  font: 800 12px/1 ui-monospace, monospace;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+#base-view .tab-card {
+  padding: 11px;
+  margin-bottom: 8px;
+  border: 1px solid rgba(103,232,249,.2);
+  border-radius: 10px;
+  background: rgba(2,12,20,.45);
+}
+#base-view .tab-card > strong {
+  display: block;
+  color: #e7f7ff;
+  font: 800 13px/1.2 ui-monospace, monospace;
+  letter-spacing: .03em;
+}
+#base-view .tab-card .card-copy {
+  margin: 6px 0 0;
+  color: #adc5d2;
+  font: 500 12px/1.4 Inter, sans-serif;
+  letter-spacing: 0;
+  text-transform: none;
+}
+#base-view .tab-card .card-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-top: 7px;
+  color: #9db5c5;
+  font: 600 12px/1.2 ui-monospace, monospace;
+}
+#base-view .tab-card .card-cost { color: #fbbf24; }
+#base-view .tab-card button { margin-top: 9px; }
+#base-view .chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 2px;
+}
+#base-view .done-chip {
+  padding: 4px 9px;
+  border: 1px solid rgba(74,222,128,.4);
+  border-radius: 999px;
+  color: #bbf7d0;
+  background: rgba(10,35,22,.4);
+  font: 700 12px/1 ui-monospace, monospace;
+  letter-spacing: .03em;
+}
+#base-view .soldier-table {
+  display: grid;
+  gap: 6px;
+}
+#base-view .soldier-row {
+  display: grid;
+  grid-template-columns: auto minmax(64px, 1.4fr) auto auto minmax(92px, 1fr);
+  gap: 8px;
+  align-items: center;
+  padding: 8px 9px;
+  border: 1px solid rgba(103,232,249,.16);
   border-radius: 8px;
-  background: rgba(2,12,20,.48);
+  color: #e7f7ff;
+  background: rgba(2,12,20,.42);
+  font: 600 12px/1.2 ui-monospace, monospace;
+}
+#base-view .soldier-row.selected,
+#base-view .soldier-row:hover {
+  border-color: rgba(103,232,249,.45);
+  background: rgba(8,35,47,.5);
+}
+#base-view .soldier-row.kia { color: #fb7185; opacity: .75; }
+#base-view .soldier-row.wounded { color: #fbbf24; }
+#base-view .soldier-row .s-name { color: #e7f7ff; }
+#base-view .soldier-row .s-rank { color: #9db5c5; }
+#base-view .deploy-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #67e8f9;
+  font: 700 12px/1 ui-monospace, monospace;
+}
+#base-view .deploy-toggle input { width: 15px; height: 15px; accent-color: #67e8f9; }
+#base-view .deploy-toggle:has(input:disabled) { color: #64748b; opacity: .65; }
+#base-view .soldier-row select {
+  min-width: 92px;
+  color: #e7f7ff;
+  border: 1px solid rgba(103,232,249,.24);
+  border-radius: 6px;
+  background: rgba(1,9,15,.85);
+  font: 600 12px/1 ui-monospace, monospace;
+  letter-spacing: .03em;
+}
+#base-view .soldier-row select:disabled { opacity: .45; }
+#base-view .status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px solid rgba(103,232,249,.3);
+  border-radius: 999px;
+  color: #e7f7ff;
+  font: 700 12px/1 ui-monospace, monospace;
+  white-space: nowrap;
+}
+#base-view .status-chip.wounded { border-color: rgba(251,191,36,.5); color: #fde68a; }
+#base-view .status-chip.kia { border-color: rgba(251,113,133,.5); color: #fda4af; }
+#base-view .soldier-detail {
+  grid-column: 1 / -1;
+  margin-top: 6px;
+  padding: 8px 9px;
+  border-top: 1px dashed rgba(103,232,249,.2);
+  color: #9db5c5;
+  font: 500 12px/1.4 Inter, sans-serif;
+  letter-spacing: 0;
+  text-transform: none;
+}
+#base-view .facility-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 9px;
+  margin-bottom: 6px;
+  border: 1px solid rgba(103,232,249,.16);
+  border-radius: 8px;
+  background: rgba(2,12,20,.42);
+  color: #e7f7ff;
+  font: 600 12px/1.2 ui-monospace, monospace;
+  cursor: pointer;
+}
+#base-view .facility-row:hover { border-color: rgba(103,232,249,.4); }
+#base-view .facility-row.selected {
+  border-color: rgba(103,232,249,.7);
+  box-shadow: inset 0 0 0 1px rgba(103,232,249,.3);
+  background: rgba(12,40,52,.55);
+}
+#base-view .facility-row .fr-state { color: #4ade80; }
+#base-view .facility-row .fr-state.building { color: #fbbf24; }
+#base-view .build-grid {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+}
+#base-view .build-card {
+  padding: 10px;
+  border: 1px solid rgba(251,191,36,.24);
+  border-radius: 8px;
+  background: rgba(35,24,4,.18);
+}
+#base-view .build-card.blocked { border-color: rgba(148,163,184,.18); background: rgba(2,12,20,.34); }
+#base-view .build-card.active { border-color: rgba(103,232,249,.38); background: rgba(8,35,47,.36); }
+#base-view .build-card .bc-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: #fef3c7;
+  font: 700 12px/1.2 ui-monospace, monospace;
+  text-transform: uppercase;
+}
+#base-view .build-card .bc-head em { color: #fbbf24; font-style: normal; }
+#base-view .build-card p {
+  margin: 6px 0 0;
+  color: #b9c7d2;
+  font: 500 12px/1.4 Inter, sans-serif;
+  letter-spacing: 0;
+  text-transform: none;
+}
+#base-view .build-card button { width: 100%; margin-top: 9px; }
+#base-view .market-card {
+  padding: 11px;
+  border: 1px solid rgba(103,232,249,.2);
+  border-radius: 10px;
+  background: rgba(2,12,20,.45);
 }
 #base-view .market-card > strong {
   display: flex;
   justify-content: space-between;
   gap: 10px;
-  color: #e8fbff;
-  font: 850 12px/1.2 ui-monospace, monospace;
+  color: #e7f7ff;
+  font: 800 13px/1.2 ui-monospace, monospace;
   text-transform: uppercase;
 }
-#base-view .market-card .market-credits {
-  color: #fbbf24;
-}
+#base-view .market-card .market-credits { color: #fbbf24; }
 #base-view .market-card > p {
-  margin-top: 7px;
+  margin-top: 6px;
   color: #adc5d2;
-  font-size: 10px;
+  font: 500 12px/1.4 Inter, sans-serif;
+  letter-spacing: 0;
+  text-transform: none;
 }
-#base-view .market-list {
-  display: grid;
-  gap: 7px;
-  margin-top: 10px;
-}
+#base-view .market-list { display: grid; gap: 7px; margin-top: 9px; }
 #base-view .market-item {
   display: grid;
-  grid-template-columns: minmax(92px, 1fr) auto auto auto;
+  grid-template-columns: minmax(90px, 1fr) auto auto auto;
   gap: 8px;
   align-items: center;
   padding: 8px;
-  border: 1px solid rgba(255,255,255,.07);
-  border-radius: 6px;
-  background: rgba(0,0,0,.16);
-  color: #e8fbff;
-  font: 800 9px/1.1 ui-monospace, monospace;
+  border: 1px solid rgba(103,232,249,.16);
+  border-radius: 7px;
+  background: rgba(2,12,20,.42);
+  color: #e7f7ff;
+  font: 700 12px/1.1 ui-monospace, monospace;
   text-transform: uppercase;
 }
 #base-view .market-item .market-price { color: #fbbf24; }
 #base-view .market-item .market-stock { color: #8aa7b8; }
-#base-view .market-item button {
-  min-height: 32px;
-  padding: 0 10px;
-}
+#base-view .market-item button { min-height: 34px; padding: 0 11px; }
 #base-view .market-item button[aria-disabled="true"] {
   cursor: not-allowed;
   opacity: .5;
   border-color: rgba(148,163,184,.3);
 }
+#base-view button {
+  min-height: 40px;
+  padding: 0 14px;
+  cursor: pointer;
+  color: #ecfeff;
+  border: 1px solid rgba(132,165,188,.32);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(34,51,65,.95), rgba(11,24,34,.96));
+  font: 800 12px/1 ui-monospace, "SF Mono", Menlo, monospace;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+#base-view button.primary {
+  width: 100%;
+  min-height: 46px;
+  margin-top: 11px;
+  border-color: rgba(103,232,249,.85);
+  background: linear-gradient(180deg, rgba(20,110,138,.98), rgba(8,52,68,.98));
+  box-shadow: 0 0 24px rgba(34,211,238,.28);
+  font-size: 13px;
+  letter-spacing: .08em;
+}
+#base-view button:hover {
+  border-color: rgba(103,232,249,.9);
+  background: linear-gradient(180deg, rgba(38,76,92,.98), rgba(11,39,52,.98));
+}
+#base-view button:disabled,
+#base-view button[aria-disabled="true"] { cursor: default; opacity: .42; }
 #base-view .empty-state {
   margin-top: 9px;
-  padding: 10px;
+  padding: 11px;
   border: 1px dashed rgba(148,163,184,.28);
-  border-radius: 7px;
+  border-radius: 8px;
   color: #8aa7b8;
   background: rgba(2,12,20,.3);
   text-align: center;
-  font: 800 9px/1.4 ui-monospace, monospace;
-  letter-spacing: .08em;
+  font: 700 12px/1.4 ui-monospace, monospace;
+  letter-spacing: .06em;
   text-transform: uppercase;
 }
+#base-view .base-footer {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 4;
+  display: flex;
+  gap: 8px;
+}
+#base-view .base-footer button { min-height: 38px; }
+#base-view .base-tooltip {
+  position: absolute;
+  z-index: 7;
+  max-width: 240px;
+  padding: 8px 11px;
+  border: 1px solid rgba(103,232,249,.5);
+  border-radius: 8px;
+  color: #e7f7ff;
+  background: rgba(4,14,22,.95);
+  box-shadow: 0 12px 36px rgba(0,0,0,.5);
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(-50%, -130%);
+  transition: opacity .12s ease;
+  font: 600 12px/1.35 Inter, sans-serif;
+  letter-spacing: 0;
+  text-transform: none;
+}
+#base-view .base-tooltip.visible { opacity: 1; }
+#base-view .base-tooltip strong {
+  display: block;
+  color: #67e8f9;
+  font: 800 12px/1.2 ui-monospace, monospace;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+#base-view .base-tooltip span { color: #adc5d2; }
 #base-view .notice-toast {
   position: absolute;
-  top: max(18px, env(safe-area-inset-top));
+  top: 62px;
   left: 50%;
-  z-index: 6;
+  z-index: 8;
   max-width: min(440px, calc(100vw - 36px));
   padding: 10px 16px;
   border: 1px solid rgba(251,191,36,.5);
@@ -681,133 +754,29 @@ const CSS = `
   opacity: 0;
   pointer-events: none;
   transition: opacity .2s ease, transform .2s ease;
-  font: 800 10px/1.3 ui-monospace, monospace;
-  letter-spacing: .08em;
+  font: 800 12px/1.3 ui-monospace, monospace;
+  letter-spacing: .06em;
   text-transform: uppercase;
 }
-#base-view .notice-toast.visible {
-  opacity: 1;
-  transform: translate(-50%, 0);
-}
+#base-view .notice-toast.visible { opacity: 1; transform: translate(-50%, 0); }
 #base-view .notice-toast[data-kind="warning"] {
   border-color: rgba(251,113,133,.55);
   color: #fecaca;
   background: rgba(45,11,18,.92);
 }
-#base-view .stat-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 11px;
-}
-#base-view .stat-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 9px;
-  border: 1px solid rgba(103,232,249,.22);
-  border-radius: 999px;
-  color: #e8fbff;
-  background: rgba(8,35,47,.4);
-  font: 800 9px/1 ui-monospace, monospace;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-#base-view .stat-chip .chip-icon { color: #67e8f9; }
-#base-view .stat-chip.warn { border-color: rgba(251,191,36,.42); color: #fde68a; }
-#base-view .stat-chip.warn .chip-icon { color: #fbbf24; }
-#base-view .stat-chip.danger { border-color: rgba(251,113,133,.45); color: #fecaca; }
-#base-view .stat-chip.danger .chip-icon { color: #fb7185; }
-#base-view .status-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 7px;
-  border: 1px solid rgba(103,232,249,.3);
-  border-radius: 999px;
-  color: #e8fbff;
-  font: 800 8px/1 ui-monospace, monospace;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-#base-view .status-chip.wounded { border-color: rgba(251,191,36,.5); color: #fde68a; }
-#base-view .status-chip.kia { border-color: rgba(251,113,133,.5); color: #fda4af; }
-#base-view .strategic-details,
-#base-view .collapsible {
-  margin-top: 11px;
-}
-#base-view .strategic-details > summary,
-#base-view .collapsible > summary {
-  cursor: pointer;
-  color: #67e8f9;
-  font: 800 9px/1.2 ui-monospace, monospace;
-  letter-spacing: .1em;
-  text-transform: uppercase;
-  list-style: none;
-}
-#base-view .strategic-details > summary::-webkit-details-marker,
-#base-view .collapsible > summary::-webkit-details-marker { display: none; }
-#base-view .strategic-details > summary::before,
-#base-view .collapsible > summary::before { content: "▸ "; }
-#base-view .strategic-details[open] > summary::before,
-#base-view .collapsible[open] > summary::before { content: "▾ "; }
-#base-view .strategic-details > p,
-#base-view .collapsible p {
-  margin-top: 7px;
-  color: #9db5c5;
-  font-size: 10px;
-}
-#base-view .airborne-banner {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 11px;
-  align-items: start;
-  margin: 13px 0;
-  padding: 12px;
-  border: 1px solid rgba(251,191,36,.45);
-  border-radius: 8px;
-  background: rgba(35,24,4,.26);
-}
-#base-view .airborne-banner.engaging { border-color: rgba(251,113,133,.5); background: rgba(45,11,18,.28); }
-#base-view .airborne-banner.escaped { border-color: rgba(148,163,184,.32); background: rgba(2,12,20,.4); }
-#base-view .airborne-banner .banner-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  border: 1px solid rgba(251,191,36,.6);
-  border-radius: 8px;
-  color: #fbbf24;
-  font-size: 16px;
-}
-#base-view .airborne-banner.engaging .banner-icon { border-color: rgba(251,113,133,.6); color: #fb7185; }
-#base-view .airborne-banner.escaped .banner-icon { border-color: rgba(148,163,184,.4); color: #94a3b8; }
-#base-view .airborne-banner .banner-body strong {
-  display: block;
-  color: #fef3c7;
-  font: 850 11px/1.2 ui-monospace, monospace;
-  text-transform: uppercase;
-}
-#base-view .airborne-banner.engaging .banner-body strong { color: #fecaca; }
-#base-view .airborne-banner.escaped .banner-body strong { color: #cbd5e1; }
-#base-view .airborne-banner .banner-body p {
-  margin-top: 5px;
-  color: #b9c7d2;
-  font-size: 10px;
-}
-#base-view .airborne-banner button {
-  margin-top: 9px;
-  min-height: 34px;
-}
 @media (max-width: 900px) {
-  #base-view .base-panel { width: calc(100vw - 24px); padding: 13px; }
-  #base-view .base-left { left: 12px; right: 12px; }
-  #base-view .base-right { left: 12px; right: 12px; bottom: 12px; }
-  #base-view h1 { font-size: 30px; }
-  #base-view .base-stats { grid-template-columns: 1fr; }
-  #base-view .base-hint { display: none; }
+  #base-view .base-sidebar {
+    top: auto;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    width: 100%;
+    max-height: 62vh;
+    border-radius: 12px 12px 0 0;
+  }
+  #base-view .topbar-chips { gap: 5px; }
+  #base-view .top-chip { padding: 5px 8px; }
+  #base-view .base-footer { bottom: auto; top: 56px; }
 }
 `;
 
@@ -826,38 +795,12 @@ function span(text: string, className?: string): HTMLSpanElement {
   return node;
 }
 
-/** Compact stat chip used in the strategic summary. Icon + label + value travel
- *  together so the colored severity class is never the sole signal. */
-function statChip(icon: string, label: string, value: string, cls?: string): HTMLSpanElement {
-  const node = el("span", `stat-chip${cls ? ` ${cls}` : ""}`);
-  const iconSpan = el("span", "chip-icon");
-  iconSpan.textContent = icon;
-  node.append(iconSpan, document.createTextNode(`${label} ${value}`));
-  return node;
-}
-
 function injectStyle(): void {
   if (document.getElementById(STYLE_ID)) return;
   const style = document.createElement("style");
   style.id = STYLE_ID;
   style.textContent = CSS;
   document.head.appendChild(style);
-}
-
-function fmtCoord(value: number, pos: string, neg: string): string {
-  const dir = value >= 0 ? pos : neg;
-  return `${Math.abs(value).toFixed(1)}°${dir}`;
-}
-
-function strategicSummary(campaign: CampaignState): string {
-  if (campaign.strategic.status === "won") return "Campaign won. The invasion cell has been broken.";
-  if (campaign.strategic.status === "lost") {
-    if (activeSoldiers(campaign).length === 0 && !canRecruitSoldier(campaign)) {
-      return "Campaign lost. No active operatives remain and recruitment reserves are exhausted.";
-    }
-    return "Campaign lost. Threat saturation has exceeded command capacity.";
-  }
-  return "Campaign active. Keep threat low and funding stable while recovering alien material.";
 }
 
 function formatCost(resources: {
@@ -873,10 +816,6 @@ function formatCost(resources: {
     resources.alienData > 0 ? `${resources.alienData}d` : "",
   ].filter(Boolean);
   return parts.length > 0 ? parts.join(" ") : "No cost";
-}
-
-function formatNet(value: number): string {
-  return value >= 0 ? `+${value}` : `${value}`;
 }
 
 interface MissionTypeMeta {
@@ -1029,6 +968,21 @@ function disposeObject(obj: Group | Scene): void {
   });
 }
 
+type TabId = "soldiers" | "research" | "engineering" | "market" | "build";
+
+interface TabDef {
+  id: TabId;
+  label: string;
+}
+
+const TABS: readonly TabDef[] = [
+  { id: "soldiers", label: "Soldiers" },
+  { id: "research", label: "Research" },
+  { id: "engineering", label: "Engineering" },
+  { id: "market", label: "Market" },
+  { id: "build", label: "Build" },
+];
+
 export class BaseView {
   private readonly root: HTMLDivElement;
   private readonly canvasWrap: HTMLDivElement;
@@ -1043,8 +997,19 @@ export class BaseView {
   private disposed = false;
   private noticeEl: HTMLDivElement | null = null;
   private noticeTimer: ReturnType<typeof setTimeout> | null = null;
-  private leftPanel: HTMLElement | null = null;
-  private rightPanel: HTMLElement | null = null;
+  private readonly raycaster = new Raycaster();
+  private readonly pointer = new Vector2();
+  private facilityMeshes: Array<{ mesh: Mesh; facilityId: string }> = [];
+  private hoveredFacilityId: string | null = null;
+  private selectedFacilityId: string | null = null;
+  private activeTab: TabId = "soldiers";
+  private expandedSoldierId: string | null = null;
+  private tooltipEl: HTMLDivElement | null = null;
+  private topbarChips: HTMLElement | null = null;
+  private clockEl: HTMLElement | null = null;
+  private primaryHost: HTMLElement | null = null;
+  private objectiveHost: HTMLElement | null = null;
+  private tabPanelEl: HTMLElement | null = null;
 
   constructor(private readonly opts: BaseViewOptions) {
     injectStyle();
@@ -1056,8 +1021,8 @@ export class BaseView {
     this.renderer.outputColorSpace = SRGBColorSpace;
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 
-    this.camera.position.set(-0.35, 7.2, 8.4);
-    this.camera.lookAt(-0.4, 0.05, 0.05);
+    this.camera.position.set(-0.3, 6.4, 7.5);
+    this.camera.lookAt(0, 0, 0);
 
     this.buildScene();
     this.buildHud();
@@ -1065,8 +1030,11 @@ export class BaseView {
 
   mount(container: HTMLElement): void {
     container.replaceChildren(this.root);
-    this.canvasWrap.appendChild(this.renderer.domElement);
+    const dom = this.renderer.domElement;
+    this.canvasWrap.appendChild(dom);
     window.addEventListener("resize", this.resize);
+    dom.addEventListener("pointermove", this.onPointerMove);
+    dom.addEventListener("click", this.onCanvasClick);
     this.resize();
     this.frame();
   }
@@ -1076,6 +1044,9 @@ export class BaseView {
     this.disposed = true;
     cancelAnimationFrame(this.raf);
     if (this.noticeTimer !== null) clearTimeout(this.noticeTimer);
+    const dom = this.renderer.domElement;
+    dom.removeEventListener("pointermove", this.onPointerMove);
+    dom.removeEventListener("click", this.onCanvasClick);
     window.removeEventListener("resize", this.resize);
     disposeObject(this.scene);
     this.renderer.dispose();
@@ -1178,9 +1149,9 @@ export class BaseView {
     glow.position.set(0, 2.2, 0);
     this.scene.add(glow);
 
-    this.baseGroup.position.set(-0.28, -0.12, 0.12);
+    this.baseGroup.position.set(0, -0.12, 0);
     this.baseGroup.rotation.y = BASE_VIEW_YAW;
-    this.baseGroup.scale.setScalar(0.95);
+    this.baseGroup.scale.setScalar(1.15);
     this.scene.add(this.baseGroup);
 
     this.buildTerrainSlab();
@@ -1381,6 +1352,8 @@ export class BaseView {
       makeMaterial(color, color, 0.12),
     );
     floor.position.y = 0;
+    floor.userData.facilityId = facility.id;
+    this.facilityMeshes.push({ mesh: floor, facilityId: facility.id });
     group.add(floor);
 
     const inset = new Mesh(
@@ -1859,29 +1832,82 @@ export class BaseView {
 
   /** Build the persistent DOM shell once (panels, hint, toast). All campaign-
    *  dependent content is filled in by refreshHud(), which update() re-invokes. */
+  /** Build the persistent DOM shell once: a full-width top bar, a right sidebar
+   *  (primary CTA + objective strip + tabbed detail panel), a corner footer, a
+   *  floating facility tooltip, and the transient notice toast. All campaign-
+   *  dependent content is filled in by refreshHud(). */
   private buildHud(): void {
-    const left = el("section", "base-panel base-left");
-    const right = el("section", "base-panel base-right");
-    this.leftPanel = left;
-    this.rightPanel = right;
+    const topbar = el("div", "base-topbar");
+    const brand = el("div", "topbar-brand");
+    const brandName = el("span", "brand-name");
+    brandName.textContent = "Blacksite Command";
+    const brandRegion = el("span", "brand-region");
+    brandRegion.textContent = this.opts.campaign.base.region;
+    const clock = el("span", "brand-clock");
+    brand.append(brandName, brandRegion, clock);
+    const chips = el("div", "topbar-chips");
+    topbar.append(brand, chips);
 
-    const hint = el("div", "base-hint");
-    hint.textContent = "Base command is the campaign hub / tactical launch starts from here";
+    const sidebar = el("aside", "base-sidebar");
+    const primaryHost = el("div");
+    const objectiveHost = el("div");
+    const tablist = el("div", "tablist");
+    tablist.setAttribute("role", "tablist");
+    for (const tab of TABS) {
+      const btn = el("button", "tab");
+      btn.setAttribute("role", "tab");
+      btn.textContent = tab.label;
+      btn.dataset.tab = tab.id;
+      btn.setAttribute("aria-selected", String(this.activeTab === tab.id));
+      btn.addEventListener("click", () => {
+        this.activeTab = tab.id;
+        for (const node of Array.from(tablist.children)) {
+          (node as HTMLButtonElement).setAttribute(
+            "aria-selected",
+            String((node as HTMLButtonElement).dataset.tab === tab.id),
+          );
+        }
+        this.refreshHud();
+      });
+      tablist.appendChild(btn);
+    }
+    const tabPanel = el("div", "tabpanel");
+    tabPanel.setAttribute("role", "tabpanel");
+    sidebar.append(primaryHost, objectiveHost, tablist, tabPanel);
 
+    const footer = el("div", "base-footer");
+    const earth = el("button");
+    earth.textContent = "Earth";
+    earth.addEventListener("click", () => this.opts.onOpenGeoscape());
+    const reset = el("button");
+    reset.textContent = "New campaign";
+    reset.addEventListener("click", () => this.opts.onResetCampaign());
+    footer.append(earth, reset);
+
+    const tooltip = el("div", "base-tooltip");
+    tooltip.setAttribute("role", "tooltip");
     const notice = el("div", "notice-toast");
     notice.setAttribute("role", "status");
     notice.setAttribute("aria-live", "polite");
+
+    this.topbarChips = chips;
+    this.clockEl = clock;
+    this.primaryHost = primaryHost;
+    this.objectiveHost = objectiveHost;
+    this.tabPanelEl = tabPanel;
+    this.tooltipEl = tooltip;
     this.noticeEl = notice;
 
-    this.root.append(left, right, hint, notice);
+    this.root.append(topbar, sidebar, footer, tooltip, notice);
     this.refreshHud();
   }
 
-  /** Re-render every panel from the current campaign/operation. Rebuilds DOM
+  /** Re-render every dynamic region (top-bar chips/clock, primary CTA, objective
+   *  strip, active tab) from the current campaign/operation. Rebuilds DOM
    *  children only — the 3D scene, renderer, and rAF loop are never touched, so
    *  this is safe to call repeatedly (including from update()). */
   private refreshHud(): void {
-    if (!this.leftPanel || !this.rightPanel) return;
+    if (!this.primaryHost || !this.tabPanelEl || !this.objectiveHost) return;
     const campaign = this.opts.campaign;
     const operation = this.opts.operation;
     const contact = campaign.ufoContact;
@@ -1891,233 +1917,124 @@ export class BaseView {
     const launchable = contact?.status === "crashed" || contact?.status === "landed";
     const launchContact = launchable ? contact : undefined;
 
-    const eyebrow = el("div", "eyebrow");
-    eyebrow.textContent = "Blacksite command";
-    const title = el("h1");
-    title.textContent =
-      campaign.strategic.status === "won"
-        ? "Campaign Won"
-        : campaign.strategic.status === "lost"
-          ? "Campaign Lost"
-          : "Base Interior";
-    const copy = el("p");
-    copy.textContent = launchContact
-      ? `Command center is online. Review facilities, then launch Operation ${operation.codename}.`
-      : contact
-        ? "Command center is online. An airborne UFO is on radar — intercept it from Earth Command before committing ground troops."
-        : "Command center is online. Use Earth Command to scan for UFO contacts before launching a recovery team.";
-    const coords = el("div", "base-coords");
-    coords.textContent =
-      `${campaign.base.region}  /  ${fmtCoord(campaign.base.lat, "N", "S")} ` +
-      `${fmtCoord(campaign.base.lon, "E", "W")}`;
-
-    this.leftPanel.replaceChildren(
-      eyebrow,
-      title,
-      copy,
-      coords,
-      this.renderStatsBlock(campaign),
-      this.renderStrategicCard(campaign),
+    this.fillTopbar(campaign);
+    this.primaryHost.replaceChildren(
+      this.renderPrimaryCard(campaign, operation, contact, launchContact),
     );
+    this.objectiveHost.replaceChildren(this.renderObjectiveStrip(campaign));
+    this.tabPanelEl.replaceChildren(this.renderTabPanel(campaign));
+    this.applyFacilityHighlight();
+  }
 
-    const siteEye = el("div", "eyebrow");
-    siteEye.textContent = "Starter installation";
-    const heading = el("h2");
-    heading.textContent = "Facilities";
-
-    this.rightPanel.replaceChildren(
-      siteEye,
-      heading,
-      this.renderFacilityList(campaign),
-      this.renderExpansionList(campaign),
-      this.renderOperationCard(operation, contact, launchContact),
-      this.renderObjectiveReport(campaign),
-      this.renderMissionReport(campaign),
-      this.renderProjectReports(campaign),
-      this.renderRoster(campaign),
-      this.renderManufacturing(campaign),
-      this.buildMarketPanel(),
-      this.renderResearch(campaign),
-      this.renderActions(campaign, operation),
+  private fillTopbar(campaign: CampaignState): void {
+    if (!this.topbarChips || !this.clockEl) return;
+    this.clockEl.textContent =
+      `Day ${campaign.clock.day} · ${String(campaign.clock.hour).padStart(2, "0")}:00`;
+    const constructed = constructedFacilities(campaign);
+    const scientists = constructed
+      .filter((facility) => facility.kind === "lab")
+      .reduce((sum, facility) => sum + facility.staff, 0);
+    const engineers = constructed
+      .filter((facility) => facility.kind === "workshop")
+      .reduce((sum, facility) => sum + facility.staff, 0);
+    const threat = campaign.strategic.threat;
+    const threatCls = threat >= 70 ? "danger" : threat >= 40 ? "warn" : "";
+    this.topbarChips.replaceChildren(
+      this.topChip("$", "Credits", `${campaign.resources.credits}`),
+      this.topChip("⬢", "Alloys", `${campaign.resources.alloys}`),
+      this.topChip("✦", "Elerium", `${campaign.resources.elerium}`),
+      this.topChip("◈", "Alien Data", `${campaign.resources.alienData}`),
+      this.topChip("⚗", "Scientists", `${scientists}`),
+      this.topChip("⚙", "Engineers", `${engineers}`),
+      this.topChip("▲", "Threat", `${threat}%`, threatCls),
+      this.topChip("◆", "Difficulty", difficultyConfig(campaign).label),
     );
   }
 
-  private renderStatsBlock(campaign: CampaignState): HTMLElement {
-    const objective = campaignObjectiveProgress(campaign);
-    const deployment = deploymentSoldiers(campaign);
-    const summary = summarizeBaseFacilities(constructedFacilities(campaign));
-    const stats = el("div", "base-stats");
-    stats.append(
-      this.stat("Credits", `${campaign.resources.credits}`),
-      this.stat("Alloys", `${campaign.resources.alloys}`),
-      this.stat("Elerium", `${campaign.resources.elerium}`),
-      this.stat("Data", `${campaign.resources.alienData}`),
-      this.stat("Cores", `${objective.completed}/${objective.required}`),
-      this.stat("Squad", `${deployment.length}/${DEPLOYMENT_SIZE}`),
-      this.stat(
-        "Craft",
-        campaign.interceptor.repairedAtHour &&
-          campaign.interceptor.repairedAtHour > campaign.clock.elapsedHours
-          ? `Repair ${campaign.interceptor.repairedAtHour - campaign.clock.elapsedHours}h`
-          : "Ready",
-      ),
-      this.stat("Power", `${summary.powerUsed}/${summary.powerCapacity}`),
-    );
-    return stats;
+  /** Compact top-bar chip: icon + value with a hover tooltip carrying the full
+   *  label, so the threat color class is never the sole signal. */
+  private topChip(icon: string, label: string, value: string, cls?: string): HTMLSpanElement {
+    const node = el("span", `top-chip${cls ? ` ${cls}` : ""}`);
+    node.title = `${label}: ${value}`;
+    const iconEl = el("span", "chip-icon");
+    iconEl.textContent = icon;
+    const valEl = el("span", "chip-val");
+    valEl.textContent = value;
+    node.append(iconEl, valEl);
+    return node;
   }
 
-  /** Strategic status: headline + difficulty chip + a tight row of stat chips,
-   *  with the long prose briefing moved behind a <details> toggle. */
-  private renderStrategicCard(campaign: CampaignState): HTMLElement {
-    const objective = campaignObjectiveProgress(campaign);
-    const panic = highestRegionalPanic(campaign);
-    const card = el("section", `strategic-card ${campaign.strategic.status}`);
-    const title = el("strong");
-    title.textContent = `${campaign.strategic.status} / Threat ${campaign.strategic.threat}%`;
-    const difficultyChip = el("div", "difficulty-chip");
-    difficultyChip.textContent = `Difficulty / ${difficultyConfig(campaign).label}`;
-
-    const threatCls =
-      campaign.strategic.threat >= 70 ? "danger" : campaign.strategic.threat >= 40 ? "warn" : "";
-    const panicCls = panic.panic >= 70 ? "danger" : panic.panic >= 40 ? "warn" : "";
-    const chips = el("div", "stat-chips");
-    chips.append(
-      statChip("$", "Funding", `${campaign.strategic.funding}`),
-      statChip("★", "Score", `${campaign.strategic.score}`),
-      statChip("▲", "Threat", `${campaign.strategic.threat}%`, threatCls),
-      statChip("⚑", `Panic ${panic.region}`, `${panic.panic}%`, panicCls),
-      statChip("◆", "Cores", `${objective.completed}/${objective.required}`),
-    );
-
-    const details = el("details", "strategic-details");
-    const summary = el("summary");
-    summary.textContent = "Status briefing";
-    const prose = el("p");
-    const lastReport = campaign.lastFundingReport;
-    prose.textContent =
-      `${strategicSummary(campaign)} ` +
-      `Funding ${campaign.strategic.funding}, score ${campaign.strategic.score}. ` +
-      `${objective.summary} ` +
-      `Council panic peaks in ${panic.region} at ${panic.panic}%.` +
-      (lastReport ? ` Last report net ${formatNet(lastReport.net)}c.` : "");
-    details.append(summary, prose);
-
-    card.append(title, difficultyChip, chips, details);
-    return card;
-  }
-
-  private renderFacilityList(campaign: CampaignState): HTMLElement {
-    const list = el("div", "facility-list");
-    for (const facility of constructedFacilities(campaign)) {
-      const item = el("article", "facility");
-      const head = el("strong");
-      head.append(document.createTextNode(facility.label), Object.assign(el("em"), { textContent: "ONLINE" }));
-      const detail = el("p");
-      detail.textContent = `${facility.description} ${facility.effect}`;
-      item.append(head, detail);
-      list.appendChild(item);
-    }
-    return list;
-  }
-
-  private renderExpansionList(campaign: CampaignState): HTMLElement {
-    const list = el("div", "expansion-list");
-    const activeConstruction = campaign.activeConstruction;
-    const constructionFacility = activeConstruction ? findBaseFacility(activeConstruction.facilityId) : undefined;
-    if (activeConstruction && constructionFacility) {
-      const remaining = Math.max(0, activeConstruction.completesAtHour - campaign.clock.elapsedHours);
-      const item = el("article", "expansion-card active");
-      const head = el("strong");
-      head.append(
-        document.createTextNode(constructionFacility.label),
-        Object.assign(el("em"), { textContent: `${remaining}h` }),
-      );
-      const detail = el("p");
-      detail.textContent =
-        `${constructionFacility.description} Construction crews are installing this facility. ` +
-        "Advance time from Earth Command to bring it online.";
-      const button = el("button");
-      button.textContent = "Under construction";
-      button.disabled = true;
-      item.append(head, detail, button);
-      list.appendChild(item);
-    }
-    for (const facility of availableBaseFacilities(campaign)) {
-      const canBuild = canBuildFacility(campaign, facility.id);
-      const item = el("article", `expansion-card ${canBuild ? "" : "blocked"}`.trim());
-      const cost = facilityCost(facility);
-      const head = el("strong");
-      head.append(document.createTextNode(facility.label), Object.assign(el("em"), { textContent: formatCost(cost) }));
-      const detail = el("p");
-      detail.textContent =
-        `${facility.description} ${facility.effect} ` +
-        `Power ${facility.powerUse > 0 ? `+${facility.powerUse} use` : `+${facility.powerOutput} capacity`}. ` +
-        `Build ${facilityConstructionDuration(campaign, facility.id)}h.`;
-      const button = el("button");
-      button.textContent = canBuild
-        ? "Start construction"
-        : activeConstruction
-          ? "Construction busy"
-          : "Need resources or power";
-      button.disabled = !canBuild;
-      button.addEventListener("click", () => this.opts.onBuildFacility(facility.id));
-      item.append(head, detail, button);
-      list.appendChild(item);
-    }
-    return list;
-  }
-
-  /** Operation / mission card. The launchable assault mission is only shown once
-   *  the contact is on the ground (crashed/landed). While the UFO is merely
-   *  airborne (tracked/engaging/escaped) we show an intercept banner that routes
-   *  the player to the Geoscape — never a launchable crash-site mission. */
-  private renderOperationCard(
+  /** Primary action card — the dominant, always-present CTA. Three variants:
+   *  launchable ground assault (big LAUNCH button), airborne UFO (intercept
+   *  guidance + Geoscape CTA), or no contact (scan guidance + Geoscape). */
+  private renderPrimaryCard(
+    campaign: CampaignState,
     operation: OperationPlan,
     contact: UfoContact | undefined,
     launchContact: UfoContact | undefined,
   ): HTMLElement {
+    const card = el("section", "operation-card");
+    const meta = missionTypeMeta(operation);
+
     if (launchContact) {
-      const card = el("section", "operation-card");
-      const missionMeta = missionTypeMeta(operation);
-      const title = el("strong");
+      const eyebrow = el("div", "op-eyebrow");
+      eyebrow.textContent = "Operation ready";
+      const title = el("div", "op-title");
       title.textContent = `Operation ${operation.codename}`;
       const chipEl = el("div", `mission-chip ${operation.missionType ?? "crashSite"}`);
       const chipIcon = el("span", "mission-icon");
-      chipIcon.textContent = missionMeta.icon;
-      chipEl.append(chipIcon, document.createTextNode(missionMeta.label));
-      const copy = el("p");
-      copy.textContent = operation.briefing;
-      const objectiveLine = el("div", "operation-objective");
-      objectiveLine.textContent = missionMeta.detail;
-      const meta = el("div", "operation-meta");
-      meta.append(
-        span(operation.themeId),
-        span(`${operation.enemyCount} contacts`),
-        span(`${operation.durationHours}h field time`),
-        span(
-          `+${operation.reward.credits}c +${operation.reward.alloys}a ` +
-            `+${operation.reward.elerium}e +${operation.reward.alienData}d`,
-        ),
+      chipIcon.textContent = meta.icon;
+      chipEl.append(chipIcon, document.createTextNode(meta.label));
+      const region = el("div", "op-region");
+      region.textContent =
+        `${operation.region} · ${operation.enemyCount} contacts · ${operation.durationHours}h field time`;
+      const chips = el("div", "op-chips");
+      const reward = operation.reward;
+      chips.append(
+        span(`+${reward.credits}c`),
+        span(`+${reward.alloys}a`),
+        span(`+${reward.elerium}e`),
+        span(`+${reward.alienData}d`),
       );
-      card.append(title, chipEl, copy, objectiveLine, meta);
+      const deployment = deploymentSoldiers(campaign);
+      const activeRoster = activeSoldiers(campaign);
+      const canLaunch = campaign.strategic.status === "active" && deployment.length > 0;
+      const launch = el("button", "primary");
+      launch.textContent = canLaunch
+        ? `${meta.launchLabel} (op ${operation.missionNumber})`
+        : campaign.strategic.status !== "active"
+          ? "Campaign complete"
+          : activeRoster.length === 0
+            ? "No operatives"
+            : "Select squad";
+      launch.disabled = !canLaunch;
+      launch.addEventListener("click", () => this.opts.onLaunchMission());
+      card.append(eyebrow, title, chipEl, region, chips, launch);
       return card;
     }
+
     if (contact) {
-      return this.renderAirborneBanner(contact);
+      card.appendChild(this.renderAirborneBanner(contact));
+      return card;
     }
-    const card = el("section", "operation-card");
-    const title = el("strong");
-    title.textContent = "No active UFO contact";
-    const copy = el("p");
-    copy.textContent = "Open Earth Command and scan time forward until radar detects a UFO track.";
-    const meta = el("div", "operation-meta");
-    meta.append(span("scan"), span("radar idle"), span("no target"));
-    card.append(title, copy, meta);
+
+    const eyebrow = el("div", "op-eyebrow");
+    eyebrow.textContent = "No active contact";
+    const title = el("div", "op-title");
+    title.textContent = "Scan for UFO contacts";
+    const copy = el("div", "op-region");
+    copy.textContent = "Advance time on the Geoscape to detect a UFO track.";
+    const openGeo = el("button", "primary");
+    openGeo.textContent = "Open Geoscape";
+    openGeo.addEventListener("click", () => this.opts.onOpenGeoscape());
+    card.append(eyebrow, title, copy, openGeo);
     return card;
   }
 
-  /** Airborne intercept banner: icon + status text + a Geoscape CTA. Variant
-   *  class tracks engaging/escaped so the color shift is backed by wording. */
+  /** Airborne intercept banner rendered inside the primary card. Carries an
+   *  enabled Open-Geoscape CTA plus a disabled "Intercept first" indicator so the
+   *  player is never offered a launchable crash-site mission while the UFO is
+   *  still airborne. Variant class tracks engaging/escaped. */
   private renderAirborneBanner(contact: UfoContact): HTMLElement {
     const banner = el("div", `airborne-banner ${contact.status}`);
     const icon = el("span", "banner-icon");
@@ -2127,117 +2044,94 @@ export class BaseView {
     if (contact.status === "engaging") {
       icon.textContent = "✦";
       title.textContent = "Interceptor engaging";
-      copy.textContent = `${contact.id} over ${contact.region}. Open the Geoscape to direct the dogfight and bring it down.`;
+      copy.textContent = `${contact.id} over ${contact.region}. Direct the dogfight on the Geoscape to bring it down.`;
     } else if (contact.status === "escaped") {
       icon.textContent = "↗";
       title.textContent = "UFO escaped";
-      copy.textContent = `${contact.id} slipped the intercept. Open the Geoscape to resume the scan.`;
+      copy.textContent = `${contact.id} slipped the intercept. Resume the scan on the Geoscape.`;
     } else {
       icon.textContent = "✈";
       title.textContent = "Airborne UFO detected";
-      copy.textContent = `${contact.id} is tracked over ${contact.region}. Open the Geoscape to launch the interceptor and bring it down.`;
+      copy.textContent = `${contact.id} is tracked over ${contact.region}. Intercept to bring it down.`;
     }
-    const button = el("button", "primary");
-    button.textContent = "Open Geoscape";
-    button.addEventListener("click", () => this.opts.onOpenGeoscape());
-    body.append(title, copy, button);
+    const actions = el("div", "banner-actions");
+    const openGeo = el("button", "primary");
+    openGeo.textContent = "Open Geoscape";
+    openGeo.addEventListener("click", () => this.opts.onOpenGeoscape());
+    const intercept = el("button");
+    intercept.textContent = "Intercept first";
+    intercept.disabled = true;
+    actions.append(openGeo, intercept);
+    body.append(title, copy, actions);
     banner.append(icon, body);
     return banner;
   }
 
-  private renderObjectiveReport(campaign: CampaignState): HTMLElement {
+  /** Slim campaign-objective progress bar + a one-line last-mission summary. */
+  private renderObjectiveStrip(campaign: CampaignState): HTMLElement {
     const objective = campaignObjectiveProgress(campaign);
-    const report = el("section", "base-report");
-    const title = el("strong");
-    title.textContent = `${objective.title} / ${objective.completed}/${objective.required}`;
-    const copy = el("p");
-    copy.textContent =
-      `${objective.summary} Campaign progress ${objective.percent}%. ` +
-      (objective.status === "active"
-        ? "Secure crash sites to recover more power cores."
-        : "Strategic operations are closed.");
-    report.append(title, copy);
-    return report;
-  }
-
-  /** Last field report as a concise one-liner. */
-  private renderMissionReport(campaign: CampaignState): HTMLElement {
-    const report = el("section", "base-report");
-    const title = el("strong");
-    const copy = el("p");
+    const strip = el("div", "objective-strip");
+    const head = el("div", "obj-head");
+    const headLabel = el("span");
+    headLabel.textContent = objective.title;
+    const headVal = el("b");
+    headVal.textContent = `${objective.completed}/${objective.required} cores`;
+    head.append(headLabel, headVal);
+    const bar = el("div", objective.status === "lost" ? "progress danger" : "progress");
+    const fill = el("i");
+    fill.style.width = `${objective.percent}%`;
+    bar.appendChild(fill);
+    const summary = el("p", "obj-summary");
     const last = campaign.lastMission;
-    if (last) {
-      const kiaNames = last.kiaSoldierIds
-        .map((id) => campaign.soldiers.find((soldier) => soldier.id === id)?.name ?? id)
-        .join(", ");
-      title.textContent =
-        last.result === "success" ? `Last op ${last.missionNumber} secured` : `Last op ${last.missionNumber} failed`;
-      copy.textContent = `${last.region}: ${last.summary}${kiaNames ? ` · KIA: ${kiaNames}.` : ""}`;
-    } else {
-      title.textContent = "No field report";
-      copy.textContent = "The first recovery operation has not launched.";
-    }
-    report.append(title, copy);
-    return report;
+    summary.textContent = last
+      ? `Last op ${last.missionNumber} ${last.result === "success" ? "secured" : "failed"} — ${last.region}: ${last.summary}`
+      : "No field report yet. Launch a recovery operation to begin.";
+    strip.append(head, bar, summary);
+    return strip;
   }
 
-  /** Latest project report inline; older project history collapsed behind a
-   *  <details> toggle so the panel reads at a glance. */
-  private renderProjectReports(campaign: CampaignState): HTMLElement {
-    const report = el("section", "base-report");
-    const title = el("strong");
-    const copy = el("p");
-    const latest = campaign.projectReports[0];
-    if (latest) {
-      title.textContent = `${latest.title} complete`;
-      copy.textContent = `${latest.summary} (hour ${latest.completedAtHour}).`;
-    } else {
-      title.textContent = "No completed projects";
-      copy.textContent = "Research, manufacturing, and construction reports appear here when crews finish work.";
+  /** Render only the active tab's content into the tabpanel. */
+  private renderTabPanel(campaign: CampaignState): HTMLElement {
+    switch (this.activeTab) {
+      case "research":
+        return this.renderResearchTab(campaign);
+      case "engineering":
+        return this.renderEngineeringTab(campaign);
+      case "market":
+        return this.buildMarketPanel();
+      case "build":
+        return this.renderBuildTab(campaign);
+      case "soldiers":
+      default:
+        return this.renderSoldiersTab(campaign);
     }
-    report.append(title, copy);
-    const older = campaign.projectReports.slice(1);
-    if (older.length > 0) {
-      const details = el("details", "collapsible");
-      const summary = el("summary");
-      summary.textContent = `Older reports (${older.length})`;
-      for (const entry of older) {
-        const line = el("p");
-        line.textContent = `${entry.title} — ${entry.summary} (hour ${entry.completedAtHour})`;
-        details.appendChild(line);
-      }
-      report.appendChild(details);
-    }
-    return report;
   }
 
-  /** Compact roster: one tight row per operative (deploy toggle, name, rank +
-   *  record, status chip, weapon) instead of multi-line cards. */
-  private renderRoster(campaign: CampaignState): HTMLElement {
-    const roster = el("section", "roster-card");
-    const activeRoster = activeSoldiers(campaign);
+  /** Soldiers tab: compact table — deploy toggle, name, rank, status chip,
+   *  weapon select — one row per operative. Click a row to expand inline stats. */
+  private renderSoldiersTab(campaign: CampaignState): HTMLElement {
+    const wrap = el("div");
     const deployment = deploymentSoldiers(campaign);
     const deployedIds = new Set(deployment.map((soldier) => soldier.id));
-    const head = el("div", "roster-head");
-    head.append(
-      span("Operatives"),
-      span(`${deployment.length}/${DEPLOYMENT_SIZE} deployed · ${activeRoster.length} ready`),
-    );
-    const list = el("div", "roster-list");
-    for (const soldier of campaign.soldiers) {
-      list.appendChild(this.renderSoldierRow(campaign, soldier, deployedIds));
-    }
+    const head = el("div", "panel-head");
+    const title = el("span", "panel-title");
+    title.textContent = `Operatives · ${deployment.length}/${DEPLOYMENT_SIZE} deployed`;
+    const recruit = el("button");
+    recruit.textContent = `Recruit (${RECRUIT_COST}c)`;
+    recruit.disabled = campaign.strategic.status !== "active" || !canRecruitSoldier(campaign);
+    recruit.addEventListener("click", () => this.opts.onRecruitSoldier());
+    head.append(title, recruit);
+    const table = el("div", "soldier-table");
     if (campaign.soldiers.length === 0) {
       const empty = el("div", "empty-state");
       empty.textContent = "No operatives on roster. Recruit to field a squad.";
-      list.appendChild(empty);
+      table.appendChild(empty);
     }
-    const recruit = el("button");
-    recruit.textContent = `Recruit operative (${RECRUIT_COST}c)`;
-    recruit.disabled = campaign.strategic.status !== "active" || !canRecruitSoldier(campaign);
-    recruit.addEventListener("click", () => this.opts.onRecruitSoldier());
-    roster.append(head, list, recruit);
-    return roster;
+    for (const soldier of campaign.soldiers) {
+      table.appendChild(this.renderSoldierRow(campaign, soldier, deployedIds));
+    }
+    wrap.append(head, table);
+    return wrap;
   }
 
   private renderSoldierRow(
@@ -2245,7 +2139,10 @@ export class BaseView {
     soldier: CampaignSoldier,
     deployedIds: Set<string>,
   ): HTMLElement {
-    const row = el("div", `soldier-row ${soldier.status}`);
+    const row = el(
+      "div",
+      `soldier-row ${soldier.status}${this.expandedSoldierId === soldier.id ? " selected" : ""}`,
+    );
     const deployed = deployedIds.has(soldier.id);
     const deployToggle = el("label", "deploy-toggle");
     const deployCheckbox = document.createElement("input");
@@ -2254,10 +2151,16 @@ export class BaseView {
     deployCheckbox.disabled =
       campaign.strategic.status !== "active" || (deployed ? false : !canDeploySoldier(campaign, soldier.id));
     deployCheckbox.setAttribute("aria-label", `${deployed ? "Remove" : "Deploy"} ${soldier.name}`);
+    deployCheckbox.addEventListener("click", (event) => event.stopPropagation());
     deployCheckbox.addEventListener("change", () => {
       this.opts.onToggleDeployment(soldier.id, deployCheckbox.checked);
     });
-    deployToggle.append(deployCheckbox, document.createTextNode(deployed ? "DROP" : "DEPLOY"));
+    deployToggle.append(deployCheckbox, document.createTextNode(deployed ? "DROP" : "ADD"));
+
+    const nameEl = el("span", "s-name");
+    nameEl.textContent = soldier.name;
+    const rankEl = el("span", "s-rank");
+    rankEl.textContent = soldier.rank;
 
     const currentWeapon = soldierWeaponId(campaign, soldier.id);
     const weaponSelect = el("select");
@@ -2267,24 +2170,29 @@ export class BaseView {
       const option = document.createElement("option");
       option.value = weaponId;
       option.textContent =
-        `${WEAPONS[weaponId]?.name ?? weaponId} ` +
-        `(${availableWeaponCount(campaign, weaponId, soldier.id)} free)`;
+        `${WEAPONS[weaponId]?.name ?? weaponId} (${availableWeaponCount(campaign, weaponId, soldier.id)})`;
       option.selected = weaponId === currentWeapon;
       option.disabled = weaponId !== currentWeapon && !canAssignSoldierWeapon(campaign, soldier.id, weaponId);
       weaponSelect.appendChild(option);
     }
+    weaponSelect.addEventListener("click", (event) => event.stopPropagation());
     weaponSelect.addEventListener("change", () => {
       const next = weaponSelect.value as CampaignWeaponId;
       this.opts.onAssignWeapon(soldier.id, next);
     });
 
-    row.append(
-      deployToggle,
-      span(soldier.name),
-      span(`${soldier.rank} · ${soldier.survivedMissions}/${soldier.missions}`),
-      this.renderSoldierStatus(campaign, soldier),
-      weaponSelect,
-    );
+    row.append(deployToggle, nameEl, rankEl, this.renderSoldierStatus(campaign, soldier), weaponSelect);
+    if (this.expandedSoldierId === soldier.id) {
+      const detail = el("div", "soldier-detail");
+      detail.textContent =
+        `${soldier.missions} missions · ${soldier.survivedMissions} survived · rank ${soldier.rank}` +
+        (soldier.status === "wounded" ? " · wounded" : "") + ".";
+      row.appendChild(detail);
+    }
+    row.addEventListener("click", () => {
+      this.expandedSoldierId = this.expandedSoldierId === soldier.id ? null : soldier.id;
+      this.refreshHud();
+    });
     return row;
   }
 
@@ -2309,34 +2217,176 @@ export class BaseView {
     return chipEl;
   }
 
-  /** Manufacturing: the active order is shown inline; available orders collapse
-   *  behind a <details> so the screen isn't dominated by locked projects. */
-  private renderManufacturing(campaign: CampaignState): HTMLElement {
+  /** Build tab: base power/staff/room chips, clickable installed-facility rows
+   *  that cross-highlight the 3D cutaway, then active construction + buildable
+   *  facilities (cost + Build). */
+  private renderBuildTab(campaign: CampaignState): HTMLElement {
     const wrap = el("div");
+    const head = el("div", "panel-head");
+    const title = el("span", "panel-title");
+    title.textContent = "Base facilities";
+    head.append(title);
+
+    const summary = summarizeBaseFacilities(constructedFacilities(campaign));
+    const chips = el("div", "op-chips");
+    chips.append(
+      span(`Power ${summary.powerUsed}/${summary.powerCapacity}`),
+      span(`Staff ${summary.staffAssigned}`),
+      span(`Rooms ${summary.facilities}`),
+    );
+
+    const label = el("div", "section-label");
+    label.textContent = "Installed";
+    const installed = el("div");
+    for (const facility of constructedFacilities(campaign)) {
+      const row = el(
+        "div",
+        `facility-row${facility.id === this.selectedFacilityId ? " selected" : ""}`,
+      );
+      const name = el("span", "fr-name");
+      name.textContent = facility.label;
+      const state = el("span", "fr-state");
+      state.textContent = "Online";
+      row.append(name, state);
+      row.addEventListener("click", () => this.selectFacility(facility.id));
+      installed.appendChild(row);
+    }
+
+    wrap.append(head, chips, label, installed, this.renderConstructionList(campaign));
+    return wrap;
+  }
+
+  private selectFacility(facilityId: string): void {
+    this.selectedFacilityId = this.selectedFacilityId === facilityId ? null : facilityId;
+    this.applyFacilityHighlight();
+    this.refreshHud();
+  }
+
+  /** Research tab: completed work as chips, the active project with a progress
+   *  bar + remaining hours, then available projects (cost + Start). */
+  private renderResearchTab(campaign: CampaignState): HTMLElement {
+    const wrap = el("div");
+    const head = el("div", "panel-head");
+    const title = el("span", "panel-title");
+    title.textContent = "Research";
+    wrap.append(head);
+
+    if (campaign.completedResearch.length > 0) {
+      const chipRow = el("div", "chip-row");
+      for (const id of campaign.completedResearch) {
+        const project = RESEARCH_PROJECTS.find((candidate) => candidate.id === id);
+        const chip = el("span", "done-chip");
+        chip.textContent = project?.title ?? id;
+        chipRow.appendChild(chip);
+      }
+      wrap.appendChild(chipRow);
+    }
+
+    const activeRes = campaign.activeResearch;
+    if (activeRes) {
+      const project = RESEARCH_PROJECTS.find((candidate) => candidate.id === activeRes.projectId);
+      const remaining = Math.max(0, activeRes.completesAtHour - campaign.clock.elapsedHours);
+      const duration = activeRes.completesAtHour - activeRes.startedAtHour;
+      const fraction =
+        duration > 0
+          ? Math.min(1, Math.max(0, (campaign.clock.elapsedHours - activeRes.startedAtHour) / duration))
+          : 0;
+      const card = el("section", "tab-card");
+      const strong = el("strong");
+      strong.textContent = `${project?.title ?? activeRes.projectId} in progress`;
+      const bar = el("div", "progress");
+      const fill = el("i");
+      fill.style.width = `${Math.round(fraction * 100)}%`;
+      bar.appendChild(fill);
+      const copy = el("p", "card-copy");
+      copy.textContent = `${remaining}h remaining — scientists are working.`;
+      card.append(strong, bar, copy);
+      wrap.appendChild(card);
+    }
+
+    const available = RESEARCH_PROJECTS.filter(
+      (project) => !hasResearch(campaign, project.id) && project.id !== activeRes?.projectId,
+    );
+    if (available.length > 0) {
+      const label = el("div", "section-label");
+      label.textContent = "Available projects";
+      wrap.appendChild(label);
+      for (const project of available) {
+        wrap.appendChild(this.renderResearchCard(campaign, project, !!activeRes));
+      }
+    } else if (!activeRes) {
+      const empty = el("div", "empty-state");
+      empty.textContent = "All research projects complete.";
+      wrap.appendChild(empty);
+    }
+    return wrap;
+  }
+
+  private renderResearchCard(
+    campaign: CampaignState,
+    project: ResearchProject,
+    labBusy: boolean,
+  ): HTMLElement {
+    const card = el("section", "tab-card");
+    const canResearch = canStartResearch(campaign, project.id);
+    const cost = researchCost(campaign, project.id);
+    const title = el("strong");
+    title.textContent = project.title;
+    const copy = el("p", "card-copy");
+    copy.textContent =
+      `${project.description} Requires ${cost.alienData} data, ${cost.alloys} alloys, ` +
+      `${cost.elerium} elerium, ${cost.credits}c · ${researchDuration(campaign, project.id)}h.`;
+    const row = el("div", "card-row");
+    const costLabel = el("span", "card-cost");
+    costLabel.textContent = formatCost(cost);
+    const button = el("button");
+    button.textContent = labBusy ? "Lab busy" : canResearch ? "Start research" : "Need resources";
+    button.disabled = labBusy || !canResearch;
+    button.addEventListener("click", () => this.opts.onStartResearch(project.id));
+    row.append(costLabel, button);
+    card.append(title, copy, row);
+    return card;
+  }
+
+  /** Engineering tab: active manufacturing with a progress bar, then buildable
+   *  items (cost + Start). */
+  private renderEngineeringTab(campaign: CampaignState): HTMLElement {
+    const wrap = el("div");
+    const head = el("div", "panel-head");
+    const title = el("span", "panel-title");
+    title.textContent = "Engineering";
+    wrap.append(head);
+
     const activeMfg = campaign.activeManufacturing;
     if (activeMfg) {
       const project = MANUFACTURING_PROJECTS.find((candidate) => candidate.id === activeMfg.projectId);
       const remaining = Math.max(0, activeMfg.completesAtHour - campaign.clock.elapsedHours);
-      const card = el("section", "manufacturing-card");
-      const title = el("strong");
-      title.textContent = `Workshop: ${project?.title ?? activeMfg.projectId} in production`;
-      const copy = el("p");
-      copy.textContent = `${remaining}h remaining. Advance time from Earth Command.`;
-      const button = el("button");
-      button.textContent = "In production";
-      button.disabled = true;
-      card.append(title, copy, button);
+      const duration = activeMfg.completesAtHour - activeMfg.startedAtHour;
+      const fraction =
+        duration > 0
+          ? Math.min(1, Math.max(0, (campaign.clock.elapsedHours - activeMfg.startedAtHour) / duration))
+          : 0;
+      const card = el("section", "tab-card");
+      const strong = el("strong");
+      strong.textContent = `${project?.title ?? activeMfg.projectId} in production`;
+      const bar = el("div", "progress");
+      const fill = el("i");
+      fill.style.width = `${Math.round(fraction * 100)}%`;
+      bar.appendChild(fill);
+      const copy = el("p", "card-copy");
+      copy.textContent = `${remaining}h remaining — workshop is fabricating.`;
+      card.append(strong, bar, copy);
       wrap.appendChild(card);
     }
+
     const available = MANUFACTURING_PROJECTS.filter((project) => project.id !== activeMfg?.projectId);
     if (available.length > 0) {
-      const details = el("details", "collapsible");
-      const summary = el("summary");
-      summary.textContent = `Available production (${available.length})`;
+      const label = el("div", "section-label");
+      label.textContent = "Buildable items";
+      wrap.appendChild(label);
       for (const project of available) {
-        details.appendChild(this.renderManufacturingCard(campaign, project, !!activeMfg));
+        wrap.appendChild(this.renderManufacturingCard(campaign, project, !!activeMfg));
       }
-      wrap.appendChild(details);
     }
     return wrap;
   }
@@ -2346,18 +2396,21 @@ export class BaseView {
     project: ManufacturingProject,
     workshopBusy: boolean,
   ): HTMLElement {
-    const card = el("section", "manufacturing-card");
+    const card = el("section", "tab-card");
     const locked = !!project.requiresResearch && !hasResearch(campaign, project.requiresResearch);
     const canManufacture = canStartManufacturing(campaign, project.id);
     const cost = manufacturingCost(campaign, project.id);
     const title = el("strong");
-    title.textContent = `Manufacture: ${project.title}`;
-    const copy = el("p");
+    title.textContent = project.title;
+    const copy = el("p", "card-copy");
     copy.textContent = workshopBusy
       ? "Workshop is committed to another order."
       : locked
         ? `Requires ${project.requiresResearch}. ${project.description}`
         : `${project.description} Cost ${formatCost(cost)}, ${manufacturingDuration(campaign, project.id)}h.`;
+    const row = el("div", "card-row");
+    const costLabel = el("span", "card-cost");
+    costLabel.textContent = formatCost(cost);
     const button = el("button");
     button.textContent = workshopBusy
       ? "Workshop busy"
@@ -2368,117 +2421,137 @@ export class BaseView {
           : "Need resources";
     button.disabled = workshopBusy || !canManufacture;
     button.addEventListener("click", () => this.opts.onStartManufacturing(project.id));
-    card.append(title, copy, button);
+    row.append(costLabel, button);
+    card.append(title, copy, row);
     return card;
   }
 
-  /** Research: active project inline; available projects behind a <details>. */
-  private renderResearch(campaign: CampaignState): HTMLElement {
+  /** Active construction (remaining hours) + buildable facilities (cost + Build). */
+  private renderConstructionList(campaign: CampaignState): HTMLElement {
     const wrap = el("div");
-    const allResearched = RESEARCH_PROJECTS.every((project) => hasResearch(campaign, project.id));
-    if (allResearched) {
-      const empty = el("div", "empty-state");
-      empty.textContent = "All research projects complete. The lab stands ready for new specimens.";
-      wrap.appendChild(empty);
-      return wrap;
-    }
-    const activeRes = campaign.activeResearch;
-    if (activeRes) {
-      const project = RESEARCH_PROJECTS.find((candidate) => candidate.id === activeRes.projectId);
-      const remaining = Math.max(0, activeRes.completesAtHour - campaign.clock.elapsedHours);
-      const card = el("section", "research-card");
-      const title = el("strong");
-      title.textContent = `${project?.title ?? activeRes.projectId} in progress`;
-      const copy = el("p");
-      copy.textContent = `Scientists are working. ${remaining}h remaining. Advance time from Earth Command.`;
+    const activeConstruction = campaign.activeConstruction;
+    const constructionFacility = activeConstruction
+      ? findBaseFacility(activeConstruction.facilityId)
+      : undefined;
+    if (activeConstruction && constructionFacility) {
+      const remaining = Math.max(0, activeConstruction.completesAtHour - campaign.clock.elapsedHours);
+      const card = el("article", "build-card active");
+      const head = el("div", "bc-head");
+      head.append(
+        document.createTextNode(constructionFacility.label),
+        Object.assign(el("em"), { textContent: `${remaining}h` }),
+      );
+      const detail = el("p");
+      detail.textContent =
+        `${constructionFacility.description} Construction crews are installing this facility.`;
       const button = el("button");
-      button.textContent = "In progress";
+      button.textContent = "Under construction";
       button.disabled = true;
-      card.append(title, copy, button);
+      card.append(head, detail, button);
       wrap.appendChild(card);
     }
-    const available = RESEARCH_PROJECTS.filter(
-      (project) => !hasResearch(campaign, project.id) && project.id !== activeRes?.projectId,
-    );
-    if (available.length > 0) {
-      const details = el("details", "collapsible");
-      const summary = el("summary");
-      summary.textContent = `Available research (${available.length})`;
-      for (const project of available) {
-        details.appendChild(this.renderResearchCard(campaign, project, !!activeRes));
+    const buildable = availableBaseFacilities(campaign);
+    if (buildable.length > 0) {
+      const label = el("div", "section-label");
+      label.textContent = activeConstruction ? "Queue" : "Buildable";
+      wrap.appendChild(label);
+      const grid = el("div", "build-grid");
+      for (const facility of buildable) {
+        const canBuild = canBuildFacility(campaign, facility.id);
+        const card = el("article", `build-card${canBuild ? "" : " blocked"}`.trim());
+        const cost = facilityCost(facility);
+        const head = el("div", "bc-head");
+        head.append(
+          document.createTextNode(facility.label),
+          Object.assign(el("em"), { textContent: formatCost(cost) }),
+        );
+        const detail = el("p");
+        detail.textContent =
+          `${facility.effect} ` +
+          `Power ${facility.powerUse > 0 ? `+${facility.powerUse} use` : `+${facility.powerOutput} cap`}. ` +
+          `Build ${facilityConstructionDuration(campaign, facility.id)}h.`;
+        const button = el("button");
+        button.textContent = canBuild ? "Build" : activeConstruction ? "Queue full" : "Need resources";
+        button.disabled = !canBuild;
+        button.addEventListener("click", () => this.opts.onBuildFacility(facility.id));
+        card.append(head, detail, button);
+        grid.appendChild(card);
       }
-      wrap.appendChild(details);
+      wrap.appendChild(grid);
     }
     return wrap;
   }
 
-  private renderResearchCard(
-    campaign: CampaignState,
-    project: ResearchProject,
-    labBusy: boolean,
-  ): HTMLElement {
-    const card = el("section", "research-card");
-    const researched = hasResearch(campaign, project.id);
-    const canResearch = canStartResearch(campaign, project.id);
-    const cost = researchCost(campaign, project.id);
-    const title = el("strong");
-    title.textContent = researched ? `${project.title} online` : `Research: ${project.title}`;
-    const copy = el("p");
-    copy.textContent = researched
-      ? project.completedDescription
-      : labBusy
-        ? "Research lab is committed to another project."
-        : `${project.description} Requires ${cost.alienData} data, ${cost.alloys} alloys, ` +
-          `${cost.elerium} elerium, ${cost.credits} credits, ${researchDuration(campaign, project.id)}h.`;
-    const button = el("button");
-    button.textContent = researched ? "Research complete" : labBusy ? "Lab busy" : "Start research";
-    button.disabled = researched || labBusy || !canResearch;
-    button.addEventListener("click", () => this.opts.onStartResearch(project.id));
-    card.append(title, copy, button);
-    return card;
+  /** Convert a pointer position to a ray and return the facility floor under it,
+   *  if any. Used by both hover and click handlers. */
+  private facilityMeshAt(
+    event: PointerEvent | MouseEvent,
+  ): { mesh: Mesh; facilityId: string } | null {
+    const dom = this.renderer.domElement;
+    const rect = dom.getBoundingClientRect();
+    this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const meshes = this.facilityMeshes.map((entry) => entry.mesh);
+    const hits = this.raycaster.intersectObjects(meshes, false);
+    if (hits.length === 0) return null;
+    const hit = hits[0]!;
+    return this.facilityMeshes.find((entry) => entry.mesh === hit.object) ?? null;
   }
 
-  private renderActions(campaign: CampaignState, operation: OperationPlan): HTMLElement {
-    const actions = el("div", "base-actions");
-    const activeRoster = activeSoldiers(campaign);
-    const deployment = deploymentSoldiers(campaign);
-    const contact = campaign.ufoContact;
-    const launchable = contact?.status === "crashed" || contact?.status === "landed";
-    const launchContact = launchable ? contact : undefined;
-    const canLaunch = campaign.strategic.status === "active" && deployment.length > 0 && !!launchContact;
+  /** Hover: show a floating tooltip + boost the facility's emissive + cursor
+   *  pointer. Clearing hover restores the defaults. */
+  private onPointerMove = (event: PointerEvent): void => {
+    if (this.disposed || this.facilityMeshes.length === 0) return;
+    const hit = this.facilityMeshAt(event);
+    const id = hit?.facilityId ?? null;
+    if (id !== this.hoveredFacilityId) {
+      this.hoveredFacilityId = id;
+      this.applyFacilityHighlight();
+    }
+    const dom = this.renderer.domElement;
+    if (!this.tooltipEl) return;
+    if (hit) {
+      const facility = findBaseFacility(hit.facilityId);
+      const building = this.opts.campaign.activeConstruction?.facilityId === hit.facilityId;
+      this.tooltipEl.replaceChildren();
+      const strong = el("strong");
+      strong.textContent = facility?.label ?? hit.facilityId;
+      const note = el("span");
+      note.textContent = building ? "Under construction" : (facility?.effect ?? "");
+      this.tooltipEl.append(strong, note);
+      this.tooltipEl.style.left = `${event.clientX}px`;
+      this.tooltipEl.style.top = `${event.clientY}px`;
+      this.tooltipEl.classList.add("visible");
+      dom.style.cursor = "pointer";
+    } else {
+      this.tooltipEl.classList.remove("visible");
+      dom.style.cursor = "default";
+    }
+  };
 
-    const earth = el("button");
-    earth.textContent = "Earth";
-    earth.addEventListener("click", () => this.opts.onOpenGeoscape());
-    const reset = el("button");
-    reset.textContent = "New campaign";
-    reset.addEventListener("click", () => this.opts.onResetCampaign());
-    const launch = el("button", "primary");
-    launch.textContent = canLaunch
-      ? `${missionTypeMeta(operation).launchLabel} (op ${operation.missionNumber})`
-      : campaign.strategic.status === "active"
-        ? activeRoster.length === 0
-          ? "No operatives"
-          : deployment.length === 0
-            ? "Select squad"
-            : contact && !launchContact
-              ? "Intercept first"
-              : "Awaiting contact"
-        : "Campaign complete";
-    launch.disabled = !canLaunch;
-    launch.addEventListener("click", () => this.opts.onLaunchMission());
-    actions.append(earth, reset, launch);
-    return actions;
-  }
+  /** Click a facility floor: select it, jump to the Build tab (which highlights
+   *  its row), and lift its emissive so the 3D cutaway mirrors the selection. */
+  private onCanvasClick = (event: MouseEvent): void => {
+    if (this.disposed || this.facilityMeshes.length === 0) return;
+    const hit = this.facilityMeshAt(event);
+    if (!hit) return;
+    this.selectedFacilityId = hit.facilityId;
+    this.activeTab = "build";
+    this.applyFacilityHighlight();
+    this.refreshHud();
+  };
 
-  private stat(label: string, value: string): HTMLElement {
-    const node = el("div", "base-stat");
-    const span = el("span");
-    span.textContent = label;
-    const b = el("b");
-    b.textContent = value;
-    node.append(span, b);
-    return node;
+  /** Boost the emissive of the selected/hovered facility floor so the 3D cutaway
+   *  stays in sync with the Build-tab selection. */
+  private applyFacilityHighlight(): void {
+    const active = this.selectedFacilityId ?? this.hoveredFacilityId;
+    for (const entry of this.facilityMeshes) {
+      const mat = entry.mesh.material;
+      if (mat instanceof MeshStandardMaterial) {
+        mat.emissiveIntensity = entry.facilityId === active ? 0.55 : 0.12;
+      }
+    }
   }
 
   private resize = (): void => {

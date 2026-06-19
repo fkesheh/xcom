@@ -105,12 +105,16 @@ test.describe("Blacksite boot smoke", () => {
 
     await expect(page.locator("#base-view")).toBeVisible();
     await expect(page.locator("#base-view canvas")).toBeVisible();
-    await expect(page.locator("#base-view .market-card")).toBeVisible();
     await expect(page.locator("#base-view .operation-card")).toBeVisible();
     // Launch button is enabled (crashed contact + active squad).
     await expect(
       page.getByRole("button", { name: /recover ufo core/i }),
     ).toBeEnabled();
+
+    // The market now lives behind the Market tab — open it, then assert the
+    // market panel (with Buy buttons) is visible for the screenshot.
+    await page.getByRole("tab", { name: "Market" }).click();
+    await expect(page.locator("#base-view .market-card")).toBeVisible();
 
     // Scroll the market into view for a representative screenshot.
     await page.locator("#base-view .market-card").scrollIntoViewIfNeeded();
