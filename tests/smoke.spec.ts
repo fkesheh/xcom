@@ -206,4 +206,89 @@ test.describe("Blacksite boot smoke", () => {
       path: path.join(SHOTS_DIR, "05-tactical-endturn.png"),
     });
   });
+
+  test("E) airborne (tracked) UFO shows intercept guidance, not a launchable mission", async ({
+    page,
+  }) => {
+    // Tracked = airborne UFO that has NOT been shot down yet. The base must route
+    // the player to intercept first, never offer a launchable crash-site mission.
+    const fresh = createCampaign(BASE, 42, "veteran");
+    const tracked: CampaignState = {
+      ...fresh,
+      ufoContact: createUfoContact(fresh, 0),
+    };
+    await page.addInitScript((state: CampaignState) => {
+      window.localStorage.setItem("blacksite.campaign.v1", JSON.stringify(state));
+    }, tracked);
+    await page.goto("/");
+
+    await expect(page.locator("#base-view")).toBeVisible();
+    await expect(page.locator("#base-view canvas")).toBeVisible();
+
+    await page.screenshot({ path: path.join(SHOTS_DIR, "07-base-airborne.png") });
+
+    // Guidance: an airborne banner names the contact and routes the player to the
+    // Geoscape to intercept — never a launchable crash-site assault mission.
+    const banner = page.locator("#base-view .airborne-banner.tracked");
+    await expect(banner).toBeVisible();
+    const bannerText = ((await banner.textContent()) ?? "").replace(/\s+/g, " ").trim();
+    console.log("[smoke E] airborne banner text:", bannerText);
+    await expect(banner.getByText(/airborne ufo detected/i)).toBeVisible();
+
+    // The launch button must read "Intercept first" and be DISABLED.
+    const interceptFirst = page.getByRole("button", { name: /^intercept first$/i });
+    await expect(interceptFirst).toBeVisible();
+    await expect(interceptFirst).toBeDisabled();
+    console.log(
+      "[smoke E] launch button label:",
+      ((await interceptFirst.textContent()) ?? "").replace(/\s+/g, " ").trim(),
+    );
+
+    // No enabled "Recover UFO core" launch button may exist for an airborne UFO.
+    const recoverBtn = page.getByRole("button", { name: /recover ufo core/i });
+    const recoverCount = await recoverBtn.count();
+    if (recoverCount > 0) {
+      console.log("[smoke E] 'Recover UFO core' present — asserting it is disabled");
+      await expect(recoverBtn.first()).toBeDisabled();
+    } else {
+      console.log("[smoke E] 'Recover UFO core' correctly absent for airborne UFO");
+    }
+  });
+
+  test("F) geoscape renders the Pause/1x/5x/30x time-speed controls", async ({
+    page,
+  }) => {
+    // A contact-free campaign boots to the base, then hops to a clean geoscape
+    // (no interception overlay) so the main time-speed controls are on display.
+    const campaign = createCampaign(BASE, 7, "veteran");
+    await page.addInitScript((state: CampaignState) => {
+      window.localStorage.setItem("blacksite.campaign.v1", JSON.stringify(state));
+    }, campaign);
+    await page.goto("/");
+
+    await expect(page.locator("#base-view")).toBeVisible();
+    await page.getByRole("button", { name: /^earth$/i }).click();
+
+    await expect(page.locator("#geoscape")).toBeVisible();
+    await expect(page.locator("#geoscape canvas")).toBeVisible();
+
+    await page.screenshot({ path: path.join(SHOTS_DIR, "08-geoscape-time.png") });
+
+    // Time-speed control group with the Pause / 1x / 5x / 30x buttons.
+    const speedGroup = page.locator("#geoscape .geo-speed");
+    await expect(speedGroup).toBeVisible();
+    const speedBtns = page.locator("#geoscape .geo-speed-btn");
+    await expect(speedBtns).toHaveCount(4);
+    const labels = await speedBtns.allTextContents();
+    console.log(
+      "[smoke F] time-speed button labels:",
+      labels.map((t) => t.replace(/\s+/g, " ").trim()),
+    );
+
+    // Pause + each speed button must render (campaign is active, so they're enabled).
+    await expect(page.locator("#geoscape .geo-speed-btn[data-speed='0']")).toBeVisible();
+    await expect(page.locator("#geoscape .geo-speed-btn[data-speed='1']")).toBeVisible();
+    await expect(page.locator("#geoscape .geo-speed-btn[data-speed='5']")).toBeVisible();
+    await expect(page.locator("#geoscape .geo-speed-btn[data-speed='30']")).toBeVisible();
+  });
 });
