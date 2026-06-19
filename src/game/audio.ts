@@ -202,6 +202,64 @@ export class Sfx {
     });
   }
 
+  /** Grenade / HE detonation: noise crash swept down + a low sub-thump. */
+  explosion(): void {
+    this.play((ctx, out) => {
+      this.noiseBurst(ctx, out, {
+        filterType: "lowpass",
+        f0: 1800,
+        f1: 220,
+        q: 0.6,
+        dur: 0.55,
+        peak: 0.95,
+        attack: 0.002,
+      });
+      this.tone(ctx, out, { type: "sine", f0: 120, f1: 38, dur: 0.6, peak: 0.85 });
+      this.tone(ctx, out, { type: "triangle", f0: 90, f1: 30, dur: 0.5, peak: 0.5, when: 0.01 });
+    });
+  }
+
+  /** Medkit use: a soft two-step rising chime (positive healing cue). */
+  heal(): void {
+    this.play((ctx, out) => {
+      this.tone(ctx, out, {
+        type: "sine",
+        f0: 520,
+        f1: 700,
+        dur: 0.16,
+        peak: 0.3,
+        attack: 0.01,
+      });
+      this.tone(ctx, out, {
+        type: "sine",
+        f0: 780,
+        f1: 1040,
+        dur: 0.2,
+        peak: 0.28,
+        when: 0.12,
+        attack: 0.01,
+      });
+      this.tone(ctx, out, { type: "triangle", f0: 1300, dur: 0.12, peak: 0.16, when: 0.26 });
+    });
+  }
+
+  /** Panic alarm: a sharp two-tone warbling blip (unit lost control). */
+  panic(): void {
+    this.play((ctx, out) => {
+      this.tone(ctx, out, { type: "square", f0: 880, f1: 1320, dur: 0.09, peak: 0.3 });
+      this.tone(ctx, out, { type: "square", f0: 880, f1: 1320, dur: 0.09, peak: 0.3, when: 0.16 });
+      this.tone(ctx, out, {
+        type: "sawtooth",
+        f0: 440,
+        f1: 220,
+        dur: 0.22,
+        peak: 0.18,
+        when: 0.08,
+        filter: { type: "lowpass", f0: 2000, q: 2 },
+      });
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Context + node plumbing (all defensive)
   // -------------------------------------------------------------------------

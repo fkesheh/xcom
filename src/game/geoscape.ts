@@ -32,15 +32,22 @@ import {
 } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 
-import type { BaseLocation, CampaignState, UfoContact } from "../campaign/types";
+import type {
+  BaseLocation,
+  CampaignState,
+  DifficultyLevel,
+  MissionType,
+  UfoContact,
+} from "../campaign/types";
 import {
   canLaunchInterceptor,
   formatCampaignClock,
   GEOSCAPE_SCAN_HOURS,
+  type InterceptionAction,
   interceptionForecast,
   isInterceptorReady,
 } from "../campaign/geoscape";
-import { campaignObjectiveProgress, highestRegionalPanic } from "../campaign/storage";
+import { campaignObjectiveProgress, DIFFICULTY_CONFIGS, highestRegionalPanic } from "../campaign/storage";
 import {
   WORLD_CITY_POINTS,
   WORLD_LAND_RINGS,
@@ -49,10 +56,13 @@ import {
 
 interface GeoscapeOptions {
   campaign: CampaignState | null;
-  onConfirmBase: (base: BaseLocation) => void;
+  /** difficulty is only supplied from the new-game screen; existing campaigns keep theirs. */
+  onConfirmBase: (base: BaseLocation, difficulty?: DifficultyLevel) => void;
   onAdvanceTime: (hours: number) => void;
   onInterceptUfo: () => void;
   onResetCampaign: () => void;
+  /** Fires for each Close / Attack / Disengage choice during an active interception encounter. */
+  onInterceptionAction?: (action: InterceptionAction) => void;
 }
 
 export interface GeoscapeTimeAction {
@@ -263,6 +273,193 @@ const CSS = `
   letter-spacing: .08em;
   text-transform: uppercase;
 }
+#geoscape .geo-difficulty {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 13px;
+}
+#geoscape .geo-difficulty-eye {
+  color: #67e8f9;
+  font: 800 9px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
+  letter-spacing: .2em;
+  text-transform: uppercase;
+}
+#geoscape .geo-diff-option {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px 11px;
+  cursor: pointer;
+  text-align: left;
+  color: #cfe6f2;
+  border: 1px solid rgba(132,165,188,.24);
+  border-radius: 7px;
+  background: rgba(0,0,0,.18);
+  font: 700 11px/1.3 ui-monospace, monospace;
+}
+#geoscape .geo-diff-option .geo-diff-name {
+  color: #e8fbff;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+#geoscape .geo-diff-option .geo-diff-name::before {
+  content: "○  ";
+  color: #67e8f9;
+}
+#geoscape .geo-diff-option .geo-diff-desc {
+  color: #8aa6b6;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+}
+#geoscape .geo-diff-option[aria-checked="true"] {
+  border-color: rgba(103,232,249,.85);
+  background: linear-gradient(180deg, rgba(17,94,117,.95), rgba(8,49,65,.95));
+}
+#geoscape .geo-diff-option[aria-checked="true"] .geo-diff-name::before {
+  content: "●  ";
+}
+#geoscape .geo-mission-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  margin-bottom: 7px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,.14);
+  background: rgba(0,0,0,.32);
+  color: #f1f5f9;
+  font: 800 9px/1 ui-monospace, monospace;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+#geoscape .geo-mission-badge.urgent {
+  border-color: rgba(249,115,22,.7);
+  background: rgba(67,20,7,.5);
+  color: #fed7aa;
+}
+#geoscape .geo-mission-badge .geo-mission-icon { font-size: 12px; }
+#geoscape .geo-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 6px 4px;
+  text-align: center;
+}
+#geoscape .geo-empty .geo-empty-icon {
+  font-size: 20px;
+  line-height: 1;
+  color: #67e8f9;
+  opacity: .75;
+}
+#geoscape .geo-notice {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin-top: 13px;
+  padding: 11px 13px;
+  border-radius: 8px;
+  border: 1px solid rgba(103,232,249,.3);
+  background: rgba(2,12,20,.55);
+}
+#geoscape .geo-notice.won {
+  border-color: rgba(134,239,172,.6);
+  background: rgba(8,30,16,.45);
+}
+#geoscape .geo-notice.lost {
+  border-color: rgba(248,113,113,.6);
+  background: rgba(45,11,18,.4);
+}
+#geoscape .geo-notice .geo-notice-icon { font-size: 18px; line-height: 1; }
+#geoscape .geo-notice.won .geo-notice-icon { color: #86efac; }
+#geoscape .geo-notice.lost .geo-notice-icon { color: #fda4af; }
+#geoscape .geo-notice b {
+  display: block;
+  color: #e8fbff;
+  font: 800 11px/1.3 ui-monospace, monospace;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+#geoscape .geo-notice p { margin-top: 3px; font-size: 10px; }
+#geoscape .geo-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(2,8,14,.62);
+  backdrop-filter: blur(4px);
+}
+#geoscape .geo-encounter {
+  display: flex;
+  flex-direction: column;
+  width: min(520px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  padding: 18px;
+  border: 1px solid rgba(251,113,133,.5);
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(20,12,16,.96), rgba(4,8,12,.97));
+  box-shadow: 0 30px 90px rgba(0,0,0,.55);
+}
+#geoscape .geo-encounter .eyebrow { color: #fb7185; }
+#geoscape .geo-encounter h2 { color: #ffe4e6; }
+#geoscape .geo-encounter-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 10px 0 4px;
+  color: #fda4af;
+  font: 700 10px/1 ui-monospace, monospace;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+#geoscape .geo-bar { margin: 8px 0; }
+#geoscape .geo-bar-label {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  color: #cbd5e1;
+  font: 700 9px/1 ui-monospace, monospace;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+#geoscape .geo-bar-track {
+  height: 10px;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 999px;
+  background: rgba(255,255,255,.08);
+  overflow: hidden;
+}
+#geoscape .geo-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width .2s;
+}
+#geoscape .geo-bar-fill.ufo { background: linear-gradient(90deg, #fb7185, #f43f5e); }
+#geoscape .geo-bar-fill.interceptor { background: linear-gradient(90deg, #67e8f9, #22d3ee); }
+#geoscape .geo-encounter-log {
+  flex: 1;
+  min-height: 80px;
+  max-height: 168px;
+  margin: 10px 0;
+  padding: 8px 10px;
+  overflow-y: auto;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 7px;
+  background: rgba(0,0,0,.3);
+  color: #a8c0d0;
+  font: 600 10px/1.5 ui-monospace, monospace;
+}
+#geoscape .geo-encounter-log p { margin: 0 0 4px; color: #a8c0d0; }
+#geoscape .geo-encounter-actions { display: flex; gap: 8px; }
+#geoscape .geo-encounter-actions button { flex: 1; }
 @media (max-width: 820px) {
   #geoscape .geo-panel { width: calc(100vw - 24px); padding: 13px; }
   #geoscape .geo-left { left: 12px; right: 12px; }
@@ -270,6 +467,8 @@ const CSS = `
   #geoscape h1 { font-size: 30px; }
   #geoscape .geo-status { grid-template-columns: 1fr; }
   #geoscape .geo-hint { display: none; }
+  #geoscape .geo-encounter { max-height: calc(100vh - 24px); }
+  #geoscape .geo-encounter-log { max-height: 120px; }
 }
 `;
 
@@ -344,6 +543,46 @@ export function geoscapeTimeAction(campaign: CampaignState | null): GeoscapeTime
 
 export function canSelectBaseSite(campaign: CampaignState | null): boolean {
   return campaign === null;
+}
+
+/** Difficulty levels in selector order (matches difficulty ramp). */
+export const DIFFICULTY_LEVELS: readonly DifficultyLevel[] = ["rookie", "veteran", "commander"];
+
+/** One-line tagline for each difficulty option in the new-game selector. */
+export const DIFFICULTY_DESCRIPTIONS: Record<DifficultyLevel, string> = {
+  rookie: "Forgiving economy and lighter alien pressure. Recommended for new commanders.",
+  veteran: "The intended X-COM balance: steady threat and a fair council.",
+  commander: "Lean funding, heavier assault waves. For seasoned commanders only.",
+};
+
+export interface MissionTypeInfo {
+  /** Short glyph paired with the label so mission type is never color-alone. */
+  icon: string;
+  label: string;
+  /** Terror and base-defense contacts read as higher priority. */
+  urgent: boolean;
+  /** Marker color on the globe (always paired with the icon + label in the card). */
+  color: number;
+}
+
+/**
+ * Per-mission-type presentation. The globe marker uses `color`, but every place
+ * the contact appears in the DOM also shows `icon` + `label`, so the type is
+ * distinguishable without relying on color (a11y). Urgent types drive a faster,
+ * larger marker pulse in the render loop.
+ */
+export function missionTypeInfo(missionType: MissionType | undefined): MissionTypeInfo {
+  switch (missionType) {
+    case "landedUfo":
+      return { icon: "⌂", label: "Landed UFO", urgent: false, color: 0xc084fc };
+    case "terror":
+      return { icon: "⚠", label: "Terror site", urgent: true, color: 0xf97316 };
+    case "baseDefense":
+      return { icon: "★", label: "Base defense", urgent: true, color: 0xef4444 };
+    case "crashSite":
+    default:
+      return { icon: "✈", label: "Crash site", urgent: false, color: 0xfb7185 };
+  }
 }
 
 export function regionFor(lat: number, lon: number): string {
@@ -553,6 +792,8 @@ export class GeoscapeView {
   private readonly baseMarker = new Group();
   private readonly ufoMarker = new Group();
   private selectedBase: BaseLocation | null;
+  private selectedDifficulty: DifficultyLevel = "veteran";
+  private encounterLog: HTMLElement | null = null;
   private raf = 0;
   private down: { x: number; y: number } | null = null;
   private disposed = false;
@@ -594,6 +835,8 @@ export class GeoscapeView {
     this.renderer.domElement.addEventListener("pointerup", this.onPointerUp);
     window.addEventListener("resize", this.resize);
     this.resize();
+    // Surface the most recent engagement log line (the panel is rebuilt per action).
+    if (this.encounterLog) this.encounterLog.scrollTop = this.encounterLog.scrollHeight;
     this.frame();
   }
 
@@ -657,7 +900,7 @@ export class GeoscapeView {
     this.earthGroup.add(this.baseMarker);
     if (this.selectedBase) this.placeMarker(this.selectedBase);
     else this.baseMarker.visible = false;
-    this.buildUfoMarker();
+    this.buildUfoMarker(this.opts.campaign?.ufoContact?.missionType);
     this.earthGroup.add(this.ufoMarker);
     if (this.opts.campaign?.ufoContact) this.placeUfoMarker(this.opts.campaign.ufoContact);
     else this.ufoMarker.visible = false;
@@ -744,11 +987,12 @@ export class GeoscapeView {
     this.baseMarker.add(pulse, cone, ring);
   }
 
-  private buildUfoMarker(): void {
+  private buildUfoMarker(missionType: MissionType | undefined): void {
+    const info = missionTypeInfo(missionType);
     const core = new Mesh(
       new SphereGeometry(0.045, 16, 10),
       new MeshBasicMaterial({
-        color: 0xfb7185,
+        color: info.color,
         transparent: true,
         opacity: 0.95,
         blending: AdditiveBlending,
@@ -757,7 +1001,7 @@ export class GeoscapeView {
     const ring = new Mesh(
       new RingGeometry(0.075, 0.12, 28),
       new MeshBasicMaterial({
-        color: 0xfb7185,
+        color: info.color,
         transparent: true,
         opacity: 0.55,
         side: DoubleSide,
@@ -768,14 +1012,33 @@ export class GeoscapeView {
     const beam = new Mesh(
       new ConeGeometry(0.05, 0.16, 18),
       new MeshBasicMaterial({
-        color: 0xfb7185,
+        color: info.color,
         transparent: true,
         opacity: 0.46,
         blending: AdditiveBlending,
       }),
     );
     beam.position.y = 0.08;
-    this.ufoMarker.add(core, ring, beam);
+    // Urgent mission types (terror / base defense) get a second outer halo so the
+    // marker reads as higher-priority on the globe; the render loop also pulses
+    // these faster. Color is always paired with the icon + label in the contact
+    // card, so the mission type is never conveyed by color alone.
+    if (info.urgent) {
+      const halo = new Mesh(
+        new RingGeometry(0.14, 0.18, 28),
+        new MeshBasicMaterial({
+          color: info.color,
+          transparent: true,
+          opacity: 0.4,
+          side: DoubleSide,
+          blending: AdditiveBlending,
+        }),
+      );
+      halo.rotation.x = -Math.PI / 2;
+      this.ufoMarker.add(core, ring, halo, beam);
+    } else {
+      this.ufoMarker.add(core, ring, beam);
+    }
   }
 
   private buildHud(): { region: HTMLElement; coords: HTMLElement; confirm: HTMLButtonElement } {
@@ -807,6 +1070,8 @@ export class GeoscapeView {
       );
     }
     left.append(eyebrow, title, copy, stats);
+    const notice = this.buildNotice();
+    if (notice) left.append(notice);
     if (this.opts.campaign) {
       left.append(
         this.objectiveCard(),
@@ -856,12 +1121,16 @@ export class GeoscapeView {
     }
     const confirm = el("button", "primary");
     confirm.addEventListener("click", () => {
-      if (this.selectedBase) this.opts.onConfirmBase(this.selectedBase);
+      if (!this.selectedBase) return;
+      const difficulty = this.opts.campaign?.strategic.difficulty ?? this.selectedDifficulty;
+      this.opts.onConfirmBase(this.selectedBase, difficulty);
     });
     if (!this.opts.campaign?.ufoContact || this.opts.campaign.ufoContact.status === "crashed") {
       actions.append(confirm);
     }
-    right.append(siteEye, heading, site, actions);
+    right.append(siteEye, heading, site);
+    if (!this.opts.campaign) right.append(this.buildDifficultySelector());
+    right.append(actions);
     this.root.appendChild(right);
 
     const hint = el("div", "geo-hint");
@@ -869,28 +1138,174 @@ export class GeoscapeView {
       ? "Scan time from Earth Command / intercept UFOs / launch crash-site recovery from base"
       : "Drag to rotate / wheel to zoom / click Earth to designate base";
     this.root.appendChild(hint);
+    const overlay = this.buildInterceptionOverlay();
+    if (overlay) this.root.appendChild(overlay);
     return { region, coords, confirm };
   }
 
   private contactCard(): HTMLElement {
     const contact = this.opts.campaign?.ufoContact;
     const card = el("section", `geo-contact ${contact ? "" : "idle"}`.trim());
-    const title = el("strong");
-    const copy = el("p");
-    if (contact) {
-      title.textContent = `${contact.id} / ${contact.status === "crashed" ? "Crash site" : "Airborne"} / ${contact.region}`;
-      const remaining = Math.max(0, contact.expiresAtHour - (this.opts.campaign?.clock.elapsedHours ?? 0));
-      copy.textContent = contact.status === "crashed"
-        ? `${fmtCoord(contact.lat, "N", "S")} / ${fmtCoord(contact.lon, "E", "W")} ` +
-          `- crash site expires in ${remaining}h. Return to base to launch recovery. ` +
-          `Interceptor damage ${contact.interceptorDamage ?? 0}%.`
-        : this.trackedContactCopy(contact, remaining);
-    } else {
+    if (!contact) {
+      const empty = el("div", "geo-empty");
+      const icon = el("div", "geo-empty-icon");
+      icon.textContent = "◌";
+      const title = el("strong");
       title.textContent = "No UFO contact";
+      const copy = el("p");
       copy.textContent = "Radar is sweeping. Advance time until command detects a recoverable UFO track.";
+      empty.append(icon, title, copy);
+      card.append(empty);
+      return card;
     }
-    card.append(title, copy);
+    const info = missionTypeInfo(contact.missionType);
+    const title = el("strong");
+    title.textContent = `${contact.id} / ${this.contactStatusLabel(contact)} / ${contact.region}`;
+    const copy = el("p");
+    const remaining = Math.max(0, contact.expiresAtHour - (this.opts.campaign?.clock.elapsedHours ?? 0));
+    copy.textContent = contact.status === "crashed"
+      ? `${fmtCoord(contact.lat, "N", "S")} / ${fmtCoord(contact.lon, "E", "W")} ` +
+        `- crash site expires in ${remaining}h. Return to base to launch recovery. ` +
+        `Interceptor damage ${contact.interceptorDamage ?? 0}%.`
+      : this.trackedContactCopy(contact, remaining);
+    card.append(this.missionBadge(info), title, copy);
     return card;
+  }
+
+  private contactStatusLabel(contact: UfoContact): string {
+    if (contact.status === "crashed") return "Crash site";
+    if (contact.status === "engaging") return "Engaging";
+    if (contact.status === "landed") {
+      if (contact.missionType === "terror") return "Terror site";
+      if (contact.missionType === "baseDefense") return "Base assault";
+      return "Landed";
+    }
+    return "Airborne";
+  }
+
+  private missionBadge(info: MissionTypeInfo): HTMLElement {
+    const badge = el("div", `geo-mission-badge ${info.urgent ? "urgent" : ""}`.trim());
+    const icon = el("span", "geo-mission-icon");
+    icon.textContent = info.icon;
+    const label = el("span");
+    label.textContent = info.label;
+    badge.append(icon, label);
+    return badge;
+  }
+
+  private buildDifficultySelector(): HTMLElement {
+    const wrap = el("div", "geo-difficulty");
+    wrap.setAttribute("role", "radiogroup");
+    wrap.setAttribute("aria-label", "Campaign difficulty");
+    const eye = el("div", "geo-difficulty-eye");
+    eye.textContent = "Select difficulty";
+    wrap.append(eye);
+    for (const level of DIFFICULTY_LEVELS) {
+      const config = DIFFICULTY_CONFIGS[level];
+      const option = el("button", "geo-diff-option");
+      option.type = "button";
+      option.setAttribute("role", "radio");
+      option.setAttribute("aria-checked", String(level === this.selectedDifficulty));
+      const name = el("span", "geo-diff-name");
+      name.textContent = `${config.label} — threat ${config.startingThreat}%, foes ×${config.enemyCountMult}`;
+      const desc = el("span", "geo-diff-desc");
+      desc.textContent = DIFFICULTY_DESCRIPTIONS[level];
+      option.append(name, desc);
+      option.addEventListener("click", () => {
+        if (this.selectedDifficulty === level) return;
+        this.selectedDifficulty = level;
+        wrap.querySelectorAll(".geo-diff-option").forEach((node) => {
+          node.setAttribute("aria-checked", String(node === option));
+        });
+      });
+      wrap.append(option);
+    }
+    return wrap;
+  }
+
+  /** Terminal-status notice; returns null when the campaign is still active. */
+  private buildNotice(): HTMLElement | null {
+    const status = this.opts.campaign?.strategic.status;
+    if (status !== "won" && status !== "lost") return null;
+    const notice = el("div", `geo-notice ${status}`);
+    const icon = el("span", "geo-notice-icon");
+    icon.textContent = status === "won" ? "★" : "✕";
+    const body = el("div");
+    const heading = el("b");
+    heading.textContent = status === "won" ? "Containment achieved" : "Containment failed";
+    const copy = el("p");
+    copy.textContent = status === "won"
+      ? "The invasion cell is broken. Council stands down the project."
+      : "Command has collapsed. The council is withdrawing funding from the project.";
+    body.append(heading, copy);
+    notice.append(icon, body);
+    return notice;
+  }
+
+  /** Modal interception overlay; rendered only while an encounter is in progress. */
+  private buildInterceptionOverlay(): HTMLElement | null {
+    const encounter = this.opts.campaign?.interception;
+    if (!encounter) return null;
+    const overlay = el("div", "geo-overlay");
+    const panel = el("div", "geo-encounter");
+    const eye = el("div", "eyebrow");
+    eye.textContent = "Interception encounter";
+    const heading = el("h2");
+    heading.textContent = `${encounter.contactId} engagement`;
+    const meta = el("div", "geo-encounter-meta");
+    const range = el("span");
+    range.textContent = `Range ${encounter.range}`;
+    const rounds = el("span");
+    rounds.textContent = `Round ${encounter.roundsElapsed + 1}`;
+    meta.append(range, rounds);
+    const log = el("div", "geo-encounter-log");
+    for (const line of encounter.log) {
+      const entry = el("p");
+      entry.textContent = line;
+      log.append(entry);
+    }
+    this.encounterLog = log;
+    const actions = el("div", "geo-encounter-actions");
+    actions.append(
+      this.encounterButton("Close", "close"),
+      this.encounterButton("Attack", "attack", true),
+      this.encounterButton("Disengage", "disengage"),
+    );
+    panel.append(
+      eye,
+      heading,
+      meta,
+      this.hpBar("UFO", encounter.ufoHp, encounter.ufoHpMax, "ufo"),
+      this.hpBar("Interceptor", encounter.interceptorHp, encounter.interceptorHpMax, "interceptor"),
+      log,
+      actions,
+    );
+    overlay.append(panel);
+    return overlay;
+  }
+
+  private encounterButton(label: string, action: InterceptionAction, primary = false): HTMLButtonElement {
+    const button = el("button", primary ? "primary" : undefined);
+    button.textContent = label;
+    button.addEventListener("click", () => this.opts.onInterceptionAction?.(action));
+    return button;
+  }
+
+  private hpBar(label: string, hp: number, hpMax: number, variant: "ufo" | "interceptor"): HTMLElement {
+    const wrap = el("div", "geo-bar");
+    const labelRow = el("div", "geo-bar-label");
+    const name = el("span");
+    name.textContent = label;
+    const value = el("span");
+    value.textContent = `${Math.max(0, Math.floor(hp))}/${hpMax}`;
+    labelRow.append(name, value);
+    const track = el("div", "geo-bar-track");
+    const fill = el("div", `geo-bar-fill ${variant}`);
+    const pct = hpMax > 0 ? Math.max(0, Math.min(100, (hp / hpMax) * 100)) : 0;
+    fill.style.width = `${pct}%`;
+    track.append(fill);
+    wrap.append(labelRow, track);
+    return wrap;
   }
 
   private objectiveCard(): HTMLElement {
@@ -1076,9 +1491,13 @@ export class GeoscapeView {
   private frame = (): void => {
     if (this.disposed) return;
     this.raf = requestAnimationFrame(this.frame);
-    const markerPulse = 1 + Math.sin(performance.now() * 0.004) * 0.08;
-    this.baseMarker.scale.setScalar(markerPulse);
-    this.ufoMarker.scale.setScalar(1 + Math.sin(performance.now() * 0.006) * 0.14);
+    const now = performance.now();
+    this.baseMarker.scale.setScalar(1 + Math.sin(now * 0.004) * 0.08);
+    const contact = this.opts.campaign?.ufoContact;
+    const urgent = contact ? missionTypeInfo(contact.missionType).urgent : false;
+    // Urgent contacts (terror / base defense) pulse faster and harder so they
+    // read as higher priority against the steady crash-site markers.
+    this.ufoMarker.scale.setScalar(1 + Math.sin(now * (urgent ? 0.012 : 0.006)) * (urgent ? 0.2 : 0.14));
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
   };

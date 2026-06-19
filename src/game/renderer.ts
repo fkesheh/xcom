@@ -1170,6 +1170,28 @@ export class Renderer {
     if (this.selectedId === ev.unitId) this.setSelected(null);
   }
 
+  /**
+   * Detonation animation for a grenade/HE blast: convert the tile centre to
+   * world coords (raised slightly so the flash reads above the ground) and
+   * hand off to {@link Effects.playBlast}, awaiting its full lifetime so the
+   * controller can sequence the ensuing damage/visibility reveal afterwards.
+   */
+  async playBlast(center: Vec2, radius: number): Promise<void> {
+    const w = tileToWorld(center.x, center.y, 0);
+    await this.effects.playBlast(new Vector3(w.x, 0.4, w.z), radius);
+  }
+
+  /**
+   * Throw-arc indicator for a thrown item (grenade, …): a glowing projectile
+   * that arcs from one tile to another. Awaitable so the controller can fire
+   * the detonation FX only once it has landed.
+   */
+  async playThrowArc(from: Vec2, to: Vec2): Promise<void> {
+    const a = tileToWorld(from.x, from.y, 0.9);
+    const b = tileToWorld(to.x, to.y, 0.4);
+    await this.effects.playThrowArc(new Vector3(a.x, a.y, a.z), new Vector3(b.x, b.y, b.z));
+  }
+
   /** Read-only access for the controller (e.g. to pan to a unit's mesh). */
   unitWorldTile(id: UnitId): Vec2 | null {
     const view = this.unitViews.get(id);

@@ -5,14 +5,18 @@
  * stay in src/sim and the controller remains responsible for dispatching them.
  */
 
+import { MORALE } from "../sim/types";
 import type {
   BattleState,
+  Item,
+  ItemInstance,
   ReserveMode,
   ShotKind,
   ShotMode,
   ShotPreview,
   Unit,
   UnitId,
+  Weapon,
 } from "../sim/types";
 
 export interface HudHover {
@@ -25,6 +29,14 @@ export interface HudHover {
   reachable?: boolean;
 }
 
+/** Optional campaign career detail shown in the soldier dossier overlay. */
+export interface HudSoldierDetail {
+  rank?: string;
+  missions?: number;
+  survived?: number;
+  kills?: number;
+}
+
 export interface HudRuntime {
   seed: number;
   missionName: string;
@@ -33,6 +45,12 @@ export interface HudRuntime {
   debrief?: HudDebrief;
   muted: boolean;
   busy: boolean;
+  /** Units currently in a panicked state (inferred by the integrator from sim events). */
+  panickedUnitIds?: number[];
+  /** When set, the end-of-mission banner becomes a full campaign victory/defeat screen. */
+  campaignStatus?: "won" | "lost";
+  /** Campaign career data for the currently selected soldier, when available. */
+  soldierDetail?: HudSoldierDetail;
 }
 
 export interface HudDebrief {
@@ -61,6 +79,12 @@ export interface HudCallbacks {
   onToggleMute: () => boolean;
   onOpenGeoscape: () => void;
   onReturnToBase: () => void;
+  onThrowItem?: (itemId: string) => void;
+  onUseItem?: (itemId: string) => void;
+  onPrimeItem?: (itemId: string) => void;
+  onOpenSoldierDetail?: (unitId: number) => void;
+  /** Campaign-level restart; falls back to onReturnToBase when not wired. */
+  onNewCampaign?: () => void;
 }
 
 export type ToastTone = "info" | "success" | "danger";
@@ -69,6 +93,8 @@ const MODES: readonly ShotKind[] = ["snap", "aimed", "auto"];
 const RESERVES: readonly ReserveMode[] = ["none", "snap", "aimed", "auto"];
 const STYLE_ID = "blacksite-hud-style";
 const LOG_TAIL = 7;
+/** Morale at/above this value reads as "Steady"; below PANIC_THRESHOLD reads as "PANIC". */
+const MORALE_STEADY_FLOOR = 67;
 
 const CSS = `
 :root {
@@ -243,12 +269,33 @@ const CSS = `
 }
 #hud .meter-head { display: flex; justify-content: space-between; margin-top: 8px; color: var(--hud-muted); font: 700 9px/1 ui-monospace, monospace; letter-spacing: .1em; text-transform: uppercase; }
 #hud .meter-head b { color: var(--hud-text); font-weight: 700; letter-spacing: 0; }
-#hud .bar { height: 7px; margin-top: 6px; border-radius: 7px; background: rgba(255,255,255,.07); overflow: hidden; }
+#hud .meter-right { display: inline-flex; align-items: baseline; gap: 8px; }
+#hud .bar { position: relative; height: 7px; margin-top: 6px; border-radius: 7px; background: rgba(255,255,255,.07); overflow: hidden; }
 #hud .bar i { display: block; height: 100%; border-radius: inherit; transition: width 180ms ease; }
+/* Reaction-reserve segment: amber hatched overlay sitting flush against the spendable TU. */
+#hud .tu-reserve {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: repeating-linear-gradient(45deg, rgba(251,191,36,.78) 0 4px, rgba(251,191,36,.18) 4px 8px);
+  transition: width 180ms ease, left 180ms ease;
+}
+#hud .reserve-tag { color: var(--hud-amber); font-weight: 700; letter-spacing: 0; }
+#hud .reserve-tag::before { content: "⚡ "; }
+/* Morale bar: tone drives the fill colour but the numeric value + label always accompany it. */
+#hud .morale-bar i { background: linear-gradient(90deg, #4ade80, #22d3ee); }
+#hud .morale-bar.shaken i { background: linear-gradient(90deg, #fbbf24, #f59e0b); }
+#hud .morale-bar.panic i { background: linear-gradient(90deg, #fb7185, #ef4444); }
+#hud .morale-tag { font-weight: 700; letter-spacing: 0; }
+#hud .morale-tag.steady { color: var(--hud-green); }
+#hud .morale-tag.shaken { color: var(--hud-amber); }
+#hud .morale-tag.panic { color: var(--hud-red); animation: panic-pulse 1s ease-in-out infinite; }
 #hud .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-top: 12px; }
 #hud .stat { padding: 7px; border: 1px solid rgba(255,255,255,.06); border-radius: 6px; background: rgba(0,0,0,.13); }
 #hud .stat span { display: block; color: var(--hud-muted); font: 700 8px/1 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
 #hud .stat b { display: block; margin-top: 4px; font: 750 12px/1 ui-monospace, monospace; }
+#hud .details-btn { min-height: 28px; min-width: 96px; margin-top: 10px; padding: 0 12px; font-size: 9px; text-transform: uppercase; }
 
 #hud .actions {
   left: 50%;
@@ -267,12 +314,25 @@ const CSS = `
 #hud .modes .mode-meta { display: flex; justify-content: center; gap: 7px; margin-top: 5px; color: #9db1c1; font-size: 9px; }
 #hud .modes .chance { color: var(--hud-amber); }
 #hud .reserve-row,
-#hud .reload-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-#hud .reserve-row > span { width: 76px; color: var(--hud-muted); font: 700 8px/1.2 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
-#hud .reload-row > span { width: 76px; color: var(--hud-muted); font: 700 8px/1.2 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+#hud .reload-row,
+#hud .items-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+#hud .reserve-row > span,
+#hud .reload-row > span,
+#hud .items-row > span { width: 76px; color: var(--hud-muted); font: 700 8px/1.2 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
 #hud .reserve { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; flex: 1; }
 #hud .reserve button { min-height: 30px; padding: 4px; font-size: 8px; text-transform: uppercase; }
 #hud .reload-row button { flex: 1; min-height: 32px; padding: 4px 8px; font-size: 9px; text-transform: uppercase; }
+/* Carried-items action grid. Each line is one item: primary action + optional grenade prime. */
+#hud .items-stack { flex: 1; display: flex; flex-direction: column; gap: 5px; }
+#hud .item-line { display: flex; gap: 5px; }
+#hud .item-line button { flex: 1; min-height: 34px; padding: 5px 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 9px; text-align: left; text-transform: none; letter-spacing: .02em; }
+#hud .item-line button.prime { flex: 0 0 auto; min-width: 78px; justify-content: center; text-transform: uppercase; }
+#hud .item-line .item-label { display: flex; flex-direction: column; gap: 1px; overflow: hidden; }
+#hud .item-line .item-label b { font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#hud .item-line .item-label small { color: var(--hud-muted); font-size: 8px; }
+#hud .item-line .item-verb { color: var(--hud-cyan); font-size: 9px; text-transform: uppercase; }
+#hud .item-line button:disabled .item-verb { color: var(--hud-muted); }
+#hud .items-empty { color: var(--hud-muted); font: 600 9px/1.3 ui-monospace, monospace; padding: 4px 2px; }
 
 #hud .squad {
   right: max(14px, env(safe-area-inset-right));
@@ -288,6 +348,18 @@ const CSS = `
 #hud .roster .roster-status { color: var(--hud-green); font-size: 8px; }
 #hud .roster .roster-status.spent { color: var(--hud-amber); }
 #hud .roster .roster-status.kia { color: var(--hud-red); }
+#hud .roster .panic-tag {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  color: #ffe4e6;
+  background: rgba(251,113,133,.22);
+  border: 1px solid rgba(251,113,133,.5);
+  font: 800 7px/1.2 ui-monospace, monospace;
+  letter-spacing: .08em;
+  animation: panic-pulse 1s ease-in-out infinite;
+}
 #hud .roster .roster-bars { display: flex; gap: 3px; height: 3px; margin-top: 6px; }
 #hud .roster .roster-bars i { display: block; border-radius: 3px; background: var(--hud-cyan); }
 #hud .roster .roster-bars i:last-child { background: var(--hud-green); }
@@ -307,6 +379,7 @@ const CSS = `
 }
 #hud .endturn.ready { animation: endturn-pulse 1.8s ease-in-out infinite; }
 @keyframes endturn-pulse { 50% { box-shadow: 0 0 24px rgba(103,232,249,.2); } }
+@keyframes panic-pulse { 50% { opacity: .4; } }
 
 #hud .toast {
   position: absolute;
@@ -333,7 +406,8 @@ const CSS = `
 #hud .toast.danger { color: #fecdd3; border-color: rgba(251,113,133,.5); }
 
 #hud .banner,
-#hud .briefing {
+#hud .briefing,
+#hud .dossier {
   position: absolute;
   inset: 0;
   z-index: 20;
@@ -345,10 +419,13 @@ const CSS = `
   background: radial-gradient(circle at center, rgba(10,25,35,.78), rgba(2,5,8,.95));
   backdrop-filter: blur(8px);
 }
+#hud .dossier { z-index: 24; background: radial-gradient(circle at center, rgba(10,25,35,.82), rgba(2,5,8,.96)); }
 #hud .banner.show,
-#hud .briefing.show { display: flex; }
+#hud .briefing.show,
+#hud .dossier.show { display: flex; }
 #hud .banner-card,
-#hud .briefing-card {
+#hud .briefing-card,
+#hud .dossier-card {
   position: relative;
   width: min(720px, 100%);
   overflow: hidden;
@@ -360,7 +437,9 @@ const CSS = `
     rgba(5,11,17,.98);
   box-shadow: 0 30px 100px rgba(0,0,0,.55);
 }
-#hud .briefing-card::before {
+#hud .dossier-card { width: min(560px, 100%); max-height: calc(100vh - 44px); overflow: auto; }
+#hud .briefing-card::before,
+#hud .dossier-card::before {
   content: "";
   position: absolute;
   top: 0;
@@ -398,7 +477,7 @@ const CSS = `
   font: 850 11px/1.2 ui-monospace, monospace;
   text-transform: uppercase;
 }
-#hud .briefing-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 26px 0; }
+#hud .briefing-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 26px 0; }
 #hud .briefing-step { padding: 13px; border: 1px solid rgba(255,255,255,.08); border-radius: 8px; background: rgba(0,0,0,.14); }
 #hud .briefing-step b { display: block; margin: 5px 0; font-size: 13px; text-transform: uppercase; }
 #hud .briefing-step p { margin: 0; color: var(--hud-muted); font-size: 10px; }
@@ -406,9 +485,24 @@ const CSS = `
 #hud .briefing-actions span { color: var(--hud-muted); font: 600 9px/1.45 ui-monospace, monospace; }
 #hud .briefing-actions button,
 #hud .banner button { min-width: 174px; padding: 0 18px; border-color: var(--hud-cyan); }
+#hud .banner-actions { display: flex; gap: 10px; justify-content: center; margin-top: 6px; }
 #hud .banner-card { text-align: center; }
 #hud .banner.win h1 { color: var(--hud-green); }
 #hud .banner.lose h1 { color: var(--hud-red); }
+#hud .banner.campaign-win .banner-card { border-color: rgba(74,222,128,.5); box-shadow: 0 30px 120px rgba(74,222,128,.16), 0 30px 100px rgba(0,0,0,.55); }
+#hud .banner.campaign-lose .banner-card { border-color: rgba(251,113,133,.55); box-shadow: 0 30px 120px rgba(251,113,133,.16), 0 30px 100px rgba(0,0,0,.55); }
+
+/* Soldier dossier (details overlay). */
+#hud .dossier h2 { margin: 4px 0 0; font-size: 26px; line-height: 1; letter-spacing: .03em; }
+#hud .dossier .rank { margin-top: 6px; color: var(--hud-cyan); font: 700 11px/1 ui-monospace, monospace; letter-spacing: .1em; text-transform: uppercase; }
+#hud .dossier-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin: 18px 0; }
+#hud .dossier-section { margin-top: 14px; }
+#hud .dossier-section > .eyebrow { margin-bottom: 7px; }
+#hud .dossier ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 5px; }
+#hud .dossier li { display: flex; justify-content: space-between; gap: 10px; padding: 6px 9px; border: 1px solid rgba(255,255,255,.06); border-radius: 6px; background: rgba(0,0,0,.18); font: 600 10px/1.3 ui-monospace, monospace; }
+#hud .dossier li small { color: var(--hud-muted); }
+#hud .dossier-actions { display: flex; justify-content: flex-end; margin-top: 18px; }
+#hud .dossier-actions button { min-width: 130px; }
 
 @media (max-width: 1120px) {
   #hud .objective, #hud .log { display: none; }
@@ -438,7 +532,8 @@ const CSS = `
     padding: 10px;
   }
   #hud .reserve-row,
-  #hud .reload-row { display: none; }
+  #hud .reload-row,
+  #hud .items-row { display: none; }
   #hud .modes { margin-top: 7px; }
   #hud .modes button { min-height: 48px; }
   #hud .endturn { right: 20px; bottom: 36px; min-width: 104px; min-height: 46px; font-size: 9px; }
@@ -446,6 +541,7 @@ const CSS = `
   #hud .briefing-step { padding: 10px 12px; }
   #hud .briefing-actions { align-items: stretch; flex-direction: column; }
   #hud .briefing-actions button { width: 100%; }
+  #hud .dossier-stats { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-height: 660px) {
   #hud .log, #hud .squad { display: none; }
@@ -455,6 +551,61 @@ const CSS = `
   #hud .briefing-grid { margin: 16px 0; }
 }
 `;
+
+// ---------------------------------------------------------------------------
+// Pure helpers (exported for vitest). TU math mirrors src/sim/battle.ts exactly
+// so the HUD's disabled-state and the sim's rejection reasons always agree.
+// ---------------------------------------------------------------------------
+
+/** A consumable-item action the HUD can raise. */
+export type ItemActionKind = "throw" | "use" | "prime";
+
+/**
+ * TU cost of an item action. Throw/Use charge the full `tuPercent`; priming a
+ * grenade costs half (mirrors `executePrimeItem` in src/sim/battle.ts).
+ */
+export function itemActionTuCost(
+  maxTu: number,
+  tuPercent: number,
+  action: ItemActionKind,
+): number {
+  const factor = action === "prime" ? 0.5 : 1;
+  return Math.ceil((maxTu * tuPercent * factor) / 100);
+}
+
+/**
+ * TU a unit holds back for its reaction-reserve mode (mirrors the controller's
+ * `reservedTu`). Returns 0 for "none" or when the reserved mode is absent.
+ */
+export function reservedTuForReserve(
+  maxTu: number,
+  reserve: ReserveMode,
+  weapon: Weapon | undefined,
+): number {
+  if (reserve === "none") return 0;
+  const mode = weapon?.modes.find((candidate) => candidate.kind === reserve);
+  return mode ? Math.ceil((maxTu * mode.tuPercent) / 100) : 0;
+}
+
+export type MoraleTone = "steady" | "shaken" | "panic";
+
+export interface MoraleRead {
+  tone: MoraleTone;
+  /** Short text label — always shown alongside the numeric value (never colour alone). */
+  label: string;
+}
+
+/**
+ * Maps a 0..100 morale value to its tone + label. At/below the panic threshold
+ * the unit is PANIC; below the steady floor it is Shaken; otherwise Steady.
+ * A missing morale (units that opt out of the system) reads as Steady.
+ */
+export function moraleState(morale: number | undefined): MoraleRead {
+  const value = morale ?? MORALE.MAX;
+  if (value <= MORALE.PANIC_THRESHOLD) return { tone: "panic", label: "PANIC" };
+  if (value < MORALE_STEADY_FLOOR) return { tone: "shaken", label: "Shaken" };
+  return { tone: "steady", label: "Steady" };
+}
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -497,18 +648,27 @@ export class Hud {
   private readonly weaponEl: HTMLDivElement;
   private readonly unitBadge: HTMLDivElement;
   private readonly tuFill: HTMLElement;
+  private readonly tuReserve: HTMLElement;
   private readonly tuText: HTMLElement;
+  private readonly reserveTag: HTMLSpanElement;
   private readonly hpFill: HTMLElement;
   private readonly hpText: HTMLElement;
+  private readonly moraleBar: HTMLDivElement;
+  private readonly moraleFill: HTMLElement;
+  private readonly moraleText: HTMLElement;
+  private readonly moraleTag: HTMLSpanElement;
   private readonly accuracyEl: HTMLElement;
   private readonly reactionsEl: HTMLElement;
   private readonly visionEl: HTMLElement;
+  private readonly detailsButton: HTMLButtonElement;
   private readonly contextEyebrow: HTMLDivElement;
   private readonly contextTitle: HTMLHeadingElement;
   private readonly contextDetail: HTMLDivElement;
   private readonly reloadButton: HTMLButtonElement;
   private readonly modeButtons = new Map<ShotKind, HTMLButtonElement>();
   private readonly reserveButtons = new Map<ReserveMode, HTMLButtonElement>();
+  private readonly itemsRow: HTMLDivElement;
+  private readonly itemsStack: HTMLDivElement;
   private readonly rosterEl: HTMLDivElement;
   private readonly logEl: HTMLElement;
   private readonly endTurn: HTMLButtonElement;
@@ -516,16 +676,44 @@ export class Hud {
   private readonly abortButton: HTMLButtonElement;
   private readonly toast: HTMLDivElement;
   private readonly banner: HTMLDivElement;
+  private readonly bannerEye: HTMLDivElement;
   private readonly bannerTitle: HTMLHeadingElement;
   private readonly bannerCopy: HTMLParagraphElement;
   private readonly bannerReport: HTMLDivElement;
+  private readonly bannerReturnBtn: HTMLButtonElement;
+  private readonly bannerNewCampaignBtn: HTMLButtonElement;
   private readonly briefing: HTMLDivElement;
   private briefingTitle!: HTMLHeadingElement;
   private briefingLede!: HTMLParagraphElement;
+  private readonly dossier: HTMLDivElement;
+  private readonly dossierName: HTMLHeadingElement;
+  private readonly dossierRank: HTMLDivElement;
+  private readonly dossierStats: HTMLDivElement;
+  private readonly dossierWeapon: HTMLDivElement;
+  private readonly dossierItems: HTMLUListElement;
+  private readonly dossierCareerSection: HTMLDivElement;
+  private readonly dossierCareer: HTMLDivElement;
 
   private activeMode: ShotKind = "snap";
   private toastTimer: number | null = null;
   private abortConfirmTimer: number | null = null;
+  private detailsOpen = false;
+  private disposed = false;
+  /** Last update() args, cached so the dossier can re-render on toggle without a controller round-trip. */
+  private lastState: BattleState | null = null;
+  private lastSelected: Unit | null = null;
+  private lastRuntime: HudRuntime | null = null;
+
+  private readonly onKeydown = (e: KeyboardEvent): void => {
+    if (e.key !== "Escape") return;
+    // ESC dismisses the dossier first; stopImmediatePropagation keeps the
+    // controller's ESC (deselect / briefing) from also firing while it is open.
+    if (this.detailsOpen) {
+      this.closeDossier();
+      e.stopImmediatePropagation();
+      e.preventDefault();
+    }
+  };
 
   constructor(private readonly cb: HudCallbacks) {
     this.injectStyle();
@@ -604,12 +792,16 @@ export class Hud {
 
     const tuHead = el("div", "meter-head");
     tuHead.append(document.createTextNode("Time units"));
+    const tuRight = el("span", "meter-right");
     this.tuText = el("b");
-    tuHead.appendChild(this.tuText);
+    this.reserveTag = el("span", "reserve-tag");
+    tuRight.append(this.tuText, this.reserveTag);
+    tuHead.appendChild(tuRight);
     const tuBar = el("div", "bar");
     this.tuFill = el("i");
     this.tuFill.style.background = "linear-gradient(90deg,#22d3ee,#67e8f9)";
-    tuBar.appendChild(this.tuFill);
+    this.tuReserve = el("i", "tu-reserve");
+    tuBar.append(this.tuFill, this.tuReserve);
 
     const hpHead = el("div", "meter-head");
     hpHead.append(document.createTextNode("Vital signs"));
@@ -618,13 +810,30 @@ export class Hud {
     const hpBar = el("div", "bar");
     this.hpFill = el("i");
     hpBar.appendChild(this.hpFill);
-    unit.append(tuHead, tuBar, hpHead, hpBar);
+
+    const moraleHead = el("div", "meter-head");
+    moraleHead.append(document.createTextNode("Morale"));
+    const moraleRight = el("span", "meter-right");
+    this.moraleText = el("b");
+    this.moraleTag = el("span", "morale-tag");
+    moraleRight.append(this.moraleText, this.moraleTag);
+    moraleHead.appendChild(moraleRight);
+    this.moraleBar = el("div", "bar morale-bar");
+    this.moraleFill = el("i");
+    this.moraleBar.appendChild(this.moraleFill);
+    unit.append(tuHead, tuBar, hpHead, hpBar, moraleHead, this.moraleBar);
 
     const stats = el("div", "stats");
     this.accuracyEl = this.makeStat(stats, "Accuracy");
     this.reactionsEl = this.makeStat(stats, "Reactions");
     this.visionEl = this.makeStat(stats, "Vision");
     unit.appendChild(stats);
+
+    this.detailsButton = el("button", "details-btn");
+    this.detailsButton.textContent = "Details";
+    this.detailsButton.title = "Open operative dossier (ESC closes)";
+    this.detailsButton.addEventListener("click", () => this.toggleDossier());
+    unit.appendChild(this.detailsButton);
     this.root.appendChild(unit);
 
     const actions = el("section", "panel actions");
@@ -669,6 +878,13 @@ export class Hud {
     }
     reserveRow.append(reserveLabel, reserve);
     actions.appendChild(reserveRow);
+
+    this.itemsRow = el("div", "items-row");
+    const itemsLabel = el("span");
+    itemsLabel.textContent = "Items";
+    this.itemsStack = el("div", "items-stack");
+    this.itemsRow.append(itemsLabel, this.itemsStack);
+    actions.appendChild(this.itemsRow);
     this.root.appendChild(actions);
 
     const squad = el("section", "panel squad");
@@ -692,26 +908,84 @@ export class Hud {
 
     this.banner = el("div", "banner");
     const bannerCard = el("div", "banner-card");
-    const bannerEye = el("div", "eyebrow");
-    bannerEye.textContent = "Operation complete";
+    this.bannerEye = el("div", "eyebrow");
+    this.bannerEye.textContent = "Operation complete";
     this.bannerTitle = el("h1");
     this.bannerCopy = el("p", "briefing-lede");
     this.bannerCopy.textContent = "Mission report transmitted to base command.";
     this.bannerReport = el("div", "debrief-grid");
     this.bannerReport.hidden = true;
-    const newMission = el("button");
-    newMission.textContent = "Return to Base";
-    newMission.addEventListener("click", () => this.cb.onReturnToBase());
-    bannerCard.append(bannerEye, this.bannerTitle, this.bannerCopy, this.bannerReport, newMission);
+    const bannerActions = el("div", "banner-actions");
+    this.bannerReturnBtn = el("button");
+    this.bannerReturnBtn.textContent = "Return to Base";
+    this.bannerReturnBtn.addEventListener("click", () => this.cb.onReturnToBase());
+    this.bannerNewCampaignBtn = el("button");
+    this.bannerNewCampaignBtn.textContent = "New Campaign";
+    this.bannerNewCampaignBtn.title = "Start a fresh campaign from the geoscape";
+    this.bannerNewCampaignBtn.addEventListener("click", () =>
+      (this.cb.onNewCampaign ?? this.cb.onReturnToBase)(),
+    );
+    bannerActions.append(this.bannerReturnBtn, this.bannerNewCampaignBtn);
+    bannerCard.append(
+      this.bannerEye,
+      this.bannerTitle,
+      this.bannerCopy,
+      this.bannerReport,
+      bannerActions,
+    );
     this.banner.appendChild(bannerCard);
     this.root.appendChild(this.banner);
 
     this.briefing = this.buildBriefing();
     this.root.appendChild(this.briefing);
+
+    this.dossier = el("div", "dossier");
+    this.dossierName = el("h2");
+    this.dossierRank = el("div", "rank");
+    this.dossierStats = el("div", "dossier-stats");
+    this.dossierWeapon = el("div");
+    const dossierItemsSection = el("div", "dossier-section");
+    const itemsEye = el("div", "eyebrow");
+    itemsEye.textContent = "Carried items";
+    this.dossierItems = el("ul");
+    dossierItemsSection.append(itemsEye, this.dossierItems);
+    this.dossierCareerSection = el("div", "dossier-section");
+    const careerEye = el("div", "eyebrow");
+    careerEye.textContent = "Career";
+    this.dossierCareer = el("div", "dossier-stats");
+    this.dossierCareerSection.append(careerEye, this.dossierCareer);
+    const dossierActions = el("div", "dossier-actions");
+    const dossierClose = el("button");
+    dossierClose.textContent = "Close [ESC]";
+    dossierClose.addEventListener("click", () => this.closeDossier());
+    dossierActions.appendChild(dossierClose);
+    this.dossier.append(
+      this.buildDossierCard([
+        this.dossierName,
+        this.dossierRank,
+        this.dossierStats,
+        this.dossierWeapon,
+        dossierItemsSection,
+        this.dossierCareerSection,
+        dossierActions,
+      ]),
+    );
+    this.root.appendChild(this.dossier);
+
+    window.addEventListener("keydown", this.onKeydown);
   }
 
   mount(container: HTMLElement): void {
     container.appendChild(this.root);
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    window.removeEventListener("keydown", this.onKeydown);
+    if (this.toastTimer !== null) window.clearTimeout(this.toastTimer);
+    if (this.abortConfirmTimer !== null) window.clearTimeout(this.abortConfirmTimer);
+    this.root.remove();
   }
 
   setMode(kind: ShotKind): void {
@@ -733,6 +1007,10 @@ export class Hud {
 
   isBriefingOpen(): boolean {
     return this.briefing.classList.contains("show");
+  }
+
+  isDossierOpen(): boolean {
+    return this.detailsOpen;
   }
 
   notify(message: string, tone: ToastTone = "info"): void {
@@ -771,12 +1049,32 @@ export class Hud {
     this.abortButton.title = "Abort operation and return to Earth Command";
   }
 
+  private toggleDossier(): void {
+    if (this.detailsOpen) this.closeDossier();
+    else this.openDossier();
+  }
+
+  private openDossier(): void {
+    this.detailsOpen = true;
+    if (this.lastSelected) this.cb.onOpenSoldierDetail?.(this.lastSelected.id);
+    this.renderDossier(this.lastSelected, this.lastState, this.lastRuntime);
+  }
+
+  private closeDossier(): void {
+    this.detailsOpen = false;
+    this.dossier.classList.remove("show");
+  }
+
   update(
     state: BattleState,
     selected: Unit | null,
     hover: HudHover | null,
     runtime: HudRuntime,
   ): void {
+    this.lastState = state;
+    this.lastSelected = selected;
+    this.lastRuntime = runtime;
+
     const players = state.units.filter((unit) => unit.faction === "player");
     const enemies = state.units.filter((unit) => unit.faction === "enemy");
     const livingPlayers = players.filter((unit) => unit.alive);
@@ -825,9 +1123,11 @@ export class Hud {
     this.updateModeButtons(state, selected, hover, runtime);
     this.updateReloadButton(state, selected, runtime);
     this.updateReserveButtons(selected, runtime);
+    this.updateItemButtons(state, selected, runtime);
     this.renderRoster(players, selected, runtime);
     this.renderLog(state);
     this.updateBanner(state, runtime);
+    this.renderDossier(selected, state, runtime);
     this.setMuted(runtime.muted);
     this.abortButton.disabled = runtime.busy || state.status !== "playing";
     if (this.abortButton.disabled) this.clearAbortConfirm();
@@ -839,14 +1139,21 @@ export class Hud {
   }
 
   private updateUnit(state: BattleState, selected: Unit | null): void {
+    this.detailsButton.disabled = !selected;
     if (!selected) {
       this.nameEl.textContent = "No operative";
       this.weaponEl.textContent = "Select a squad member";
       this.unitBadge.textContent = "--";
       this.tuFill.style.width = "0%";
+      this.tuReserve.style.width = "0%";
       this.hpFill.style.width = "0%";
       this.tuText.textContent = "--";
+      this.reserveTag.textContent = "";
       this.hpText.textContent = "--";
+      this.moraleFill.style.width = "0%";
+      this.moraleText.textContent = "--";
+      this.moraleTag.textContent = "";
+      this.moraleBar.className = "bar morale-bar";
       this.accuracyEl.textContent = "--";
       this.reactionsEl.textContent = "--";
       this.visionEl.textContent = "--";
@@ -859,13 +1166,40 @@ export class Hud {
       ? `${weapon.name} - Ammo ${selected.ammo}/${weapon.magazineSize}`
       : selected.weaponId;
     this.unitBadge.textContent = selected.tu > 0 ? "READY" : "SPENT";
-    this.tuFill.style.width = `${percent(selected.tu, selected.stats.timeUnits)}%`;
-    this.tuText.textContent = `${selected.tu} / ${selected.stats.timeUnits}`;
+
+    // TU bar: spendable cyan fill + amber hatched reaction-reserve segment.
+    const maxTu = selected.stats.timeUnits;
+    const reserve = reservedTuForReserve(maxTu, selected.reserve, weapon);
+    const free = Math.max(0, selected.tu - reserve);
+    const freePct = percent(free, maxTu);
+    const reserveShown = Math.max(0, Math.min(reserve, selected.tu));
+    this.tuFill.style.width = `${freePct}%`;
+    this.tuReserve.style.left = `${freePct}%`;
+    this.tuReserve.style.width = `${percent(reserveShown, maxTu)}%`;
+    this.tuText.textContent = `${selected.tu} / ${maxTu}`;
+    if (reserve > 0) {
+      this.reserveTag.textContent = `${reserve} RXN`;
+      this.reserveTag.title = `${reserve} TU held back for ${selected.reserve} reaction fire`;
+    } else {
+      this.reserveTag.textContent = "";
+    }
+
     const hpPct = percent(selected.hp, selected.stats.health);
     this.hpFill.style.width = `${hpPct}%`;
     this.hpFill.style.background =
       hpPct >= 60 ? "#4ade80" : hpPct >= 30 ? "#fbbf24" : "#fb7185";
     this.hpText.textContent = `${selected.hp} / ${selected.stats.health}`;
+
+    // Morale bar: tone tints the fill but numeric value + label always accompany it.
+    const moraleValue = selected.morale ?? MORALE.MAX;
+    const read = moraleState(selected.morale);
+    this.moraleFill.style.width = `${percent(moraleValue, MORALE.MAX)}%`;
+    this.moraleBar.className = `bar morale-bar ${read.tone}`;
+    this.moraleText.textContent = `${moraleValue}`;
+    this.moraleTag.textContent = read.label;
+    this.moraleTag.className = `morale-tag ${read.tone}`;
+    this.moraleTag.title = `Morale ${moraleValue}/100 - ${read.label}`;
+
     this.accuracyEl.textContent = String(selected.stats.firingAccuracy);
     this.reactionsEl.textContent = String(selected.stats.reactions);
     this.visionEl.textContent = `${selected.sightRange} tiles`;
@@ -981,7 +1315,97 @@ export class Hud {
     }
   }
 
+  private updateItemButtons(
+    state: BattleState,
+    selected: Unit | null,
+    runtime: HudRuntime,
+  ): void {
+    const items = selected?.items ?? [];
+    if (!selected || items.length === 0) {
+      this.itemsRow.style.display = "none";
+      this.itemsStack.replaceChildren();
+      return;
+    }
+    this.itemsRow.style.display = "";
+
+    const maxTu = selected.stats.timeUnits;
+    const playerActing =
+      !runtime.busy &&
+      state.activeFaction === "player" &&
+      state.status === "playing";
+    const lines: HTMLElement[] = [];
+
+    for (const inst of items) {
+      const def = state.items?.[inst.itemId];
+      if (!def) continue;
+      const line = this.buildItemLine(inst, def, maxTu, selected, playerActing);
+      lines.push(line);
+    }
+
+    if (lines.length === 0) {
+      const empty = el("div", "items-empty");
+      empty.textContent = "No usable items";
+      this.itemsStack.replaceChildren(empty);
+    } else {
+      this.itemsStack.replaceChildren(...lines);
+    }
+  }
+
+  private buildItemLine(
+    inst: ItemInstance,
+    def: Item,
+    maxTu: number,
+    selected: Unit,
+    playerActing: boolean,
+  ): HTMLElement {
+    const isGrenade = def.kind === "grenade";
+    const action: ItemActionKind = isGrenade ? "throw" : "use";
+    const verb = isGrenade ? "Throw" : "Use";
+    const cost = itemActionTuCost(maxTu, def.tuPercent, action);
+    const outOfUses = inst.uses <= 0;
+    const cantAfford = selected.tu < cost;
+    const primed = isGrenade && !!inst.primed;
+
+    const line = el("div", "item-line");
+
+    const main = el("button");
+    main.title = isGrenade
+      ? `Throw ${def.name} (blast ${def.blastRadius ?? 1}, ${def.throwRange ?? 6} range) - ${cost} TU`
+      : `Use ${def.name} on an adjacent ally (heals ${def.healAmount ?? 0}) - ${cost} TU`;
+    const label = el("span", "item-label");
+    const name = el("b");
+    name.textContent = def.name;
+    const meta = el("small");
+    const charge = `x${inst.uses} - ${cost} TU`;
+    meta.textContent = primed ? `${charge} - primed ${inst.fuseTurns ?? 1}t` : charge;
+    label.append(name, meta);
+    const verbSpan = el("span", "item-verb");
+    verbSpan.textContent = verb;
+    main.append(label, verbSpan);
+    main.disabled = !playerActing || outOfUses || cantAfford || primed;
+    main.addEventListener("click", () => {
+      if (isGrenade) this.cb.onThrowItem?.(inst.itemId);
+      else this.cb.onUseItem?.(inst.itemId);
+    });
+    line.appendChild(main);
+
+    if (isGrenade) {
+      const primeCost = itemActionTuCost(maxTu, def.tuPercent, "prime");
+      const prime = el("button", "prime");
+      prime.textContent = `Prime ${primeCost}TU`;
+      prime.disabled = !playerActing || outOfUses || selected.tu < primeCost || primed;
+      prime.title = primed
+        ? `Already primed - detonates in ${inst.fuseTurns ?? 1} turn(s)`
+        : `Prime ${def.name} for ${primeCost} TU - detonates on the carrier's next turn`;
+      prime.addEventListener("click", () => this.cb.onPrimeItem?.(inst.itemId));
+      line.appendChild(prime);
+    }
+
+    return line;
+  }
+
   private renderRoster(players: Unit[], selected: Unit | null, runtime: HudRuntime): void {
+    const panicked = new Set(runtime.panickedUnitIds ?? []);
     const buttons = players.map((unit) => {
       const button = el("button");
       const top = el("span", "roster-top");
@@ -992,6 +1416,12 @@ export class Hud {
       status.classList.toggle("spent", unit.alive && unit.tu <= 0);
       status.classList.toggle("kia", !unit.alive);
       top.append(name, status);
+      if (unit.alive && panicked.has(unit.id)) {
+        const panic = el("span", "panic-tag");
+        panic.textContent = "PANIC";
+        panic.title = "Operative is panicking";
+        top.appendChild(panic);
+      }
 
       const bars = el("span", "roster-bars");
       const tu = el("i");
@@ -1028,18 +1458,29 @@ export class Hud {
 
   private updateBanner(state: BattleState, runtime: HudRuntime): void {
     if (state.status === "playing") {
-      this.banner.classList.remove("show", "win", "lose");
+      this.banner.classList.remove(
+        "show",
+        "win",
+        "lose",
+        "campaign",
+        "campaign-win",
+        "campaign-lose",
+      );
       return;
     }
     const win = state.status === "player_win";
     const debrief = runtime.debrief;
-    this.bannerTitle.textContent = debrief?.strategicStatus === "won"
-      ? "Campaign Won"
-      : debrief?.strategicStatus === "lost"
-        ? "Campaign Lost"
-        : win
-          ? "Site Secured"
-          : "Squad Lost";
+    const campaignStatus = runtime.campaignStatus ?? debrief?.strategicStatus;
+    const campaignOver = campaignStatus === "won" || campaignStatus === "lost";
+    this.bannerEye.textContent = campaignOver ? "Campaign complete" : "Operation complete";
+    this.bannerTitle.textContent =
+      campaignStatus === "won"
+        ? "Earth Secured"
+        : campaignStatus === "lost"
+          ? "Earth Lost"
+          : win
+            ? "Site Secured"
+            : "Squad Lost";
     this.bannerCopy.textContent = debrief?.summary ?? "Mission report transmitted to base command.";
     this.bannerReport.hidden = !debrief;
     if (debrief) {
@@ -1059,8 +1500,94 @@ export class Hud {
     } else {
       this.bannerReport.replaceChildren();
     }
-    this.banner.classList.add("show", win ? "win" : "lose");
-    this.banner.classList.remove(win ? "lose" : "win");
+    this.bannerNewCampaignBtn.style.display = campaignOver ? "" : "none";
+    this.banner.classList.add("show");
+    this.banner.classList.toggle("win", win);
+    this.banner.classList.toggle("lose", !win);
+    this.banner.classList.toggle("campaign", campaignOver);
+    this.banner.classList.toggle("campaign-win", campaignStatus === "won");
+    this.banner.classList.toggle("campaign-lose", campaignStatus === "lost");
+  }
+
+  private renderDossier(
+    selected: Unit | null,
+    state: BattleState | null,
+    runtime: HudRuntime | null,
+  ): void {
+    if (!this.detailsOpen) {
+      this.dossier.classList.remove("show");
+      return;
+    }
+    this.dossier.classList.add("show");
+    if (!selected || !state) {
+      this.dossierName.textContent = "No operative";
+      this.dossierRank.textContent = "";
+      this.dossierStats.replaceChildren();
+      this.dossierWeapon.textContent = "";
+      this.dossierItems.replaceChildren();
+      this.dossierCareerSection.style.display = "none";
+      return;
+    }
+
+    const detail = runtime?.soldierDetail;
+    this.dossierName.textContent = selected.name;
+    this.dossierRank.textContent = detail?.rank ?? titleCase(selected.templateId);
+
+    const moraleValue = selected.morale ?? MORALE.MAX;
+    const moraleRead = moraleState(selected.morale);
+    const weapon = state.weapons[selected.weaponId];
+    this.dossierStats.replaceChildren(
+      this.debriefStat("Time Units", `${selected.tu} / ${selected.stats.timeUnits}`),
+      this.debriefStat("Health", `${selected.hp} / ${selected.stats.health}`),
+      this.debriefStat("Morale", `${moraleValue} ${moraleRead.label}`),
+      this.debriefStat("Accuracy", String(selected.stats.firingAccuracy)),
+      this.debriefStat("Reactions", String(selected.stats.reactions)),
+      this.debriefStat("Strength", String(selected.stats.strength)),
+      this.debriefStat("Bravery", String(selected.stats.bravery ?? MORALE.DEFAULT_BRAVERY)),
+      this.debriefStat("Vision", `${selected.sightRange} tiles`),
+      this.debriefStat("Reserve", titleCase(selected.reserve)),
+    );
+    this.dossierWeapon.textContent = weapon
+      ? `${weapon.name} - ${selected.ammo}/${weapon.magazineSize} rds - ${weapon.damage} dmg`
+      : selected.weaponId;
+
+    const itemRows = (selected.items ?? []).map((inst) => {
+      const def = state.items?.[inst.itemId];
+      const li = el("li");
+      const name = el("span");
+      name.textContent = def?.name ?? inst.itemId;
+      const small = el("small");
+      small.textContent =
+        inst.primed
+          ? `x${inst.uses} - primed ${inst.fuseTurns ?? 1}t`
+          : `x${inst.uses}${def?.kind === "grenade" ? " - blast" : def?.kind === "medkit" ? " - heal" : ""}`;
+      li.append(name, small);
+      return li;
+    });
+    if (itemRows.length === 0) {
+      const li = el("li");
+      const span = el("span");
+      span.textContent = "No carried items";
+      li.appendChild(span);
+      itemRows.push(li);
+    }
+    this.dossierItems.replaceChildren(...itemRows);
+
+    const hasCareer =
+      !!detail &&
+      (detail.missions !== undefined ||
+        detail.survived !== undefined ||
+        detail.kills !== undefined);
+    if (hasCareer && detail) {
+      this.dossierCareerSection.style.display = "";
+      this.dossierCareer.replaceChildren(
+        this.debriefStat("Missions", String(detail.missions ?? 0)),
+        this.debriefStat("Survived", String(detail.survived ?? 0)),
+        this.debriefStat("Kills", String(detail.kills ?? 0)),
+      );
+    } else {
+      this.dossierCareerSection.style.display = "none";
+    }
   }
 
   private debriefStat(label: string, value: string): HTMLElement {
@@ -1099,6 +1626,7 @@ export class Hud {
       ["01", "Move", "Click a green path to advance. Every tile spends Time Units."],
       ["02", "Engage", "Hover a hostile for honest hit odds, then click to fire."],
       ["03", "Recover", "Click the power-source beacon to move adjacent or secure it."],
+      ["04", "Equip", "Throw frag grenades for blast damage, prime them to arm a fuse, and use medkits on adjacent allies to heal."],
     ];
     for (const [number, heading, copy] of steps) {
       const step = el("div", "briefing-step");
@@ -1122,6 +1650,14 @@ export class Hud {
     card.append(eye, this.briefingTitle, this.briefingLede, grid, actions);
     overlay.appendChild(card);
     return overlay;
+  }
+
+  private buildDossierCard(children: HTMLElement[]): HTMLDivElement {
+    const card = el("div", "dossier-card");
+    const eye = el("div", "eyebrow");
+    eye.textContent = "Operative dossier";
+    card.append(eye, ...children);
+    return card;
   }
 
   private injectStyle(): void {

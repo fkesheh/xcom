@@ -44,17 +44,20 @@ import {
   canAssignSoldierWeapon,
   canBuildFacility,
   canDeploySoldier,
+  canPurchaseWeapon,
   canRecruitSoldier,
   canStartResearch,
   campaignObjectiveProgress,
   constructedFacilities,
   DEPLOYMENT_SIZE,
   deploymentSoldiers,
+  difficultyConfig,
   facilityConstructionDuration,
   hasResearch,
   highestRegionalPanic,
   RECRUIT_COST,
   MANUFACTURING_PROJECTS,
+  MARKET_CONFIG,
   RESEARCH_PROJECTS,
   canStartManufacturing,
   manufacturingCost,
@@ -82,6 +85,7 @@ interface BaseViewOptions {
   onAssignWeapon: (soldierId: string, weaponId: CampaignWeaponId) => void;
   onToggleDeployment: (soldierId: string, deployed: boolean) => void;
   onStartManufacturing: (id: ManufacturingProjectId) => void;
+  onPurchaseWeapon?: (weaponId: CampaignWeaponId) => void;
   onOpenGeoscape: () => void;
   onResetCampaign: () => void;
 }
@@ -544,6 +548,150 @@ const CSS = `
   letter-spacing: .08em;
   text-transform: uppercase;
 }
+#base-view .difficulty-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 4px 10px;
+  border: 1px solid rgba(251,191,36,.42);
+  border-radius: 999px;
+  color: #fbbf24;
+  background: rgba(35,24,4,.32);
+  font: 800 9px/1 ui-monospace, monospace;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+#base-view .difficulty-chip::before {
+  content: "◆";
+  color: #fbbf24;
+}
+#base-view .mission-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 9px 0 0;
+  padding: 4px 10px;
+  border: 1px solid rgba(103,232,249,.4);
+  border-radius: 999px;
+  color: #e8fbff;
+  background: rgba(8,35,47,.5);
+  font: 800 9px/1 ui-monospace, monospace;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+#base-view .mission-chip .mission-icon {
+  color: #67e8f9;
+  font-size: 11px;
+}
+#base-view .mission-chip.crashSite { border-color: rgba(103,232,249,.4); }
+#base-view .mission-chip.terror { border-color: rgba(251,113,133,.55); color: #fecaca; }
+#base-view .mission-chip.terror .mission-icon { color: #fb7185; }
+#base-view .mission-chip.landedUfo { border-color: rgba(167,139,250,.5); color: #ddd6fe; }
+#base-view .mission-chip.landedUfo .mission-icon { color: #a78bfa; }
+#base-view .mission-chip.baseDefense { border-color: rgba(251,191,36,.55); color: #fde68a; }
+#base-view .mission-chip.baseDefense .mission-icon { color: #fbbf24; }
+#base-view .operation-objective {
+  margin-top: 7px;
+  color: #fbbf24;
+  font: 800 9px/1.3 ui-monospace, monospace;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+#base-view .market-card {
+  margin: 13px 0;
+  padding: 12px;
+  border: 1px solid rgba(103,232,249,.18);
+  border-radius: 8px;
+  background: rgba(2,12,20,.48);
+}
+#base-view .market-card > strong {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: #e8fbff;
+  font: 850 12px/1.2 ui-monospace, monospace;
+  text-transform: uppercase;
+}
+#base-view .market-card .market-credits {
+  color: #fbbf24;
+}
+#base-view .market-card > p {
+  margin-top: 7px;
+  color: #adc5d2;
+  font-size: 10px;
+}
+#base-view .market-list {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+#base-view .market-item {
+  display: grid;
+  grid-template-columns: minmax(92px, 1fr) auto auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 6px;
+  background: rgba(0,0,0,.16);
+  color: #e8fbff;
+  font: 800 9px/1.1 ui-monospace, monospace;
+  text-transform: uppercase;
+}
+#base-view .market-item .market-price { color: #fbbf24; }
+#base-view .market-item .market-stock { color: #8aa7b8; }
+#base-view .market-item button {
+  min-height: 32px;
+  padding: 0 10px;
+}
+#base-view .market-item button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: .5;
+  border-color: rgba(148,163,184,.3);
+}
+#base-view .empty-state {
+  margin-top: 9px;
+  padding: 10px;
+  border: 1px dashed rgba(148,163,184,.28);
+  border-radius: 7px;
+  color: #8aa7b8;
+  background: rgba(2,12,20,.3);
+  text-align: center;
+  font: 800 9px/1.4 ui-monospace, monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+#base-view .notice-toast {
+  position: absolute;
+  top: max(18px, env(safe-area-inset-top));
+  left: 50%;
+  z-index: 6;
+  max-width: min(440px, calc(100vw - 36px));
+  padding: 10px 16px;
+  border: 1px solid rgba(251,191,36,.5);
+  border-radius: 999px;
+  color: #fef3c7;
+  background: rgba(35,24,4,.92);
+  box-shadow: 0 18px 50px rgba(0,0,0,.5);
+  text-align: center;
+  transform: translate(-50%, -16px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .2s ease, transform .2s ease;
+  font: 800 10px/1.3 ui-monospace, monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+#base-view .notice-toast.visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+#base-view .notice-toast[data-kind="warning"] {
+  border-color: rgba(251,113,133,.55);
+  color: #fecaca;
+  background: rgba(45,11,18,.92);
+}
 @media (max-width: 900px) {
   #base-view .base-panel { width: calc(100vw - 24px); padding: 13px; }
   #base-view .base-left { left: 12px; right: 12px; }
@@ -604,6 +752,55 @@ function formatCost(resources: {
 
 function formatNet(value: number): string {
   return value >= 0 ? `+${value}` : `${value}`;
+}
+
+interface MissionTypeMeta {
+  label: string;
+  icon: string;
+  detail: string;
+  launchLabel: string;
+}
+
+/** Mission-type display metadata. The icon glyph + label carry meaning together so the
+ *  colored chip is never the sole signal (color is secondary reinforcement). */
+function missionTypeMeta(operation: OperationPlan): MissionTypeMeta {
+  switch (operation.missionType) {
+    case "terror":
+      return {
+        label: "Terror mission",
+        icon: "▲",
+        detail:
+          operation.missionContext?.civilianCount !== undefined
+            ? `Rescue ${operation.missionContext.civilianCount} civilians`
+            : "Defend civilians from the alien assault",
+        launchLabel: "Deploy to terror site",
+      };
+    case "landedUfo":
+      return {
+        label: "Landed UFO",
+        icon: "◆",
+        detail: "Assault the intact vessel before it departs",
+        launchLabel: "Assault landed UFO",
+      };
+    case "baseDefense":
+      return {
+        label: "Base defense",
+        icon: "■",
+        detail:
+          operation.missionContext?.defenderFacility
+            ? `Hold the line at ${operation.missionContext.defenderFacility}`
+            : "Repel the assault on the blacksite",
+        launchLabel: "Defend the base",
+      };
+    case "crashSite":
+    default:
+      return {
+        label: "Crash site",
+        icon: "▼",
+        detail: "Recover the downed UFO power core",
+        launchLabel: "Recover UFO core",
+      };
+  }
 }
 
 function facilityColor(kind: BaseFacility["kind"]): number {
@@ -719,6 +916,8 @@ export class BaseView {
   private readonly walkers: BaseWalker[] = [];
   private raf = 0;
   private disposed = false;
+  private noticeEl: HTMLDivElement | null = null;
+  private noticeTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly opts: BaseViewOptions) {
     injectStyle();
@@ -749,10 +948,84 @@ export class BaseView {
     if (this.disposed) return;
     this.disposed = true;
     cancelAnimationFrame(this.raf);
+    if (this.noticeTimer !== null) clearTimeout(this.noticeTimer);
     window.removeEventListener("resize", this.resize);
     disposeObject(this.scene);
     this.renderer.dispose();
     this.root.remove();
+  }
+
+  /** Lightweight transient notice (toast). Pairs its message text with the kind label so
+   *  the warning color is never the sole signal. */
+  private showNotice(message: string, kind: "info" | "warning" = "info"): void {
+    if (!this.noticeEl) return;
+    const prefix = kind === "warning" ? "! " : "";
+    this.noticeEl.textContent = `${prefix}${message}`;
+    this.noticeEl.dataset.kind = kind;
+    this.noticeEl.classList.add("visible");
+    if (this.noticeTimer !== null) clearTimeout(this.noticeTimer);
+    this.noticeTimer = setTimeout(() => {
+      if (this.noticeEl) this.noticeEl.classList.remove("visible");
+      this.noticeTimer = null;
+    }, 3200);
+  }
+
+  private buildMarketPanel(): HTMLElement {
+    const panel = el("section", "market-card");
+    const head = el("strong");
+    const headLabel = el("span");
+    headLabel.textContent = "Armory / Market";
+    const credits = el("span", "market-credits");
+    credits.textContent = `${this.opts.campaign.resources.credits}c available`;
+    head.append(headLabel, credits);
+    const intro = el("p");
+    intro.textContent =
+      "Council suppliers sell weapons direct. Stock restocks every 48h from Earth Command.";
+    const list = el("div", "market-list");
+    const campaign = this.opts.campaign;
+    const totalStock = CAMPAIGN_WEAPON_IDS.reduce(
+      (sum, id) => sum + (campaign.market?.stock[id] ?? 0),
+      0,
+    );
+    for (const weaponId of CAMPAIGN_WEAPON_IDS) {
+      const item = el("div", "market-item");
+      const name = el("span");
+      name.textContent = WEAPONS[weaponId]?.name ?? weaponId;
+      const price = el("span", "market-price");
+      price.textContent = `${MARKET_CONFIG[weaponId].price}c`;
+      const stock = el("span", "market-stock");
+      const stockCount = campaign.market?.stock[weaponId] ?? 0;
+      stock.textContent = `${stockCount} in stock`;
+      const buy = el("button");
+      const check = canPurchaseWeapon(campaign, weaponId);
+      if (campaign.strategic.status !== "active") {
+        buy.textContent = "Locked";
+        buy.disabled = true;
+      } else if (!check.ok) {
+        // Blocked: dim + label with the reason, but keep it clickable so the notice
+        // surface can announce the blocker (aria-disabled, not native disabled).
+        buy.textContent = check.reason ?? "Unavailable";
+        buy.setAttribute("aria-disabled", "true");
+        buy.addEventListener("click", () =>
+          this.showNotice(check.reason ?? "Purchase blocked", "warning"),
+        );
+      } else {
+        buy.textContent = "Buy";
+        buy.addEventListener("click", () => {
+          if (this.opts.onPurchaseWeapon) this.opts.onPurchaseWeapon(weaponId);
+          else this.showNotice("Armory link offline", "warning");
+        });
+      }
+      item.append(name, price, stock, buy);
+      list.appendChild(item);
+    }
+    panel.append(head, intro, list);
+    if (totalStock === 0) {
+      const empty = el("div", "empty-state");
+      empty.textContent = "Market sold out. Advance time on Earth Command to restock.";
+      panel.appendChild(empty);
+    }
+    return panel;
   }
 
   private buildScene(): void {
@@ -1457,8 +1730,13 @@ export class BaseView {
     const panic = highestRegionalPanic(this.opts.campaign);
     const objective = campaignObjectiveProgress(this.opts.campaign);
     const contact = this.opts.campaign.ufoContact;
-    const crashSite = contact?.status === "crashed" ? contact : undefined;
-    const canLaunch = this.opts.campaign.strategic.status === "active" && deployment.length > 0 && !!crashSite;
+    // Ground assaults (terror, landed UFO, base defense) spawn already on the ground
+    // ("landed"); only crash-site contacts are "tracked" until shot down. Both
+    // "crashed" and "landed" are terminal, launchable states — match the controller.
+    const launchable = contact?.status === "crashed" || contact?.status === "landed";
+    const launchContact = launchable ? contact : undefined;
+    const canLaunch =
+      this.opts.campaign.strategic.status === "active" && deployment.length > 0 && !!launchContact;
     const left = el("section", "base-panel base-left");
     const eyebrow = el("div", "eyebrow");
     eyebrow.textContent = "Blacksite command";
@@ -1471,7 +1749,7 @@ export class BaseView {
           : "Base Interior";
     const copy = el("p");
     const nextMission = this.opts.operation.missionNumber;
-    copy.textContent = crashSite
+    copy.textContent = launchContact
       ? `Command center is online. Review facilities, then launch Operation ${this.opts.operation.codename}.`
       : contact
         ? "Command center is online. Launch an interceptor from Earth Command before committing ground troops."
@@ -1501,6 +1779,8 @@ export class BaseView {
     const strategicTitle = el("strong");
     strategicTitle.textContent =
       `${this.opts.campaign.strategic.status} / Threat ${this.opts.campaign.strategic.threat}%`;
+    const difficultyChip = el("div", "difficulty-chip");
+    difficultyChip.textContent = `Difficulty / ${difficultyConfig(this.opts.campaign).label}`;
     const strategicCopy = el("p");
     strategicCopy.textContent =
       `${strategicSummary(this.opts.campaign)} ` +
@@ -1510,7 +1790,7 @@ export class BaseView {
       (this.opts.campaign.lastFundingReport
         ? ` Last report net ${formatNet(this.opts.campaign.lastFundingReport.net)}c.`
         : "");
-    strategic.append(strategicTitle, strategicCopy);
+    strategic.append(strategicTitle, difficultyChip, strategicCopy);
     left.append(eyebrow, title, copy, coords, stats, strategic);
     this.root.appendChild(left);
 
@@ -1617,19 +1897,19 @@ export class BaseView {
 
     const operation = el("section", "operation-card");
     const operationTitle = el("strong");
-    operationTitle.textContent = crashSite
+    operationTitle.textContent = launchContact
       ? `Operation ${this.opts.operation.codename}`
       : contact
         ? "UFO airborne"
         : "No active UFO contact";
     const operationCopy = el("p");
-    operationCopy.textContent = crashSite
+    operationCopy.textContent = launchContact
       ? this.opts.operation.briefing
       : contact
         ? `${contact.id} is tracked over ${contact.region}. Return to Earth Command and launch the interceptor.`
         : "Return to Earth Command and scan time forward until radar detects a UFO track.";
     const operationMeta = el("div", "operation-meta");
-    if (crashSite) {
+    if (launchContact) {
       operationMeta.append(
         Object.assign(el("span"), { textContent: this.opts.operation.themeId }),
         Object.assign(el("span"), { textContent: `${this.opts.operation.enemyCount} contacts` }),
@@ -1638,6 +1918,7 @@ export class BaseView {
           textContent:
             `+${this.opts.operation.reward.credits}c ` +
             `+${this.opts.operation.reward.alloys}a ` +
+            `+${this.opts.operation.reward.elerium}e ` +
             `+${this.opts.operation.reward.alienData}d`,
         }),
       );
@@ -1648,7 +1929,18 @@ export class BaseView {
         Object.assign(el("span"), { textContent: "no target" }),
       );
     }
-    operation.append(operationTitle, operationCopy, operationMeta);
+    if (launchContact) {
+      const missionMeta = missionTypeMeta(this.opts.operation);
+      const chip = el("div", `mission-chip ${this.opts.operation.missionType ?? "crashSite"}`);
+      const chipIcon = el("span", "mission-icon");
+      chipIcon.textContent = missionMeta.icon;
+      chip.append(chipIcon, document.createTextNode(missionMeta.label));
+      const objectiveLine = el("div", "operation-objective");
+      objectiveLine.textContent = missionMeta.detail;
+      operation.append(operationTitle, chip, operationCopy, objectiveLine, operationMeta);
+    } else {
+      operation.append(operationTitle, operationCopy, operationMeta);
+    }
 
     const roster = el("section", "roster-card");
     const rosterHead = el("div", "roster-head");
@@ -1711,6 +2003,11 @@ export class BaseView {
         weaponSelect,
       );
       rosterList.appendChild(row);
+    }
+    if (this.opts.campaign.soldiers.length === 0) {
+      const empty = el("div", "empty-state");
+      empty.textContent = "No operatives on roster. Recruit to field a squad.";
+      rosterList.appendChild(empty);
     }
     const recruit = el("button");
     recruit.textContent = `Recruit operative (${RECRUIT_COST}c)`;
@@ -1799,6 +2096,17 @@ export class BaseView {
       return research;
     });
 
+    const allResearched = RESEARCH_PROJECTS.every((project) =>
+      hasResearch(this.opts.campaign, project.id),
+    );
+    const researchNodes: HTMLElement[] = allResearched
+      ? [
+          Object.assign(el("div", "empty-state"), {
+            textContent: "All research projects complete. The lab stands ready for new specimens.",
+          }),
+        ]
+      : researchCards;
+
     const actions = el("div", "base-actions");
     const earth = el("button");
     earth.textContent = "Earth";
@@ -1808,13 +2116,13 @@ export class BaseView {
     reset.addEventListener("click", () => this.opts.onResetCampaign());
     const launch = el("button", "primary");
     launch.textContent = canLaunch
-      ? `Launch op ${nextMission}`
+      ? `${missionTypeMeta(this.opts.operation).launchLabel} (op ${nextMission})`
       : this.opts.campaign.strategic.status === "active"
         ? activeRoster.length === 0
           ? "No operatives"
           : deployment.length === 0
             ? "Select squad"
-          : contact
+          : contact && !launchContact
             ? "Intercept first"
             : "Awaiting contact"
         : "Campaign complete";
@@ -1832,7 +2140,8 @@ export class BaseView {
       projectReport,
       roster,
       ...manufacturingCards,
-      ...researchCards,
+      this.buildMarketPanel(),
+      ...researchNodes,
       actions,
     );
     this.root.appendChild(right);
@@ -1840,6 +2149,12 @@ export class BaseView {
     const hint = el("div", "base-hint");
     hint.textContent = "Base command is the campaign hub / tactical launch starts from here";
     this.root.appendChild(hint);
+
+    const notice = el("div", "notice-toast");
+    notice.setAttribute("role", "status");
+    notice.setAttribute("aria-live", "polite");
+    this.noticeEl = notice;
+    this.root.appendChild(notice);
   }
 
   private stat(label: string, value: string): HTMLElement {
