@@ -14,6 +14,7 @@ import {
   LineBasicMaterial,
   LineLoop,
   type Material,
+  Matrix4,
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
@@ -76,6 +77,58 @@ const EARTH_RADIUS = 1.5;
 const UP = new Vector3(0, 1, 0);
 const MAP_WIDTH = 2048;
 const MAP_HEIGHT = 1024;
+
+/** Engagement range at which an interception encounter begins (mirrors the campaign layer). */
+const ENCOUNTER_START_RANGE = 3;
+/** Sampling resolution of the base->UFO great-circle trajectory line. */
+const TRAJECTORY_SEGMENTS = 24;
+
+interface SpeedOption {
+  speed: number;
+  icon: string;
+  label: string;
+}
+
+/** Time-flow speed controls (replacing the legacy single Scan button). 0 = paused. */
+const SPEED_OPTIONS: readonly SpeedOption[] = [
+  { speed: 0, icon: "⏸", label: "Pause" },
+  { speed: 1, icon: "▸", label: "1×" },
+  { speed: 5, icon: "▸▸", label: "5×" },
+  { speed: 30, icon: "⏭", label: "30×" },
+];
+
+/** Per-speed tick cadence: how many game hours advance, and how often, so time visibly flows. */
+const SPEED_TICKS: Record<number, { hours: number; ms: number }> = {
+  1: { hours: 1, ms: 700 },
+  5: { hours: 3, ms: 400 },
+  30: { hours: 6, ms: 160 },
+};
+
+/** Auto-pause toast kind; pairs an icon with the color so the alert is never color-alone. */
+type EventKind = "info" | "won" | "lost";
+interface EventInfo {
+  kind: EventKind;
+  text: string;
+}
+
+/** Notable campaign fields tracked across renders so auto-pause only fires on real events. */
+interface EventSnapshot {
+  contactId: string | null;
+  contactStatus: string | null;
+  region: string | null;
+  fundingReport: number | null;
+  interceptionReport: number | null;
+  missionsCompleted: number;
+  status: string;
+}
+
+// Bridge state for the current remount-based controller (src/game/main.ts rebuilds the
+// view per action). Persisting the chosen speed + last event snapshot across those
+// remounts keeps flowing time continuous and lets auto-pause fire on events even though
+// the GeoscapeView instance is replaced. Once main.ts switches to update() (no remount),
+// this becomes a harmless no-op cache.
+let resumedTimeSpeed = 0;
+let lastEventSnapshot: EventSnapshot | null = null;
 
 const CSS = `
 #geoscape {
@@ -460,6 +513,82 @@ const CSS = `
 #geoscape .geo-encounter-log p { margin: 0 0 4px; color: #a8c0d0; }
 #geoscape .geo-encounter-actions { display: flex; gap: 8px; }
 #geoscape .geo-encounter-actions button { flex: 1; }
+#geoscape .geo-overlay-host {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  pointer-events: none;
+}
+#geoscape .geo-overlay-host .geo-overlay { pointer-events: auto; }
+#geoscape .geo-speed {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  flex: 1;
+}
+#geoscape .geo-speed-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 40px;
+  padding: 4px 6px;
+  font-size: 9px;
+}
+#geoscape .geo-speed-btn .geo-speed-icon {
+  font-size: 12px;
+  line-height: 1;
+  color: #67e8f9;
+}
+#geoscape .geo-speed-btn[aria-pressed="true"] {
+  border-color: rgba(103,232,249,.9);
+  background: linear-gradient(180deg, rgba(17,94,117,.98), rgba(8,49,65,.98));
+}
+#geoscape .geo-speed-btn[aria-pressed="true"] .geo-speed-icon { color: #ecfeff; }
+#geoscape .geo-contact .geo-contact-status {
+  margin-top: 7px;
+  color: #fbbf24;
+  font: 800 10px/1.3 ui-monospace, monospace;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+#geoscape .geo-contact .geo-contact-meta {
+  margin-top: 4px;
+  color: #8aa6b6;
+  font: 600 10px/1.4 ui-monospace, monospace;
+}
+#geoscape .geo-toast {
+  position: absolute;
+  top: max(18px, env(safe-area-inset-top));
+  left: 50%;
+  z-index: 9;
+  transform: translate(-50%, -16px);
+  opacity: 0;
+  pointer-events: none;
+  padding: 10px 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(103,232,249,.5);
+  background: rgba(2,12,20,.85);
+  color: #e8fbff;
+  font: 800 11px/1.3 ui-monospace, monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  box-shadow: 0 16px 50px rgba(0,0,0,.45);
+  transition: opacity .2s ease, transform .2s ease;
+}
+#geoscape .geo-toast.visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+#geoscape .geo-toast[data-kind="won"] {
+  border-color: rgba(134,239,172,.7);
+  color: #bbf7d0;
+}
+#geoscape .geo-toast[data-kind="lost"] {
+  border-color: rgba(248,113,113,.7);
+  color: #fecaca;
+}
 @media (max-width: 820px) {
   #geoscape .geo-panel { width: calc(100vw - 24px); padding: 13px; }
   #geoscape .geo-left { left: 12px; right: 12px; }
@@ -469,6 +598,8 @@ const CSS = `
   #geoscape .geo-hint { display: none; }
   #geoscape .geo-encounter { max-height: calc(100vh - 24px); }
   #geoscape .geo-encounter-log { max-height: 120px; }
+  #geoscape .geo-actions { flex-wrap: wrap; }
+  #geoscape .geo-speed-btn { min-height: 36px; }
 }
 `;
 
@@ -543,6 +674,65 @@ export function geoscapeTimeAction(campaign: CampaignState | null): GeoscapeTime
 
 export function canSelectBaseSite(campaign: CampaignState | null): boolean {
   return campaign === null;
+}
+
+/** Spherical linear interpolation between two unit vectors (true great-circle path). */
+function slerpUnit(a: Vector3, b: Vector3, t: number, out: Vector3): void {
+  const dot = Math.max(-1, Math.min(1, a.dot(b)));
+  const angle = Math.acos(dot);
+  const sinAngle = Math.sin(angle);
+  if (sinAngle < 1e-5) {
+    out.copy(a);
+    return;
+  }
+  const w0 = Math.sin((1 - t) * angle) / sinAngle;
+  const w1 = Math.sin(t * angle) / sinAngle;
+  out.set(a.x * w0 + b.x * w1, a.y * w0 + b.y * w1, a.z * w0 + b.z * w1);
+}
+
+/** Snapshot of the notable event fields; the clock is intentionally excluded. */
+function snapshotEvent(campaign: CampaignState | null): EventSnapshot {
+  const contact = campaign?.ufoContact;
+  return {
+    contactId: contact?.id ?? null,
+    contactStatus: contact?.status ?? null,
+    region: contact?.region ?? null,
+    fundingReport: campaign?.lastFundingReport?.reportNumber ?? null,
+    interceptionReport: campaign?.lastInterceptionReport?.completedAtHour ?? null,
+    missionsCompleted: campaign?.missionsCompleted ?? 0,
+    status: campaign?.strategic.status ?? "active",
+  };
+}
+
+/**
+ * Returns a short toast notice when a notable event happened between the previous
+ * snapshot and the incoming campaign, otherwise null. Drives the classic X-COM
+ * "time flows until something happens" auto-pause. Pure data-in/data-out: works
+ * both for in-place update() and across the current remount-based controller.
+ */
+function detectEvent(prev: EventSnapshot, campaign: CampaignState | null): EventInfo | null {
+  const next = snapshotEvent(campaign);
+  if (prev.status !== next.status) {
+    if (next.status === "won") return { kind: "won", text: "Containment achieved" };
+    if (next.status === "lost") return { kind: "lost", text: "Containment failed" };
+  }
+  if (prev.contactId === null && next.contactId !== null) {
+    return { kind: "info", text: `UFO detected — ${next.region ?? "unknown sector"}` };
+  }
+  if (prev.contactId !== null && next.contactId !== null && prev.contactStatus !== next.contactStatus) {
+    if (next.contactStatus === "crashed") return { kind: "info", text: "UFO shot down" };
+    if (next.contactStatus === "landed") return { kind: "info", text: "UFO landed — launch assault" };
+  }
+  if (prev.fundingReport !== next.fundingReport && next.fundingReport !== null) {
+    return { kind: "info", text: "Council funding report" };
+  }
+  if (prev.interceptionReport !== next.interceptionReport && next.interceptionReport !== null) {
+    return { kind: "info", text: "Interception report filed" };
+  }
+  if (prev.missionsCompleted !== next.missionsCompleted) {
+    return { kind: "info", text: "Mission report filed" };
+  }
+  return null;
 }
 
 /** Difficulty levels in selector order (matches difficulty ramp). */
@@ -791,6 +981,8 @@ export class GeoscapeView {
   private readonly earthMesh: Mesh;
   private readonly baseMarker = new Group();
   private readonly ufoMarker = new Group();
+  private readonly interceptorMarker = new Group();
+  private readonly trajectoryLine: Line;
   private selectedBase: BaseLocation | null;
   private selectedDifficulty: DifficultyLevel = "veteran";
   private encounterLog: HTMLElement | null = null;
@@ -798,8 +990,37 @@ export class GeoscapeView {
   private down: { x: number; y: number } | null = null;
   private disposed = false;
 
+  /** Live campaign state; swapped in place by update() (mount never mutates it). */
+  private campaign: CampaignState | null;
+  /** Mission type the UFO marker was last built for (rebuilt only on change). */
+  private ufoMissionType: MissionType | undefined;
+  /** Time-flow speed (0 = paused). Persisted across remounts via resumedTimeSpeed. */
+  private timeSpeed = resumedTimeSpeed;
+  private timeAccumulatorMs = 0;
+  private lastFlowMs = 0;
+  /** Active speed buttons; aria-pressed refreshed whenever timeSpeed changes. */
+  private speedButtons: HTMLButtonElement[] = [];
+  /** Cached base->UFO great-circle route for the current engagement target. */
+  private interceptorRoute: { baseN: Vector3; ufoN: Vector3; contactId: string } | null = null;
+  private toastTimer: number | undefined;
+
+  // Dynamic DOM containers populated by refresh() (static shell lives in buildHud()).
+  private readonly statsGrid: HTMLDivElement;
+  private readonly noticeSlot: HTMLDivElement;
+  private readonly cardsSlot: HTMLDivElement;
+  private readonly actionsSlot: HTMLDivElement;
+  private readonly overlaySlot: HTMLDivElement;
+  private readonly toast: HTMLDivElement;
+
+  // Reusable scratch objects for the interceptor animation (no per-frame allocation).
+  private readonly scratchA = new Vector3();
+  private readonly scratchB = new Vector3();
+  private readonly scratchC = new Vector3();
+  private readonly scratchBasis = new Matrix4();
+
   constructor(private readonly opts: GeoscapeOptions) {
     injectStyle();
+    this.campaign = opts.campaign;
     this.selectedBase = opts.campaign?.base ?? null;
     this.root = el("div");
     this.root.id = "geoscape";
@@ -820,12 +1041,43 @@ export class GeoscapeView {
     this.controls.autoRotate = true;
     this.controls.autoRotateSpeed = 0.45;
 
+    // Trajectory line is allocated once; its positions are rewritten per engagement.
+    this.trajectoryLine = this.makeTrajectoryLine();
     this.earthMesh = this.buildScene();
     const panels = this.buildHud();
     this.selectedRegion = panels.region;
     this.selectedCoords = panels.coords;
     this.confirmButton = panels.confirm;
+    this.statsGrid = panels.statsGrid;
+    this.noticeSlot = panels.noticeSlot;
+    this.cardsSlot = panels.cardsSlot;
+    this.actionsSlot = panels.actionsSlot;
+    this.overlaySlot = panels.overlaySlot;
+    this.toast = panels.toast;
+    this.ufoMissionType = opts.campaign?.ufoContact?.missionType;
     this.updateSelectionHud();
+    // First render populates every panel/marker and seeds the event snapshot
+    // (without firing an auto-pause toast for the already-known campaign).
+    this.refresh();
+  }
+
+  /**
+   * In-place refresh: swap the campaign, reposition markers, refresh every panel
+   * and the time-control state — without disposing/rebuilding the scene or the
+   * renderer. Safe to call from within the view's own frame loop. Auto-pauses and
+   * surfaces a toast when a notable event (new contact, status change, funding
+   * report, mission/campaign outcome) is detected versus the previously rendered
+   * snapshot.
+   */
+  update(campaign: CampaignState | null): void {
+    if (this.disposed) return;
+    this.campaign = campaign;
+    if (this.selectedBase === null && campaign?.base) {
+      this.selectedBase = campaign.base;
+      this.placeMarker(this.selectedBase);
+      this.updateSelectionHud();
+    }
+    this.refresh();
   }
 
   mount(container: HTMLElement): void {
@@ -844,6 +1096,7 @@ export class GeoscapeView {
     if (this.disposed) return;
     this.disposed = true;
     cancelAnimationFrame(this.raf);
+    if (this.toastTimer !== undefined) window.clearTimeout(this.toastTimer);
     window.removeEventListener("resize", this.resize);
     this.renderer.domElement.removeEventListener("pointerdown", this.onPointerDown);
     this.renderer.domElement.removeEventListener("pointerup", this.onPointerUp);
@@ -904,8 +1157,53 @@ export class GeoscapeView {
     this.earthGroup.add(this.ufoMarker);
     if (this.opts.campaign?.ufoContact) this.placeUfoMarker(this.opts.campaign.ufoContact);
     else this.ufoMarker.visible = false;
+    this.buildInterceptorMarker();
+    this.interceptorMarker.visible = false;
+    this.trajectoryLine.visible = false;
+    this.earthGroup.add(this.trajectoryLine, this.interceptorMarker);
 
     return ocean;
+  }
+
+  /** Pre-allocated base->UFO trajectory line; positions rewritten by fillTrajectory(). */
+  private makeTrajectoryLine(): Line {
+    const positions = new Float32Array((TRAJECTORY_SEGMENTS + 1) * 3);
+    const geometry = new BufferGeometry();
+    geometry.setAttribute("position", new Float32BufferAttribute(positions, 3));
+    return new Line(
+      geometry,
+      new LineBasicMaterial({ color: 0x67e8f9, transparent: true, opacity: 0.55 }),
+    );
+  }
+
+  /**
+   * Cyan interceptor craft (distinct from the amber base cone and the UFO's
+   * mission-colored marker). Color is always paired with the "INTERCEPTOR" label
+   * in the encounter overlay, so the craft is identifiable without color alone.
+   */
+  private buildInterceptorMarker(): void {
+    const dart = new Mesh(
+      new ConeGeometry(0.05, 0.14, 14),
+      new MeshStandardMaterial({
+        color: 0x22d3ee,
+        emissive: new Color(0x06b6d4),
+        emissiveIntensity: 1.7,
+        roughness: 0.3,
+        metalness: 0.4,
+      }),
+    );
+    const ring = new Mesh(
+      new RingGeometry(0.07, 0.1, 20),
+      new MeshBasicMaterial({
+        color: 0x67e8f9,
+        transparent: true,
+        opacity: 0.55,
+        side: DoubleSide,
+        blending: AdditiveBlending,
+      }),
+    );
+    ring.rotation.x = -Math.PI / 2;
+    this.interceptorMarker.add(dart, ring);
   }
 
   private makeStars(): Points {
@@ -1041,7 +1339,17 @@ export class GeoscapeView {
     }
   }
 
-  private buildHud(): { region: HTMLElement; coords: HTMLElement; confirm: HTMLButtonElement } {
+  private buildHud(): {
+    region: HTMLElement;
+    coords: HTMLElement;
+    confirm: HTMLButtonElement;
+    statsGrid: HTMLDivElement;
+    noticeSlot: HTMLDivElement;
+    cardsSlot: HTMLDivElement;
+    actionsSlot: HTMLDivElement;
+    overlaySlot: HTMLDivElement;
+    toast: HTMLDivElement;
+  } {
     const left = el("section", "geo-panel geo-left");
     const eyebrow = el("div", "eyebrow");
     eyebrow.textContent = "Blacksite global command";
@@ -1051,37 +1359,10 @@ export class GeoscapeView {
     copy.textContent = this.opts.campaign
       ? "A clandestine base is established. Advance time to detect UFO contacts, then return to base to launch."
       : "Select a first base site on the globe. This will become the permanent command center for the campaign.";
-    const stats = el("div", "geo-status");
-    if (this.opts.campaign) {
-      const panic = highestRegionalPanic(this.opts.campaign);
-      const objective = campaignObjectiveProgress(this.opts.campaign);
-      stats.append(
-        this.stat("Clock", formatCampaignClock(this.opts.campaign.clock)),
-        this.stat("Threat", `${this.opts.campaign.strategic.threat}%`),
-        this.stat("Funding", `${this.opts.campaign.strategic.funding}`),
-        this.stat("Cores", `${objective.completed}/${objective.required}`),
-        this.stat("Panic", `${panic.region} ${panic.panic}%`),
-      );
-    } else {
-      stats.append(
-        this.stat("Threat", "Unknown"),
-        this.stat("Funding", "Pending"),
-        this.stat("Readiness", "Base required"),
-      );
-    }
-    left.append(eyebrow, title, copy, stats);
-    const notice = this.buildNotice();
-    if (notice) left.append(notice);
-    if (this.opts.campaign) {
-      left.append(
-        this.objectiveCard(),
-        this.contactCard(),
-        this.aircraftCard(),
-        this.projectCard(),
-        this.councilCard(),
-        this.fundingCard(),
-      );
-    }
+    const statsGrid = el("div", "geo-status");
+    const noticeSlot = el("div");
+    const cardsSlot = el("div");
+    left.append(eyebrow, title, copy, statsGrid, noticeSlot, cardsSlot);
     this.root.appendChild(left);
 
     const right = el("section", "geo-panel geo-right");
@@ -1093,58 +1374,317 @@ export class GeoscapeView {
     const region = el("strong");
     const coords = el("div", "geo-coords");
     site.append(region, coords);
-    const actions = el("div", "geo-actions");
-    const reset = el("button");
-    reset.textContent = this.opts.campaign ? "New campaign" : "Reset";
-    reset.addEventListener("click", () => this.opts.onResetCampaign());
-    if (this.opts.campaign) {
-      const timeAction = geoscapeTimeAction(this.opts.campaign);
-      const scan = el("button");
-      scan.textContent = timeAction.label;
-      scan.disabled = timeAction.disabled;
-      scan.addEventListener("click", () => this.opts.onAdvanceTime(timeAction.hours));
-      actions.append(reset, scan);
-      if (this.opts.campaign.ufoContact?.status === "tracked") {
-        const intercept = el("button", "primary");
-        const forecast = interceptionForecast(this.opts.campaign);
-        intercept.textContent = isInterceptorReady(this.opts.campaign)
-          ? forecast?.risk === "dangerous"
-            ? "Risk intercept"
-            : "Intercept"
-          : "Repairing";
-        intercept.disabled = !canLaunchInterceptor(this.opts.campaign);
-        intercept.addEventListener("click", () => this.opts.onInterceptUfo());
-        actions.append(intercept);
-      }
-    } else {
-      actions.append(reset);
-    }
+    const actionsSlot = el("div", "geo-actions");
+    // The confirm button is a persistent node; refreshActions re-parents it as needed
+    // (its click handler reads live selection state, so the node must survive refreshes).
     const confirm = el("button", "primary");
     confirm.addEventListener("click", () => {
       if (!this.selectedBase) return;
       const difficulty = this.opts.campaign?.strategic.difficulty ?? this.selectedDifficulty;
       this.opts.onConfirmBase(this.selectedBase, difficulty);
     });
-    if (!this.opts.campaign?.ufoContact || this.opts.campaign.ufoContact.status === "crashed") {
-      actions.append(confirm);
-    }
     right.append(siteEye, heading, site);
     if (!this.opts.campaign) right.append(this.buildDifficultySelector());
-    right.append(actions);
+    right.append(actionsSlot);
     this.root.appendChild(right);
 
     const hint = el("div", "geo-hint");
     hint.textContent = this.opts.campaign
-      ? "Scan time from Earth Command / intercept UFOs / launch crash-site recovery from base"
+      ? "Time controls scan the globe / intercept UFOs / launch recovery from base"
       : "Drag to rotate / wheel to zoom / click Earth to designate base";
     this.root.appendChild(hint);
-    const overlay = this.buildInterceptionOverlay();
-    if (overlay) this.root.appendChild(overlay);
-    return { region, coords, confirm };
+    const overlaySlot = el("div", "geo-overlay-host");
+    this.root.appendChild(overlaySlot);
+    const toast = el("div", "geo-toast");
+    toast.setAttribute("role", "status");
+    toast.setAttribute("aria-live", "polite");
+    this.root.appendChild(toast);
+    return { region, coords, confirm, statsGrid, noticeSlot, cardsSlot, actionsSlot, overlaySlot, toast };
   }
 
+  /**
+   * Re-render every dynamic panel, marker, and the time-control state in place.
+   * Called from the constructor (first render) and from update(). Never disposes
+   * or rebuilds the three.js scene — only moves markers and refreshes DOM text.
+   */
+  private refresh(): void {
+    this.notifyCampaignEvent();
+    this.refreshForcedPause();
+    this.refreshStats();
+    this.refreshNotice();
+    this.refreshCards();
+    this.refreshActions();
+    this.refreshOverlay();
+    this.refreshMarkers();
+    this.refreshInterceptor();
+    this.refreshSpeedState();
+    if (this.encounterLog) this.encounterLog.scrollTop = this.encounterLog.scrollHeight;
+  }
+
+  /** True while an interactive interception encounter overlay is open. */
+  private isEngaging(): boolean {
+    const c = this.campaign;
+    return !!c?.interception && c?.ufoContact?.status === "engaging";
+  }
+
+  /** Pause + toast when a notable event appears versus the previously rendered snapshot. */
+  private notifyCampaignEvent(): void {
+    const snapshot = snapshotEvent(this.campaign);
+    if (lastEventSnapshot !== null) {
+      const info = detectEvent(lastEventSnapshot, this.campaign);
+      if (info) {
+        this.setTimeSpeed(0);
+        this.showToast(info);
+      }
+    }
+    lastEventSnapshot = snapshot;
+  }
+
+  /** Force pause whenever the overlay is up or the campaign is no longer active. */
+  private refreshForcedPause(): void {
+    if (this.isEngaging() && this.timeSpeed !== 0) this.setTimeSpeed(0);
+    else if (this.campaign && this.campaign.strategic.status !== "active" && this.timeSpeed !== 0) {
+      this.setTimeSpeed(0);
+    }
+  }
+
+  private setTimeSpeed(speed: number): void {
+    this.timeSpeed = speed;
+    // Persist across the current remount-based controller so flow stays continuous.
+    resumedTimeSpeed = speed;
+    this.timeAccumulatorMs = 0;
+    this.lastFlowMs = 0;
+    this.refreshSpeedState();
+  }
+
+  private refreshSpeedState(): void {
+    const interactive = !!this.campaign && this.campaign.strategic.status === "active" && !this.isEngaging();
+    for (const btn of this.speedButtons) {
+      const speed = Number(btn.dataset.speed);
+      btn.setAttribute("aria-pressed", String(this.timeSpeed === speed));
+      btn.disabled = !interactive;
+    }
+  }
+
+  private showToast(info: EventInfo): void {
+    const icon = info.kind === "won" ? "★" : info.kind === "lost" ? "✕" : "▸";
+    this.toast.dataset.kind = info.kind;
+    this.toast.textContent = `${icon}  ${info.text}`;
+    this.toast.classList.add("visible");
+    if (this.toastTimer !== undefined) window.clearTimeout(this.toastTimer);
+    this.toastTimer = window.setTimeout(() => {
+      this.toast.classList.remove("visible");
+    }, 3600);
+  }
+
+  private refreshStats(): void {
+    this.statsGrid.replaceChildren();
+    const c = this.campaign;
+    if (!c) {
+      this.statsGrid.append(
+        this.stat("Threat", "Unknown"),
+        this.stat("Funding", "Pending"),
+        this.stat("Readiness", "Base required"),
+      );
+      return;
+    }
+    const panic = highestRegionalPanic(c);
+    const objective = campaignObjectiveProgress(c);
+    this.statsGrid.append(
+      this.stat("Clock", formatCampaignClock(c.clock)),
+      this.stat("Threat", `${c.strategic.threat}%`),
+      this.stat("Funding", `${c.strategic.funding}`),
+      this.stat("Cores", `${objective.completed}/${objective.required}`),
+      this.stat("Panic", `${panic.region} ${panic.panic}%`),
+    );
+  }
+
+  private refreshNotice(): void {
+    const notice = this.buildNotice();
+    this.noticeSlot.replaceChildren(...(notice ? [notice] : []));
+  }
+
+  private refreshCards(): void {
+    this.cardsSlot.replaceChildren();
+    if (!this.campaign) return;
+    this.cardsSlot.append(
+      this.objectiveCard(),
+      this.contactCard(),
+      this.aircraftCard(),
+      this.projectCard(),
+      this.councilCard(),
+      this.fundingCard(),
+    );
+  }
+
+  /**
+   * Rebuild the right-panel action row: reset, the Pause/1x/5x/30x speed controls
+   * (replacing the legacy single Scan button), an Intercept affordance while a UFO
+   * is tracked, and the persistent confirm button when no live contact blocks it.
+   */
+  private refreshActions(): void {
+    this.actionsSlot.replaceChildren();
+    this.speedButtons = [];
+    const c = this.campaign;
+    const reset = el("button");
+    reset.textContent = c ? "New campaign" : "Reset";
+    reset.addEventListener("click", () => this.opts.onResetCampaign());
+    this.actionsSlot.append(reset);
+    if (!c) {
+      this.actionsSlot.append(this.confirmButton);
+      return;
+    }
+    const speedGroup = el("div", "geo-speed");
+    speedGroup.setAttribute("role", "group");
+    speedGroup.setAttribute("aria-label", "Time speed");
+    for (const option of SPEED_OPTIONS) {
+      const btn = el("button", "geo-speed-btn");
+      btn.type = "button";
+      btn.dataset.speed = String(option.speed);
+      const icon = el("span", "geo-speed-icon");
+      icon.textContent = option.icon;
+      const label = el("span");
+      label.textContent = option.label;
+      btn.append(icon, label);
+      btn.setAttribute("aria-pressed", String(this.timeSpeed === option.speed));
+      btn.addEventListener("click", () => this.setTimeSpeed(option.speed));
+      speedGroup.append(btn);
+      this.speedButtons.push(btn);
+    }
+    this.actionsSlot.append(speedGroup);
+    if (c.ufoContact?.status === "tracked") {
+      const intercept = el("button", "primary");
+      const forecast = interceptionForecast(c);
+      intercept.textContent = isInterceptorReady(c)
+        ? forecast?.risk === "dangerous"
+          ? "Risk intercept"
+          : "Intercept"
+        : "Repairing";
+      intercept.disabled = !canLaunchInterceptor(c);
+      intercept.addEventListener("click", () => this.opts.onInterceptUfo());
+      this.actionsSlot.append(intercept);
+    }
+    if (!c.ufoContact || c.ufoContact.status === "crashed") {
+      this.actionsSlot.append(this.confirmButton);
+    }
+  }
+
+  private refreshOverlay(): void {
+    const overlay = this.buildInterceptionOverlay();
+    this.overlaySlot.replaceChildren(...(overlay ? [overlay] : []));
+  }
+
+  /** Reposition the base + UFO markers; rebuild the UFO marker when its mission type changes. */
+  private refreshMarkers(): void {
+    const c = this.campaign;
+    if (c?.base) this.placeMarker(c.base);
+    else this.baseMarker.visible = false;
+    const contact = c?.ufoContact;
+    if (contact) {
+      this.refreshUfoMarkerType(contact.missionType);
+      this.placeUfoMarker(contact);
+    } else {
+      this.ufoMarker.visible = false;
+    }
+  }
+
+  private refreshUfoMarkerType(missionType: MissionType | undefined): void {
+    if (this.ufoMissionType === missionType) return;
+    this.ufoMissionType = missionType;
+    for (const child of [...this.ufoMarker.children]) {
+      this.ufoMarker.remove(child);
+      if (child instanceof Mesh || child instanceof Line) {
+        child.geometry.dispose();
+        const material = child.material;
+        if (Array.isArray(material)) for (const one of material) one.dispose();
+        else material.dispose();
+      }
+    }
+    this.buildUfoMarker(missionType);
+  }
+
+  /** Show/hide the interceptor craft + trajectory and cache the route when a target changes. */
+  private refreshInterceptor(): void {
+    const c = this.campaign;
+    const engaging = this.isEngaging();
+    if (!engaging || !c?.ufoContact || !c.base) {
+      this.interceptorMarker.visible = false;
+      this.trajectoryLine.visible = false;
+      this.interceptorRoute = null;
+      return;
+    }
+    const contact = c.ufoContact;
+    if (!this.interceptorRoute || this.interceptorRoute.contactId !== contact.id) {
+      const baseN = latLonToVector(c.base.lat, c.base.lon, 1).normalize();
+      const ufoN = latLonToVector(contact.lat, contact.lon, 1).normalize();
+      this.interceptorRoute = { baseN, ufoN, contactId: contact.id };
+      this.fillTrajectory(baseN, ufoN);
+    }
+    this.interceptorMarker.visible = true;
+    this.trajectoryLine.visible = true;
+  }
+
+  private fillTrajectory(baseN: Vector3, ufoN: Vector3): void {
+    const attr = this.trajectoryLine.geometry.getAttribute("position") as Float32BufferAttribute;
+    const arr = attr.array as Float32Array;
+    for (let i = 0; i <= TRAJECTORY_SEGMENTS; i++) {
+      const t = i / TRAJECTORY_SEGMENTS;
+      slerpUnit(baseN, ufoN, t, this.scratchA);
+      this.scratchA.multiplyScalar(EARTH_RADIUS + 0.02);
+      arr[i * 3] = this.scratchA.x;
+      arr[i * 3 + 1] = this.scratchA.y;
+      arr[i * 3 + 2] = this.scratchA.z;
+    }
+    attr.needsUpdate = true;
+  }
+
+  /** Drive the interceptor along base->UFO as the encounter range closes; pulse + orient it. */
+  private animateInterceptor(now: number): void {
+    const route = this.interceptorRoute;
+    const encounter = this.campaign?.interception;
+    if (!this.interceptorMarker.visible || !route || !encounter) return;
+    // range goes ENCOUNTER_START_RANGE -> 0 as the craft closes; map to 0 -> 1 along the arc.
+    const progress = Math.max(0, Math.min(1, 1 - encounter.range / ENCOUNTER_START_RANGE));
+    slerpUnit(route.baseN, route.ufoN, progress, this.scratchA); // unit direction at the craft
+    this.scratchA.normalize().multiplyScalar(EARTH_RADIUS + 0.14);
+    this.interceptorMarker.position.copy(this.scratchA);
+    // Orient the dart's tip (+Y) along the travel tangent toward the UFO.
+    const posN = this.scratchB.copy(this.scratchA).normalize(); // surface normal at the craft
+    const tangent = this.scratchC
+      .copy(route.ufoN)
+      .addScaledVector(posN, -posN.dot(route.ufoN)); // great-circle tangent toward UFO
+    if (tangent.lengthSq() > 1e-8) tangent.normalize();
+    this.scratchBasis.makeBasis(
+      this.scratchA.copy(tangent).cross(posN), // x = tangent × normal
+      tangent, // y = forward (cone tip direction)
+      posN, // z = up
+    );
+    this.interceptorMarker.quaternion.setFromRotationMatrix(this.scratchBasis);
+    this.interceptorMarker.scale.setScalar(1 + Math.sin(now * 0.012) * 0.18);
+  }
+
+  /** Flowing time: advance game hours on a timer scaled by the chosen speed. */
+  private advanceFlowingTime(now: number): void {
+    const speed = this.timeSpeed;
+    if (speed <= 0 || !this.campaign || this.campaign.strategic.status !== "active" || this.isEngaging()) {
+      this.lastFlowMs = 0;
+      this.timeAccumulatorMs = 0;
+      return;
+    }
+    const tick = SPEED_TICKS[speed];
+    if (!tick) return;
+    if (this.lastFlowMs === 0) this.lastFlowMs = now;
+    this.timeAccumulatorMs += now - this.lastFlowMs;
+    this.lastFlowMs = now;
+    if (this.timeAccumulatorMs >= tick.ms) {
+      this.timeAccumulatorMs %= tick.ms;
+      this.opts.onAdvanceTime(tick.hours);
+    }
+  }
+
+  /** Concise contact card: id, status instruction, region, time-left. Drops the prose. */
   private contactCard(): HTMLElement {
-    const contact = this.opts.campaign?.ufoContact;
+    const contact = this.campaign?.ufoContact;
     const card = el("section", `geo-contact ${contact ? "" : "idle"}`.trim());
     if (!contact) {
       const empty = el("div", "geo-empty");
@@ -1153,34 +1693,68 @@ export class GeoscapeView {
       const title = el("strong");
       title.textContent = "No UFO contact";
       const copy = el("p");
-      copy.textContent = "Radar is sweeping. Advance time until command detects a recoverable UFO track.";
+      copy.textContent = "Radar sweeping. Advance time to detect a UFO.";
       empty.append(icon, title, copy);
       card.append(empty);
       return card;
     }
     const info = missionTypeInfo(contact.missionType);
+    const remaining = Math.max(0, contact.expiresAtHour - (this.campaign?.clock.elapsedHours ?? 0));
     const title = el("strong");
-    title.textContent = `${contact.id} / ${this.contactStatusLabel(contact)} / ${contact.region}`;
-    const copy = el("p");
-    const remaining = Math.max(0, contact.expiresAtHour - (this.opts.campaign?.clock.elapsedHours ?? 0));
-    copy.textContent = contact.status === "crashed"
-      ? `${fmtCoord(contact.lat, "N", "S")} / ${fmtCoord(contact.lon, "E", "W")} ` +
-        `- crash site expires in ${remaining}h. Return to base to launch recovery. ` +
-        `Interceptor damage ${contact.interceptorDamage ?? 0}%.`
-      : this.trackedContactCopy(contact, remaining);
-    card.append(this.missionBadge(info), title, copy);
+    title.textContent = `${contact.id} · ${contact.region}`;
+    const status = el("p", "geo-contact-status");
+    status.textContent = this.contactStatusLabel(contact);
+    const meta = el("p", "geo-contact-meta");
+    meta.textContent =
+      `${fmtCoord(contact.lat, "N", "S")} / ${fmtCoord(contact.lon, "E", "W")} · ${remaining}h left`;
+    // The badge TEXT is status-derived so an airborne (tracked/engaging) UFO
+    // reads "Airborne UFO", never "Crash site" — matching the status line.
+    // missionTypeInfo still drives the marker icon/color/urgent styling.
+    const badgeInfo: MissionTypeInfo = { ...info, label: this.contactBadgeLabel(contact) };
+    card.append(this.missionBadge(badgeInfo), title, status, meta);
     return card;
   }
 
+  /**
+   * Instructional status label. A tracked (airborne) UFO is NEVER "Crash site" —
+   * it reads as airborne with an intercept prompt. Only a crashed contact reads
+   * as a crash site (launch assault).
+   */
   private contactStatusLabel(contact: UfoContact): string {
-    if (contact.status === "crashed") return "Crash site";
-    if (contact.status === "engaging") return "Engaging";
-    if (contact.status === "landed") {
-      if (contact.missionType === "terror") return "Terror site";
-      if (contact.missionType === "baseDefense") return "Base assault";
-      return "Landed";
+    switch (contact.status) {
+      case "engaging":
+        return "Engaging — stand by";
+      case "crashed":
+        return "Crash site — launch assault";
+      case "landed":
+        if (contact.missionType === "terror") return "Terror site — launch assault";
+        if (contact.missionType === "baseDefense") return "Base assault — launch defense";
+        return "Landed — launch assault";
+      case "tracked":
+      default:
+        return "Airborne — intercept to engage";
     }
-    return "Airborne";
+  }
+
+  /**
+   * Status-aware badge label for the contact card. Mirrors contactStatusLabel so
+   * the badge and the status line never contradict each other: an airborne
+   * (tracked/engaging) UFO reads "Airborne UFO", and "Crash site" appears only
+   * once the contact is actually down.
+   */
+  private contactBadgeLabel(contact: UfoContact): string {
+    switch (contact.status) {
+      case "crashed":
+        return "Crash site";
+      case "landed":
+        if (contact.missionType === "terror") return "Terror site";
+        if (contact.missionType === "baseDefense") return "Base defense";
+        return "Landed UFO";
+      case "tracked":
+      case "engaging":
+      default:
+        return "Airborne UFO";
+    }
   }
 
   private missionBadge(info: MissionTypeInfo): HTMLElement {
@@ -1225,7 +1799,7 @@ export class GeoscapeView {
 
   /** Terminal-status notice; returns null when the campaign is still active. */
   private buildNotice(): HTMLElement | null {
-    const status = this.opts.campaign?.strategic.status;
+    const status = this.campaign?.strategic.status;
     if (status !== "won" && status !== "lost") return null;
     const notice = el("div", `geo-notice ${status}`);
     const icon = el("span", "geo-notice-icon");
@@ -1244,7 +1818,7 @@ export class GeoscapeView {
 
   /** Modal interception overlay; rendered only while an encounter is in progress. */
   private buildInterceptionOverlay(): HTMLElement | null {
-    const encounter = this.opts.campaign?.interception;
+    const encounter = this.campaign?.interception;
     if (!encounter) return null;
     const overlay = el("div", "geo-overlay");
     const panel = el("div", "geo-encounter");
@@ -1309,7 +1883,7 @@ export class GeoscapeView {
   }
 
   private objectiveCard(): HTMLElement {
-    const campaign = this.opts.campaign!;
+    const campaign = this.campaign!;
     const objective = campaignObjectiveProgress(campaign);
     const card = el("section", objective.status === "active" ? "geo-contact idle" : "geo-contact");
     const title = el("strong");
@@ -1324,22 +1898,8 @@ export class GeoscapeView {
     return card;
   }
 
-  private trackedContactCopy(contact: UfoContact, remaining: number): string {
-    const forecast = interceptionForecast(this.opts.campaign!);
-    const location = `${fmtCoord(contact.lat, "N", "S")} / ${fmtCoord(contact.lon, "E", "W")}`;
-    if (!forecast) {
-      return `${location} - signal expires in ${remaining}h. Launch interceptor before the UFO escapes.`;
-    }
-    const forecastLine =
-      `Strength ${forecast.strength}. Intercept ${forecast.risk.toUpperCase()} ` +
-      `(${forecast.interceptorScore}/${forecast.ufoScore}), ${forecast.damage}% estimated damage.`;
-    return forecast.canLaunch
-      ? `${location} - signal expires in ${remaining}h. ${forecastLine}`
-      : `${location} - signal expires in ${remaining}h. Interceptor is repairing. ${forecastLine}`;
-  }
-
   private aircraftCard(): HTMLElement {
-    const campaign = this.opts.campaign!;
+    const campaign = this.campaign!;
     const card = el("section", "geo-contact idle");
     const title = el("strong");
     const copy = el("p");
@@ -1361,7 +1921,7 @@ export class GeoscapeView {
   }
 
   private councilCard(): HTMLElement {
-    const campaign = this.opts.campaign!;
+    const campaign = this.campaign!;
     const panic = highestRegionalPanic(campaign);
     const card = el("section", panic.panic >= 75 ? "geo-contact" : "geo-contact idle");
     const title = el("strong");
@@ -1378,7 +1938,7 @@ export class GeoscapeView {
   }
 
   private fundingCard(): HTMLElement {
-    const report = this.opts.campaign?.lastFundingReport;
+    const report = this.campaign?.lastFundingReport;
     const card = el("section", "geo-contact idle");
     const title = el("strong");
     const copy = el("p");
@@ -1396,7 +1956,7 @@ export class GeoscapeView {
   }
 
   private projectCard(): HTMLElement {
-    const report = this.opts.campaign?.projectReports[0];
+    const report = this.campaign?.projectReports[0];
     const card = el("section", report ? "geo-contact" : "geo-contact idle");
     const title = el("strong");
     const copy = el("p");
@@ -1493,11 +2053,16 @@ export class GeoscapeView {
     this.raf = requestAnimationFrame(this.frame);
     const now = performance.now();
     this.baseMarker.scale.setScalar(1 + Math.sin(now * 0.004) * 0.08);
-    const contact = this.opts.campaign?.ufoContact;
+    const contact = this.campaign?.ufoContact;
     const urgent = contact ? missionTypeInfo(contact.missionType).urgent : false;
     // Urgent contacts (terror / base defense) pulse faster and harder so they
     // read as higher priority against the steady crash-site markers.
     this.ufoMarker.scale.setScalar(1 + Math.sin(now * (urgent ? 0.012 : 0.006)) * (urgent ? 0.2 : 0.14));
+    this.animateInterceptor(now);
+    this.advanceFlowingTime(now);
+    // onAdvanceTime may synchronously dispose+remount this view (current controller);
+    // bail before touching the disposed renderer/controls in that case.
+    if (this.disposed) return;
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
   };

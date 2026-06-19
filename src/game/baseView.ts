@@ -56,8 +56,10 @@ import {
   hasResearch,
   highestRegionalPanic,
   RECRUIT_COST,
+  type ManufacturingProject,
   MANUFACTURING_PROJECTS,
   MARKET_CONFIG,
+  type ResearchProject,
   RESEARCH_PROJECTS,
   canStartManufacturing,
   manufacturingCost,
@@ -66,12 +68,15 @@ import {
   researchCost,
   soldierWeaponId,
 } from "../campaign/storage";
+import { generateOperation } from "../campaign/operations";
 import type {
+  CampaignSoldier,
   CampaignState,
   CampaignWeaponId,
   ManufacturingProjectId,
   OperationPlan,
   ResearchId,
+  UfoContact,
 } from "../campaign/types";
 import { WEAPONS } from "../sim/content";
 
@@ -418,7 +423,7 @@ const CSS = `
 }
 #base-view .soldier-row {
   display: grid;
-  grid-template-columns: auto minmax(78px, 1fr) auto auto auto minmax(102px, .8fr);
+  grid-template-columns: auto minmax(74px, 1fr) auto auto minmax(98px, .8fr);
   gap: 8px;
   align-items: center;
   padding: 7px;
@@ -452,9 +457,6 @@ const CSS = `
 #base-view .deploy-toggle:has(input:disabled) {
   color: #64748b;
   opacity: .65;
-}
-#base-view .soldier-row span:nth-last-child(2) {
-  color: #8aa7b8;
 }
 #base-view .soldier-row select {
   min-width: 98px;
@@ -692,6 +694,113 @@ const CSS = `
   color: #fecaca;
   background: rgba(45,11,18,.92);
 }
+#base-view .stat-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 11px;
+}
+#base-view .stat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border: 1px solid rgba(103,232,249,.22);
+  border-radius: 999px;
+  color: #e8fbff;
+  background: rgba(8,35,47,.4);
+  font: 800 9px/1 ui-monospace, monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+#base-view .stat-chip .chip-icon { color: #67e8f9; }
+#base-view .stat-chip.warn { border-color: rgba(251,191,36,.42); color: #fde68a; }
+#base-view .stat-chip.warn .chip-icon { color: #fbbf24; }
+#base-view .stat-chip.danger { border-color: rgba(251,113,133,.45); color: #fecaca; }
+#base-view .stat-chip.danger .chip-icon { color: #fb7185; }
+#base-view .status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border: 1px solid rgba(103,232,249,.3);
+  border-radius: 999px;
+  color: #e8fbff;
+  font: 800 8px/1 ui-monospace, monospace;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+#base-view .status-chip.wounded { border-color: rgba(251,191,36,.5); color: #fde68a; }
+#base-view .status-chip.kia { border-color: rgba(251,113,133,.5); color: #fda4af; }
+#base-view .strategic-details,
+#base-view .collapsible {
+  margin-top: 11px;
+}
+#base-view .strategic-details > summary,
+#base-view .collapsible > summary {
+  cursor: pointer;
+  color: #67e8f9;
+  font: 800 9px/1.2 ui-monospace, monospace;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  list-style: none;
+}
+#base-view .strategic-details > summary::-webkit-details-marker,
+#base-view .collapsible > summary::-webkit-details-marker { display: none; }
+#base-view .strategic-details > summary::before,
+#base-view .collapsible > summary::before { content: "▸ "; }
+#base-view .strategic-details[open] > summary::before,
+#base-view .collapsible[open] > summary::before { content: "▾ "; }
+#base-view .strategic-details > p,
+#base-view .collapsible p {
+  margin-top: 7px;
+  color: #9db5c5;
+  font-size: 10px;
+}
+#base-view .airborne-banner {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 11px;
+  align-items: start;
+  margin: 13px 0;
+  padding: 12px;
+  border: 1px solid rgba(251,191,36,.45);
+  border-radius: 8px;
+  background: rgba(35,24,4,.26);
+}
+#base-view .airborne-banner.engaging { border-color: rgba(251,113,133,.5); background: rgba(45,11,18,.28); }
+#base-view .airborne-banner.escaped { border-color: rgba(148,163,184,.32); background: rgba(2,12,20,.4); }
+#base-view .airborne-banner .banner-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgba(251,191,36,.6);
+  border-radius: 8px;
+  color: #fbbf24;
+  font-size: 16px;
+}
+#base-view .airborne-banner.engaging .banner-icon { border-color: rgba(251,113,133,.6); color: #fb7185; }
+#base-view .airborne-banner.escaped .banner-icon { border-color: rgba(148,163,184,.4); color: #94a3b8; }
+#base-view .airborne-banner .banner-body strong {
+  display: block;
+  color: #fef3c7;
+  font: 850 11px/1.2 ui-monospace, monospace;
+  text-transform: uppercase;
+}
+#base-view .airborne-banner.engaging .banner-body strong { color: #fecaca; }
+#base-view .airborne-banner.escaped .banner-body strong { color: #cbd5e1; }
+#base-view .airborne-banner .banner-body p {
+  margin-top: 5px;
+  color: #b9c7d2;
+  font-size: 10px;
+}
+#base-view .airborne-banner button {
+  margin-top: 9px;
+  min-height: 34px;
+}
 @media (max-width: 900px) {
   #base-view .base-panel { width: calc(100vw - 24px); padding: 13px; }
   #base-view .base-left { left: 12px; right: 12px; }
@@ -708,6 +817,22 @@ function el<K extends keyof HTMLElementTagNameMap>(
 ): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
   if (className) node.className = className;
+  return node;
+}
+
+function span(text: string, className?: string): HTMLSpanElement {
+  const node = el("span", className);
+  node.textContent = text;
+  return node;
+}
+
+/** Compact stat chip used in the strategic summary. Icon + label + value travel
+ *  together so the colored severity class is never the sole signal. */
+function statChip(icon: string, label: string, value: string, cls?: string): HTMLSpanElement {
+  const node = el("span", `stat-chip${cls ? ` ${cls}` : ""}`);
+  const iconSpan = el("span", "chip-icon");
+  iconSpan.textContent = icon;
+  node.append(iconSpan, document.createTextNode(`${label} ${value}`));
   return node;
 }
 
@@ -918,6 +1043,8 @@ export class BaseView {
   private disposed = false;
   private noticeEl: HTMLDivElement | null = null;
   private noticeTimer: ReturnType<typeof setTimeout> | null = null;
+  private leftPanel: HTMLElement | null = null;
+  private rightPanel: HTMLElement | null = null;
 
   constructor(private readonly opts: BaseViewOptions) {
     injectStyle();
@@ -953,6 +1080,16 @@ export class BaseView {
     disposeObject(this.scene);
     this.renderer.dispose();
     this.root.remove();
+  }
+
+  /** In-place refresh: swap the campaign, recompute the derived operation, and
+   *  re-render every panel without re-mounting the 3D scene. Safe to call
+   *  repeatedly (it only rebuilds DOM text, never the renderer/scene). */
+  update(campaign: CampaignState): void {
+    if (this.disposed) return;
+    this.opts.campaign = campaign;
+    this.opts.operation = generateOperation(campaign);
+    this.refreshHud();
   }
 
   /** Lightweight transient notice (toast). Pairs its message text with the kind label so
@@ -1720,87 +1857,158 @@ export class BaseView {
     }
   }
 
+  /** Build the persistent DOM shell once (panels, hint, toast). All campaign-
+   *  dependent content is filled in by refreshHud(), which update() re-invokes. */
   private buildHud(): void {
-    const facilities = constructedFacilities(this.opts.campaign);
-    const expansions = availableBaseFacilities(this.opts.campaign);
-    const summary = summarizeBaseFacilities(facilities);
-    const activeRoster = activeSoldiers(this.opts.campaign);
-    const deployment = deploymentSoldiers(this.opts.campaign);
-    const deployedIds = new Set(deployment.map((soldier) => soldier.id));
-    const panic = highestRegionalPanic(this.opts.campaign);
-    const objective = campaignObjectiveProgress(this.opts.campaign);
-    const contact = this.opts.campaign.ufoContact;
-    // Ground assaults (terror, landed UFO, base defense) spawn already on the ground
-    // ("landed"); only crash-site contacts are "tracked" until shot down. Both
-    // "crashed" and "landed" are terminal, launchable states — match the controller.
+    const left = el("section", "base-panel base-left");
+    const right = el("section", "base-panel base-right");
+    this.leftPanel = left;
+    this.rightPanel = right;
+
+    const hint = el("div", "base-hint");
+    hint.textContent = "Base command is the campaign hub / tactical launch starts from here";
+
+    const notice = el("div", "notice-toast");
+    notice.setAttribute("role", "status");
+    notice.setAttribute("aria-live", "polite");
+    this.noticeEl = notice;
+
+    this.root.append(left, right, hint, notice);
+    this.refreshHud();
+  }
+
+  /** Re-render every panel from the current campaign/operation. Rebuilds DOM
+   *  children only — the 3D scene, renderer, and rAF loop are never touched, so
+   *  this is safe to call repeatedly (including from update()). */
+  private refreshHud(): void {
+    if (!this.leftPanel || !this.rightPanel) return;
+    const campaign = this.opts.campaign;
+    const operation = this.opts.operation;
+    const contact = campaign.ufoContact;
+    // Ground assaults (terror, landed UFO, base defense) spawn already on the
+    // ground ("landed"); crash-site contacts stay "tracked" until shot down.
+    // Only "crashed"/"landed" are terminal, launchable states — match controller.
     const launchable = contact?.status === "crashed" || contact?.status === "landed";
     const launchContact = launchable ? contact : undefined;
-    const canLaunch =
-      this.opts.campaign.strategic.status === "active" && deployment.length > 0 && !!launchContact;
-    const left = el("section", "base-panel base-left");
+
     const eyebrow = el("div", "eyebrow");
     eyebrow.textContent = "Blacksite command";
     const title = el("h1");
     title.textContent =
-      this.opts.campaign.strategic.status === "won"
+      campaign.strategic.status === "won"
         ? "Campaign Won"
-        : this.opts.campaign.strategic.status === "lost"
+        : campaign.strategic.status === "lost"
           ? "Campaign Lost"
           : "Base Interior";
     const copy = el("p");
-    const nextMission = this.opts.operation.missionNumber;
     copy.textContent = launchContact
-      ? `Command center is online. Review facilities, then launch Operation ${this.opts.operation.codename}.`
+      ? `Command center is online. Review facilities, then launch Operation ${operation.codename}.`
       : contact
-        ? "Command center is online. Launch an interceptor from Earth Command before committing ground troops."
+        ? "Command center is online. An airborne UFO is on radar — intercept it from Earth Command before committing ground troops."
         : "Command center is online. Use Earth Command to scan for UFO contacts before launching a recovery team.";
     const coords = el("div", "base-coords");
     coords.textContent =
-      `${this.opts.campaign.base.region}  /  ${fmtCoord(this.opts.campaign.base.lat, "N", "S")} ` +
-      `${fmtCoord(this.opts.campaign.base.lon, "E", "W")}`;
-    const stats = el("div", "base-stats");
-    stats.append(
-      this.stat("Credits", `${this.opts.campaign.resources.credits}`),
-      this.stat("Alloys", `${this.opts.campaign.resources.alloys}`),
-      this.stat("Elerium", `${this.opts.campaign.resources.elerium}`),
-      this.stat("Data", `${this.opts.campaign.resources.alienData}`),
-      this.stat("Cores", `${objective.completed}/${objective.required}`),
-      this.stat("Squad", `${deployment.length}/${DEPLOYMENT_SIZE}`),
-      this.stat(
-        "Craft",
-        this.opts.campaign.interceptor.repairedAtHour &&
-          this.opts.campaign.interceptor.repairedAtHour > this.opts.campaign.clock.elapsedHours
-          ? `Repair ${this.opts.campaign.interceptor.repairedAtHour - this.opts.campaign.clock.elapsedHours}h`
-          : "Ready",
-      ),
-      this.stat("Power", `${summary.powerUsed}/${summary.powerCapacity}`),
-    );
-    const strategic = el("section", `strategic-card ${this.opts.campaign.strategic.status}`);
-    const strategicTitle = el("strong");
-    strategicTitle.textContent =
-      `${this.opts.campaign.strategic.status} / Threat ${this.opts.campaign.strategic.threat}%`;
-    const difficultyChip = el("div", "difficulty-chip");
-    difficultyChip.textContent = `Difficulty / ${difficultyConfig(this.opts.campaign).label}`;
-    const strategicCopy = el("p");
-    strategicCopy.textContent =
-      `${strategicSummary(this.opts.campaign)} ` +
-      `Funding ${this.opts.campaign.strategic.funding}, score ${this.opts.campaign.strategic.score}.` +
-      ` ${objective.summary}` +
-      ` Council panic peaks in ${panic.region} at ${panic.panic}%.` +
-      (this.opts.campaign.lastFundingReport
-        ? ` Last report net ${formatNet(this.opts.campaign.lastFundingReport.net)}c.`
-        : "");
-    strategic.append(strategicTitle, difficultyChip, strategicCopy);
-    left.append(eyebrow, title, copy, coords, stats, strategic);
-    this.root.appendChild(left);
+      `${campaign.base.region}  /  ${fmtCoord(campaign.base.lat, "N", "S")} ` +
+      `${fmtCoord(campaign.base.lon, "E", "W")}`;
 
-    const right = el("section", "base-panel base-right");
+    this.leftPanel.replaceChildren(
+      eyebrow,
+      title,
+      copy,
+      coords,
+      this.renderStatsBlock(campaign),
+      this.renderStrategicCard(campaign),
+    );
+
     const siteEye = el("div", "eyebrow");
     siteEye.textContent = "Starter installation";
     const heading = el("h2");
     heading.textContent = "Facilities";
+
+    this.rightPanel.replaceChildren(
+      siteEye,
+      heading,
+      this.renderFacilityList(campaign),
+      this.renderExpansionList(campaign),
+      this.renderOperationCard(operation, contact, launchContact),
+      this.renderObjectiveReport(campaign),
+      this.renderMissionReport(campaign),
+      this.renderProjectReports(campaign),
+      this.renderRoster(campaign),
+      this.renderManufacturing(campaign),
+      this.buildMarketPanel(),
+      this.renderResearch(campaign),
+      this.renderActions(campaign, operation),
+    );
+  }
+
+  private renderStatsBlock(campaign: CampaignState): HTMLElement {
+    const objective = campaignObjectiveProgress(campaign);
+    const deployment = deploymentSoldiers(campaign);
+    const summary = summarizeBaseFacilities(constructedFacilities(campaign));
+    const stats = el("div", "base-stats");
+    stats.append(
+      this.stat("Credits", `${campaign.resources.credits}`),
+      this.stat("Alloys", `${campaign.resources.alloys}`),
+      this.stat("Elerium", `${campaign.resources.elerium}`),
+      this.stat("Data", `${campaign.resources.alienData}`),
+      this.stat("Cores", `${objective.completed}/${objective.required}`),
+      this.stat("Squad", `${deployment.length}/${DEPLOYMENT_SIZE}`),
+      this.stat(
+        "Craft",
+        campaign.interceptor.repairedAtHour &&
+          campaign.interceptor.repairedAtHour > campaign.clock.elapsedHours
+          ? `Repair ${campaign.interceptor.repairedAtHour - campaign.clock.elapsedHours}h`
+          : "Ready",
+      ),
+      this.stat("Power", `${summary.powerUsed}/${summary.powerCapacity}`),
+    );
+    return stats;
+  }
+
+  /** Strategic status: headline + difficulty chip + a tight row of stat chips,
+   *  with the long prose briefing moved behind a <details> toggle. */
+  private renderStrategicCard(campaign: CampaignState): HTMLElement {
+    const objective = campaignObjectiveProgress(campaign);
+    const panic = highestRegionalPanic(campaign);
+    const card = el("section", `strategic-card ${campaign.strategic.status}`);
+    const title = el("strong");
+    title.textContent = `${campaign.strategic.status} / Threat ${campaign.strategic.threat}%`;
+    const difficultyChip = el("div", "difficulty-chip");
+    difficultyChip.textContent = `Difficulty / ${difficultyConfig(campaign).label}`;
+
+    const threatCls =
+      campaign.strategic.threat >= 70 ? "danger" : campaign.strategic.threat >= 40 ? "warn" : "";
+    const panicCls = panic.panic >= 70 ? "danger" : panic.panic >= 40 ? "warn" : "";
+    const chips = el("div", "stat-chips");
+    chips.append(
+      statChip("$", "Funding", `${campaign.strategic.funding}`),
+      statChip("★", "Score", `${campaign.strategic.score}`),
+      statChip("▲", "Threat", `${campaign.strategic.threat}%`, threatCls),
+      statChip("⚑", `Panic ${panic.region}`, `${panic.panic}%`, panicCls),
+      statChip("◆", "Cores", `${objective.completed}/${objective.required}`),
+    );
+
+    const details = el("details", "strategic-details");
+    const summary = el("summary");
+    summary.textContent = "Status briefing";
+    const prose = el("p");
+    const lastReport = campaign.lastFundingReport;
+    prose.textContent =
+      `${strategicSummary(campaign)} ` +
+      `Funding ${campaign.strategic.funding}, score ${campaign.strategic.score}. ` +
+      `${objective.summary} ` +
+      `Council panic peaks in ${panic.region} at ${panic.panic}%.` +
+      (lastReport ? ` Last report net ${formatNet(lastReport.net)}c.` : "");
+    details.append(summary, prose);
+
+    card.append(title, difficultyChip, chips, details);
+    return card;
+  }
+
+  private renderFacilityList(campaign: CampaignState): HTMLElement {
     const list = el("div", "facility-list");
-    for (const facility of facilities) {
+    for (const facility of constructedFacilities(campaign)) {
       const item = el("article", "facility");
       const head = el("strong");
       head.append(document.createTextNode(facility.label), Object.assign(el("em"), { textContent: "ONLINE" }));
@@ -1809,11 +2017,15 @@ export class BaseView {
       item.append(head, detail);
       list.appendChild(item);
     }
-    const expansionList = el("div", "expansion-list");
-    const activeConstruction = this.opts.campaign.activeConstruction;
+    return list;
+  }
+
+  private renderExpansionList(campaign: CampaignState): HTMLElement {
+    const list = el("div", "expansion-list");
+    const activeConstruction = campaign.activeConstruction;
     const constructionFacility = activeConstruction ? findBaseFacility(activeConstruction.facilityId) : undefined;
     if (activeConstruction && constructionFacility) {
-      const remaining = Math.max(0, activeConstruction.completesAtHour - this.opts.campaign.clock.elapsedHours);
+      const remaining = Math.max(0, activeConstruction.completesAtHour - campaign.clock.elapsedHours);
       const item = el("article", "expansion-card active");
       const head = el("strong");
       head.append(
@@ -1828,10 +2040,10 @@ export class BaseView {
       button.textContent = "Under construction";
       button.disabled = true;
       item.append(head, detail, button);
-      expansionList.appendChild(item);
+      list.appendChild(item);
     }
-    for (const facility of expansions) {
-      const canBuild = canBuildFacility(this.opts.campaign, facility.id);
+    for (const facility of availableBaseFacilities(campaign)) {
+      const canBuild = canBuildFacility(campaign, facility.id);
       const item = el("article", `expansion-card ${canBuild ? "" : "blocked"}`.trim());
       const cost = facilityCost(facility);
       const head = el("strong");
@@ -1840,7 +2052,7 @@ export class BaseView {
       detail.textContent =
         `${facility.description} ${facility.effect} ` +
         `Power ${facility.powerUse > 0 ? `+${facility.powerUse} use` : `+${facility.powerOutput} capacity`}. ` +
-        `Build ${facilityConstructionDuration(this.opts.campaign, facility.id)}h.`;
+        `Build ${facilityConstructionDuration(campaign, facility.id)}h.`;
       const button = el("button");
       button.textContent = canBuild
         ? "Start construction"
@@ -1850,264 +2062,391 @@ export class BaseView {
       button.disabled = !canBuild;
       button.addEventListener("click", () => this.opts.onBuildFacility(facility.id));
       item.append(head, detail, button);
-      expansionList.appendChild(item);
+      list.appendChild(item);
     }
+    return list;
+  }
+
+  /** Operation / mission card. The launchable assault mission is only shown once
+   *  the contact is on the ground (crashed/landed). While the UFO is merely
+   *  airborne (tracked/engaging/escaped) we show an intercept banner that routes
+   *  the player to the Geoscape — never a launchable crash-site mission. */
+  private renderOperationCard(
+    operation: OperationPlan,
+    contact: UfoContact | undefined,
+    launchContact: UfoContact | undefined,
+  ): HTMLElement {
+    if (launchContact) {
+      const card = el("section", "operation-card");
+      const missionMeta = missionTypeMeta(operation);
+      const title = el("strong");
+      title.textContent = `Operation ${operation.codename}`;
+      const chipEl = el("div", `mission-chip ${operation.missionType ?? "crashSite"}`);
+      const chipIcon = el("span", "mission-icon");
+      chipIcon.textContent = missionMeta.icon;
+      chipEl.append(chipIcon, document.createTextNode(missionMeta.label));
+      const copy = el("p");
+      copy.textContent = operation.briefing;
+      const objectiveLine = el("div", "operation-objective");
+      objectiveLine.textContent = missionMeta.detail;
+      const meta = el("div", "operation-meta");
+      meta.append(
+        span(operation.themeId),
+        span(`${operation.enemyCount} contacts`),
+        span(`${operation.durationHours}h field time`),
+        span(
+          `+${operation.reward.credits}c +${operation.reward.alloys}a ` +
+            `+${operation.reward.elerium}e +${operation.reward.alienData}d`,
+        ),
+      );
+      card.append(title, chipEl, copy, objectiveLine, meta);
+      return card;
+    }
+    if (contact) {
+      return this.renderAirborneBanner(contact);
+    }
+    const card = el("section", "operation-card");
+    const title = el("strong");
+    title.textContent = "No active UFO contact";
+    const copy = el("p");
+    copy.textContent = "Open Earth Command and scan time forward until radar detects a UFO track.";
+    const meta = el("div", "operation-meta");
+    meta.append(span("scan"), span("radar idle"), span("no target"));
+    card.append(title, copy, meta);
+    return card;
+  }
+
+  /** Airborne intercept banner: icon + status text + a Geoscape CTA. Variant
+   *  class tracks engaging/escaped so the color shift is backed by wording. */
+  private renderAirborneBanner(contact: UfoContact): HTMLElement {
+    const banner = el("div", `airborne-banner ${contact.status}`);
+    const icon = el("span", "banner-icon");
+    const body = el("div", "banner-body");
+    const title = el("strong");
+    const copy = el("p");
+    if (contact.status === "engaging") {
+      icon.textContent = "✦";
+      title.textContent = "Interceptor engaging";
+      copy.textContent = `${contact.id} over ${contact.region}. Open the Geoscape to direct the dogfight and bring it down.`;
+    } else if (contact.status === "escaped") {
+      icon.textContent = "↗";
+      title.textContent = "UFO escaped";
+      copy.textContent = `${contact.id} slipped the intercept. Open the Geoscape to resume the scan.`;
+    } else {
+      icon.textContent = "✈";
+      title.textContent = "Airborne UFO detected";
+      copy.textContent = `${contact.id} is tracked over ${contact.region}. Open the Geoscape to launch the interceptor and bring it down.`;
+    }
+    const button = el("button", "primary");
+    button.textContent = "Open Geoscape";
+    button.addEventListener("click", () => this.opts.onOpenGeoscape());
+    body.append(title, copy, button);
+    banner.append(icon, body);
+    return banner;
+  }
+
+  private renderObjectiveReport(campaign: CampaignState): HTMLElement {
+    const objective = campaignObjectiveProgress(campaign);
     const report = el("section", "base-report");
-    const reportTitle = el("strong");
-    const reportCopy = el("p");
-    if (this.opts.campaign.lastMission) {
-      const last = this.opts.campaign.lastMission;
-      const kiaNames = last.kiaSoldierIds
-        .map((id) => this.opts.campaign.soldiers.find((soldier) => soldier.id === id)?.name ?? id)
-        .join(", ");
-      reportTitle.textContent =
-        last.result === "success"
-          ? `Operation ${last.missionNumber} secured`
-          : `Operation ${last.missionNumber} failed`;
-      reportCopy.textContent = `${last.region}: ${last.summary}${kiaNames ? ` KIA: ${kiaNames}.` : ""}`;
-    } else {
-      reportTitle.textContent = "No field report";
-      reportCopy.textContent = "The first recovery operation has not launched.";
-    }
-    report.append(reportTitle, reportCopy);
-
-    const projectReport = el("section", "base-report");
-    const projectTitle = el("strong");
-    const projectCopy = el("p");
-    const latestProject = this.opts.campaign.projectReports[0];
-    if (latestProject) {
-      projectTitle.textContent = `Project complete / ${latestProject.title}`;
-      projectCopy.textContent = `${latestProject.summary} Completed at campaign hour ${latestProject.completedAtHour}.`;
-    } else {
-      projectTitle.textContent = "No completed projects";
-      projectCopy.textContent = "Research, manufacturing, and construction reports will appear here when crews finish work.";
-    }
-    projectReport.append(projectTitle, projectCopy);
-
-    const objectiveReport = el("section", "base-report");
-    const objectiveTitle = el("strong");
-    objectiveTitle.textContent = `${objective.title} / ${objective.completed}/${objective.required}`;
-    const objectiveCopy = el("p");
-    objectiveCopy.textContent =
+    const title = el("strong");
+    title.textContent = `${objective.title} / ${objective.completed}/${objective.required}`;
+    const copy = el("p");
+    copy.textContent =
       `${objective.summary} Campaign progress ${objective.percent}%. ` +
       (objective.status === "active"
         ? "Secure crash sites to recover more power cores."
         : "Strategic operations are closed.");
-    objectiveReport.append(objectiveTitle, objectiveCopy);
+    report.append(title, copy);
+    return report;
+  }
 
-    const operation = el("section", "operation-card");
-    const operationTitle = el("strong");
-    operationTitle.textContent = launchContact
-      ? `Operation ${this.opts.operation.codename}`
-      : contact
-        ? "UFO airborne"
-        : "No active UFO contact";
-    const operationCopy = el("p");
-    operationCopy.textContent = launchContact
-      ? this.opts.operation.briefing
-      : contact
-        ? `${contact.id} is tracked over ${contact.region}. Return to Earth Command and launch the interceptor.`
-        : "Return to Earth Command and scan time forward until radar detects a UFO track.";
-    const operationMeta = el("div", "operation-meta");
-    if (launchContact) {
-      operationMeta.append(
-        Object.assign(el("span"), { textContent: this.opts.operation.themeId }),
-        Object.assign(el("span"), { textContent: `${this.opts.operation.enemyCount} contacts` }),
-        Object.assign(el("span"), { textContent: `${this.opts.operation.durationHours}h field time` }),
-        Object.assign(el("span"), {
-          textContent:
-            `+${this.opts.operation.reward.credits}c ` +
-            `+${this.opts.operation.reward.alloys}a ` +
-            `+${this.opts.operation.reward.elerium}e ` +
-            `+${this.opts.operation.reward.alienData}d`,
-        }),
-      );
+  /** Last field report as a concise one-liner. */
+  private renderMissionReport(campaign: CampaignState): HTMLElement {
+    const report = el("section", "base-report");
+    const title = el("strong");
+    const copy = el("p");
+    const last = campaign.lastMission;
+    if (last) {
+      const kiaNames = last.kiaSoldierIds
+        .map((id) => campaign.soldiers.find((soldier) => soldier.id === id)?.name ?? id)
+        .join(", ");
+      title.textContent =
+        last.result === "success" ? `Last op ${last.missionNumber} secured` : `Last op ${last.missionNumber} failed`;
+      copy.textContent = `${last.region}: ${last.summary}${kiaNames ? ` · KIA: ${kiaNames}.` : ""}`;
     } else {
-      operationMeta.append(
-        Object.assign(el("span"), { textContent: "scan" }),
-        Object.assign(el("span"), { textContent: "radar idle" }),
-        Object.assign(el("span"), { textContent: "no target" }),
-      );
+      title.textContent = "No field report";
+      copy.textContent = "The first recovery operation has not launched.";
     }
-    if (launchContact) {
-      const missionMeta = missionTypeMeta(this.opts.operation);
-      const chip = el("div", `mission-chip ${this.opts.operation.missionType ?? "crashSite"}`);
-      const chipIcon = el("span", "mission-icon");
-      chipIcon.textContent = missionMeta.icon;
-      chip.append(chipIcon, document.createTextNode(missionMeta.label));
-      const objectiveLine = el("div", "operation-objective");
-      objectiveLine.textContent = missionMeta.detail;
-      operation.append(operationTitle, chip, operationCopy, objectiveLine, operationMeta);
-    } else {
-      operation.append(operationTitle, operationCopy, operationMeta);
-    }
+    report.append(title, copy);
+    return report;
+  }
 
-    const roster = el("section", "roster-card");
-    const rosterHead = el("div", "roster-head");
-    rosterHead.append(
-      Object.assign(el("span"), { textContent: "Operatives" }),
-      Object.assign(el("span"), {
-        textContent:
-          `${deployment.length}/${DEPLOYMENT_SIZE} deployed, ${activeRoster.length} ready / ` +
-          CAMPAIGN_WEAPON_IDS
-            .map((weaponId) => `${weaponId.toUpperCase()} ${this.opts.campaign.armory.weapons[weaponId]}`)
-            .join(" "),
-      }),
-    );
-    const rosterList = el("div", "roster-list");
-    for (const soldier of this.opts.campaign.soldiers) {
-      const row = el("div", `soldier-row ${soldier.status}`);
-      const status =
-        soldier.status === "wounded"
-          ? `recovery ${Math.max(0, (soldier.woundedUntilHour ?? this.opts.campaign.clock.elapsedHours) - this.opts.campaign.clock.elapsedHours)}h`
-          : soldier.status;
-      const deployed = deployedIds.has(soldier.id);
-      const deployToggle = el("label", "deploy-toggle");
-      const deployCheckbox = document.createElement("input");
-      deployCheckbox.type = "checkbox";
-      deployCheckbox.checked = deployed;
-      deployCheckbox.disabled =
-        this.opts.campaign.strategic.status !== "active" ||
-        (deployed ? false : !canDeploySoldier(this.opts.campaign, soldier.id));
-      deployCheckbox.setAttribute("aria-label", `${deployed ? "Remove" : "Deploy"} ${soldier.name}`);
-      deployCheckbox.addEventListener("change", () => {
-        this.opts.onToggleDeployment(soldier.id, deployCheckbox.checked);
-      });
-      deployToggle.append(deployCheckbox, document.createTextNode(deployed ? "DROP" : "DEPLOY"));
-      const currentWeapon = soldierWeaponId(this.opts.campaign, soldier.id);
-      const weaponSelect = el("select");
-      weaponSelect.disabled = soldier.status === "kia" || this.opts.campaign.strategic.status !== "active";
-      weaponSelect.setAttribute("aria-label", `Weapon for ${soldier.name}`);
-      for (const weaponId of CAMPAIGN_WEAPON_IDS) {
-        const option = document.createElement("option");
-        option.value = weaponId;
-        option.textContent =
-          `${WEAPONS[weaponId]?.name ?? weaponId} ` +
-          `(${availableWeaponCount(this.opts.campaign, weaponId, soldier.id)} free)`;
-        option.selected = weaponId === currentWeapon;
-        option.disabled =
-          weaponId !== currentWeapon &&
-          !canAssignSoldierWeapon(this.opts.campaign, soldier.id, weaponId);
-        weaponSelect.appendChild(option);
+  /** Latest project report inline; older project history collapsed behind a
+   *  <details> toggle so the panel reads at a glance. */
+  private renderProjectReports(campaign: CampaignState): HTMLElement {
+    const report = el("section", "base-report");
+    const title = el("strong");
+    const copy = el("p");
+    const latest = campaign.projectReports[0];
+    if (latest) {
+      title.textContent = `${latest.title} complete`;
+      copy.textContent = `${latest.summary} (hour ${latest.completedAtHour}).`;
+    } else {
+      title.textContent = "No completed projects";
+      copy.textContent = "Research, manufacturing, and construction reports appear here when crews finish work.";
+    }
+    report.append(title, copy);
+    const older = campaign.projectReports.slice(1);
+    if (older.length > 0) {
+      const details = el("details", "collapsible");
+      const summary = el("summary");
+      summary.textContent = `Older reports (${older.length})`;
+      for (const entry of older) {
+        const line = el("p");
+        line.textContent = `${entry.title} — ${entry.summary} (hour ${entry.completedAtHour})`;
+        details.appendChild(line);
       }
-      weaponSelect.addEventListener("change", () => {
-        const next = weaponSelect.value as CampaignWeaponId;
-        this.opts.onAssignWeapon(soldier.id, next);
-      });
-      row.append(
-        deployToggle,
-        Object.assign(el("span"), { textContent: soldier.name }),
-        Object.assign(el("span"), { textContent: soldier.rank }),
-        Object.assign(el("span"), { textContent: status }),
-        Object.assign(el("span"), { textContent: `${soldier.survivedMissions}/${soldier.missions}` }),
-        weaponSelect,
-      );
-      rosterList.appendChild(row);
+      report.appendChild(details);
     }
-    if (this.opts.campaign.soldiers.length === 0) {
+    return report;
+  }
+
+  /** Compact roster: one tight row per operative (deploy toggle, name, rank +
+   *  record, status chip, weapon) instead of multi-line cards. */
+  private renderRoster(campaign: CampaignState): HTMLElement {
+    const roster = el("section", "roster-card");
+    const activeRoster = activeSoldiers(campaign);
+    const deployment = deploymentSoldiers(campaign);
+    const deployedIds = new Set(deployment.map((soldier) => soldier.id));
+    const head = el("div", "roster-head");
+    head.append(
+      span("Operatives"),
+      span(`${deployment.length}/${DEPLOYMENT_SIZE} deployed · ${activeRoster.length} ready`),
+    );
+    const list = el("div", "roster-list");
+    for (const soldier of campaign.soldiers) {
+      list.appendChild(this.renderSoldierRow(campaign, soldier, deployedIds));
+    }
+    if (campaign.soldiers.length === 0) {
       const empty = el("div", "empty-state");
       empty.textContent = "No operatives on roster. Recruit to field a squad.";
-      rosterList.appendChild(empty);
+      list.appendChild(empty);
     }
     const recruit = el("button");
     recruit.textContent = `Recruit operative (${RECRUIT_COST}c)`;
-    recruit.disabled = this.opts.campaign.strategic.status !== "active" || !canRecruitSoldier(this.opts.campaign);
+    recruit.disabled = campaign.strategic.status !== "active" || !canRecruitSoldier(campaign);
     recruit.addEventListener("click", () => this.opts.onRecruitSoldier());
-    roster.append(rosterHead, rosterList, recruit);
+    roster.append(head, list, recruit);
+    return roster;
+  }
 
-    const manufacturingCards = MANUFACTURING_PROJECTS.map((project) => {
-      const manufacturing = el("section", "manufacturing-card");
-      const title = el("strong");
-      const copy = el("p");
-      const active = this.opts.campaign.activeManufacturing?.projectId === project.id
-        ? this.opts.campaign.activeManufacturing
-        : undefined;
-      const workshopBusy = !!this.opts.campaign.activeManufacturing && !active;
-      const activeProject = MANUFACTURING_PROJECTS.find(
-        (candidate) => candidate.id === this.opts.campaign.activeManufacturing?.projectId,
-      );
-      const locked = !!project.requiresResearch && !hasResearch(this.opts.campaign, project.requiresResearch);
-      const canManufacture = canStartManufacturing(this.opts.campaign, project.id);
-      const cost = manufacturingCost(this.opts.campaign, project.id);
-      title.textContent = active
-        ? `Workshop: ${project.title} in production`
-        : `Manufacture: ${project.title}`;
-      copy.textContent = active
-        ? `${Math.max(0, active.completesAtHour - this.opts.campaign.clock.elapsedHours)}h remaining. Advance time from Earth Command.`
-        : workshopBusy
-          ? `Workshop is committed to ${activeProject?.title ?? "another order"}.`
-          : locked
-            ? `Requires ${project.requiresResearch}. ${project.description}`
-            : `${project.description} Cost ${formatCost(cost)}, ${manufacturingDuration(this.opts.campaign, project.id)}h.`;
-      const button = el("button");
-      button.textContent = active
-        ? "In production"
-        : workshopBusy
-          ? "Workshop busy"
-          : locked
-            ? "Research required"
-            : canManufacture
-              ? "Start production"
-              : "Need resources";
-      button.disabled = !!active || workshopBusy || !canManufacture;
-      button.addEventListener("click", () => this.opts.onStartManufacturing(project.id));
-      manufacturing.append(title, copy, button);
-      return manufacturing;
+  private renderSoldierRow(
+    campaign: CampaignState,
+    soldier: CampaignSoldier,
+    deployedIds: Set<string>,
+  ): HTMLElement {
+    const row = el("div", `soldier-row ${soldier.status}`);
+    const deployed = deployedIds.has(soldier.id);
+    const deployToggle = el("label", "deploy-toggle");
+    const deployCheckbox = document.createElement("input");
+    deployCheckbox.type = "checkbox";
+    deployCheckbox.checked = deployed;
+    deployCheckbox.disabled =
+      campaign.strategic.status !== "active" || (deployed ? false : !canDeploySoldier(campaign, soldier.id));
+    deployCheckbox.setAttribute("aria-label", `${deployed ? "Remove" : "Deploy"} ${soldier.name}`);
+    deployCheckbox.addEventListener("change", () => {
+      this.opts.onToggleDeployment(soldier.id, deployCheckbox.checked);
+    });
+    deployToggle.append(deployCheckbox, document.createTextNode(deployed ? "DROP" : "DEPLOY"));
+
+    const currentWeapon = soldierWeaponId(campaign, soldier.id);
+    const weaponSelect = el("select");
+    weaponSelect.disabled = soldier.status === "kia" || campaign.strategic.status !== "active";
+    weaponSelect.setAttribute("aria-label", `Weapon for ${soldier.name}`);
+    for (const weaponId of CAMPAIGN_WEAPON_IDS) {
+      const option = document.createElement("option");
+      option.value = weaponId;
+      option.textContent =
+        `${WEAPONS[weaponId]?.name ?? weaponId} ` +
+        `(${availableWeaponCount(campaign, weaponId, soldier.id)} free)`;
+      option.selected = weaponId === currentWeapon;
+      option.disabled = weaponId !== currentWeapon && !canAssignSoldierWeapon(campaign, soldier.id, weaponId);
+      weaponSelect.appendChild(option);
+    }
+    weaponSelect.addEventListener("change", () => {
+      const next = weaponSelect.value as CampaignWeaponId;
+      this.opts.onAssignWeapon(soldier.id, next);
     });
 
-    const researchCards = RESEARCH_PROJECTS.map((project) => {
-      const research = el("section", "research-card");
-      const researchTitle = el("strong");
-      const researchCopy = el("p");
-      const researched = hasResearch(this.opts.campaign, project.id);
-      const active = this.opts.campaign.activeResearch?.projectId === project.id
-        ? this.opts.campaign.activeResearch
-        : undefined;
-      const labBusy = !!this.opts.campaign.activeResearch && !active;
-      const activeProject = RESEARCH_PROJECTS.find(
-        (candidate) => candidate.id === this.opts.campaign.activeResearch?.projectId,
-      );
-      const canResearch = canStartResearch(this.opts.campaign, project.id);
-      const cost = researchCost(this.opts.campaign, project.id);
-      researchTitle.textContent = researched
-        ? `${project.title} online`
-        : active
-          ? `${project.title} in progress`
-          : `Research: ${project.title}`;
-      researchCopy.textContent = researched
-        ? project.completedDescription
-        : active
-          ? `Scientists are working. ${Math.max(0, active.completesAtHour - this.opts.campaign.clock.elapsedHours)}h remaining. Advance time from Earth Command.`
-          : labBusy
-            ? `Research lab is committed to ${activeProject?.title ?? "another project"}.`
-            : `${project.description} Requires ${cost.alienData} data, ${cost.alloys} alloys, ` +
-              `${cost.elerium} elerium, ${cost.credits} credits, ${researchDuration(this.opts.campaign, project.id)}h.`;
-      const researchButton = el("button");
-      researchButton.textContent = researched
-        ? "Research complete"
-        : active
-          ? "In progress"
-          : labBusy
-            ? "Lab busy"
-          : "Start research";
-      researchButton.disabled = researched || !!active || !canResearch;
-      researchButton.addEventListener("click", () => this.opts.onStartResearch(project.id));
-      research.append(researchTitle, researchCopy, researchButton);
-      return research;
-    });
-
-    const allResearched = RESEARCH_PROJECTS.every((project) =>
-      hasResearch(this.opts.campaign, project.id),
+    row.append(
+      deployToggle,
+      span(soldier.name),
+      span(`${soldier.rank} · ${soldier.survivedMissions}/${soldier.missions}`),
+      this.renderSoldierStatus(campaign, soldier),
+      weaponSelect,
     );
-    const researchNodes: HTMLElement[] = allResearched
-      ? [
-          Object.assign(el("div", "empty-state"), {
-            textContent: "All research projects complete. The lab stands ready for new specimens.",
-          }),
-        ]
-      : researchCards;
+    return row;
+  }
 
+  /** Status chip: icon + text carry the meaning, color is secondary. */
+  private renderSoldierStatus(campaign: CampaignState, soldier: CampaignSoldier): HTMLElement {
+    const chipEl = el("span", `status-chip ${soldier.status}`);
+    const icon = el("span");
+    if (soldier.status === "wounded") {
+      const remaining = Math.max(
+        0,
+        (soldier.woundedUntilHour ?? campaign.clock.elapsedHours) - campaign.clock.elapsedHours,
+      );
+      icon.textContent = "✚";
+      chipEl.append(icon, document.createTextNode(`Rec ${remaining}h`));
+    } else if (soldier.status === "kia") {
+      icon.textContent = "✖";
+      chipEl.append(icon, document.createTextNode("KIA"));
+    } else {
+      icon.textContent = "✓";
+      chipEl.append(icon, document.createTextNode("Ready"));
+    }
+    return chipEl;
+  }
+
+  /** Manufacturing: the active order is shown inline; available orders collapse
+   *  behind a <details> so the screen isn't dominated by locked projects. */
+  private renderManufacturing(campaign: CampaignState): HTMLElement {
+    const wrap = el("div");
+    const activeMfg = campaign.activeManufacturing;
+    if (activeMfg) {
+      const project = MANUFACTURING_PROJECTS.find((candidate) => candidate.id === activeMfg.projectId);
+      const remaining = Math.max(0, activeMfg.completesAtHour - campaign.clock.elapsedHours);
+      const card = el("section", "manufacturing-card");
+      const title = el("strong");
+      title.textContent = `Workshop: ${project?.title ?? activeMfg.projectId} in production`;
+      const copy = el("p");
+      copy.textContent = `${remaining}h remaining. Advance time from Earth Command.`;
+      const button = el("button");
+      button.textContent = "In production";
+      button.disabled = true;
+      card.append(title, copy, button);
+      wrap.appendChild(card);
+    }
+    const available = MANUFACTURING_PROJECTS.filter((project) => project.id !== activeMfg?.projectId);
+    if (available.length > 0) {
+      const details = el("details", "collapsible");
+      const summary = el("summary");
+      summary.textContent = `Available production (${available.length})`;
+      for (const project of available) {
+        details.appendChild(this.renderManufacturingCard(campaign, project, !!activeMfg));
+      }
+      wrap.appendChild(details);
+    }
+    return wrap;
+  }
+
+  private renderManufacturingCard(
+    campaign: CampaignState,
+    project: ManufacturingProject,
+    workshopBusy: boolean,
+  ): HTMLElement {
+    const card = el("section", "manufacturing-card");
+    const locked = !!project.requiresResearch && !hasResearch(campaign, project.requiresResearch);
+    const canManufacture = canStartManufacturing(campaign, project.id);
+    const cost = manufacturingCost(campaign, project.id);
+    const title = el("strong");
+    title.textContent = `Manufacture: ${project.title}`;
+    const copy = el("p");
+    copy.textContent = workshopBusy
+      ? "Workshop is committed to another order."
+      : locked
+        ? `Requires ${project.requiresResearch}. ${project.description}`
+        : `${project.description} Cost ${formatCost(cost)}, ${manufacturingDuration(campaign, project.id)}h.`;
+    const button = el("button");
+    button.textContent = workshopBusy
+      ? "Workshop busy"
+      : locked
+        ? "Research required"
+        : canManufacture
+          ? "Start production"
+          : "Need resources";
+    button.disabled = workshopBusy || !canManufacture;
+    button.addEventListener("click", () => this.opts.onStartManufacturing(project.id));
+    card.append(title, copy, button);
+    return card;
+  }
+
+  /** Research: active project inline; available projects behind a <details>. */
+  private renderResearch(campaign: CampaignState): HTMLElement {
+    const wrap = el("div");
+    const allResearched = RESEARCH_PROJECTS.every((project) => hasResearch(campaign, project.id));
+    if (allResearched) {
+      const empty = el("div", "empty-state");
+      empty.textContent = "All research projects complete. The lab stands ready for new specimens.";
+      wrap.appendChild(empty);
+      return wrap;
+    }
+    const activeRes = campaign.activeResearch;
+    if (activeRes) {
+      const project = RESEARCH_PROJECTS.find((candidate) => candidate.id === activeRes.projectId);
+      const remaining = Math.max(0, activeRes.completesAtHour - campaign.clock.elapsedHours);
+      const card = el("section", "research-card");
+      const title = el("strong");
+      title.textContent = `${project?.title ?? activeRes.projectId} in progress`;
+      const copy = el("p");
+      copy.textContent = `Scientists are working. ${remaining}h remaining. Advance time from Earth Command.`;
+      const button = el("button");
+      button.textContent = "In progress";
+      button.disabled = true;
+      card.append(title, copy, button);
+      wrap.appendChild(card);
+    }
+    const available = RESEARCH_PROJECTS.filter(
+      (project) => !hasResearch(campaign, project.id) && project.id !== activeRes?.projectId,
+    );
+    if (available.length > 0) {
+      const details = el("details", "collapsible");
+      const summary = el("summary");
+      summary.textContent = `Available research (${available.length})`;
+      for (const project of available) {
+        details.appendChild(this.renderResearchCard(campaign, project, !!activeRes));
+      }
+      wrap.appendChild(details);
+    }
+    return wrap;
+  }
+
+  private renderResearchCard(
+    campaign: CampaignState,
+    project: ResearchProject,
+    labBusy: boolean,
+  ): HTMLElement {
+    const card = el("section", "research-card");
+    const researched = hasResearch(campaign, project.id);
+    const canResearch = canStartResearch(campaign, project.id);
+    const cost = researchCost(campaign, project.id);
+    const title = el("strong");
+    title.textContent = researched ? `${project.title} online` : `Research: ${project.title}`;
+    const copy = el("p");
+    copy.textContent = researched
+      ? project.completedDescription
+      : labBusy
+        ? "Research lab is committed to another project."
+        : `${project.description} Requires ${cost.alienData} data, ${cost.alloys} alloys, ` +
+          `${cost.elerium} elerium, ${cost.credits} credits, ${researchDuration(campaign, project.id)}h.`;
+    const button = el("button");
+    button.textContent = researched ? "Research complete" : labBusy ? "Lab busy" : "Start research";
+    button.disabled = researched || labBusy || !canResearch;
+    button.addEventListener("click", () => this.opts.onStartResearch(project.id));
+    card.append(title, copy, button);
+    return card;
+  }
+
+  private renderActions(campaign: CampaignState, operation: OperationPlan): HTMLElement {
     const actions = el("div", "base-actions");
+    const activeRoster = activeSoldiers(campaign);
+    const deployment = deploymentSoldiers(campaign);
+    const contact = campaign.ufoContact;
+    const launchable = contact?.status === "crashed" || contact?.status === "landed";
+    const launchContact = launchable ? contact : undefined;
+    const canLaunch = campaign.strategic.status === "active" && deployment.length > 0 && !!launchContact;
+
     const earth = el("button");
     earth.textContent = "Earth";
     earth.addEventListener("click", () => this.opts.onOpenGeoscape());
@@ -2116,45 +2455,20 @@ export class BaseView {
     reset.addEventListener("click", () => this.opts.onResetCampaign());
     const launch = el("button", "primary");
     launch.textContent = canLaunch
-      ? `${missionTypeMeta(this.opts.operation).launchLabel} (op ${nextMission})`
-      : this.opts.campaign.strategic.status === "active"
+      ? `${missionTypeMeta(operation).launchLabel} (op ${operation.missionNumber})`
+      : campaign.strategic.status === "active"
         ? activeRoster.length === 0
           ? "No operatives"
           : deployment.length === 0
             ? "Select squad"
-          : contact && !launchContact
-            ? "Intercept first"
-            : "Awaiting contact"
+            : contact && !launchContact
+              ? "Intercept first"
+              : "Awaiting contact"
         : "Campaign complete";
     launch.disabled = !canLaunch;
     launch.addEventListener("click", () => this.opts.onLaunchMission());
     actions.append(earth, reset, launch);
-    right.append(
-      siteEye,
-      heading,
-      list,
-      expansionList,
-      operation,
-      objectiveReport,
-      report,
-      projectReport,
-      roster,
-      ...manufacturingCards,
-      this.buildMarketPanel(),
-      ...researchNodes,
-      actions,
-    );
-    this.root.appendChild(right);
-
-    const hint = el("div", "base-hint");
-    hint.textContent = "Base command is the campaign hub / tactical launch starts from here";
-    this.root.appendChild(hint);
-
-    const notice = el("div", "notice-toast");
-    notice.setAttribute("role", "status");
-    notice.setAttribute("aria-live", "polite");
-    this.noticeEl = notice;
-    this.root.appendChild(notice);
+    return actions;
   }
 
   private stat(label: string, value: string): HTMLElement {

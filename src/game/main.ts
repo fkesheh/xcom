@@ -103,6 +103,17 @@ let baseView: BaseView | null = null;
 /** Teardown for an active tactical view, invoked before mounting any other screen. */
 let tacticalCleanup: (() => void) | null = null;
 
+/**
+ * In-memory source of truth for the live campaign. The geoscape's flowing-time
+ * frame loop and every base callback advance from this rather than re-reading
+ * localStorage — which returns the last *committed* state and so goes stale
+ * while a debounced save is pending. At 30x (160ms ticks) the 400ms debounce
+ * timer is cleared and re-armed on every tick and never fires, so each tick
+ * re-advanced the same pre-flow snapshot and the clock froze; the same staleness
+ * let a rapid recruit/assign/launch chain build a battle from pre-action state.
+ */
+let currentCampaign: CampaignState | null = null;
+
 /** Chebyshev (8-way) distance between two tiles — mirrors the sim's adjacency rule. */
 function chebyshev(a: Vec2, b: Vec2): number {
   return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
@@ -115,19 +126,55 @@ function disposeTacticalIfExists(): void {
   }
 }
 
+/**
+ * Trailing-debounce save. Rapid in-place actions (scan/intercept/recruit/...)
+ * coalesce into one write so the screen stays responsive; screen transitions
+ * flush immediately via {@link flushSave} so nothing is lost when a view unmounts.
+ */
+const SAVE_DEBOUNCE_MS = 400;
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingSave: CampaignState | null = null;
+
+function debouncedSave(campaign: CampaignState): void {
+  pendingSave = campaign;
+  if (saveTimer !== null) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    const snapshot = pendingSave;
+    pendingSave = null;
+    if (snapshot) saveCampaign(snapshot);
+  }, SAVE_DEBOUNCE_MS);
+}
+
+/** Flush any pending debounced save immediately (call before a screen transition). */
+function flushSave(): void {
+  if (saveTimer !== null) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  const snapshot = pendingSave;
+  pendingSave = null;
+  if (snapshot) saveCampaign(snapshot);
+}
+
 function showGeoscape(): void {
-  const existing = loadCampaign();
+  flushSave();
+  // Seed the in-memory campaign once from storage; every geoscape callback then
+  // advances from `currentCampaign` instead of re-reading localStorage (which
+  // returns stale state while a debounced save is pending).
+  currentCampaign = loadCampaign();
   disposeTacticalIfExists();
   baseView?.dispose();
   baseView = null;
   geoscape?.dispose();
   geoscape = new GeoscapeView({
-    campaign: existing,
+    campaign: currentCampaign,
     onConfirmBase: (base, difficulty) => {
       // "Review base" mid-campaign must NOT recreate the campaign (that would
       // wipe soldiers, research, facilities, resources, and the seed). Only the
       // new-game flow (no saved campaign) calls createCampaign; otherwise we
       // just return to the existing base.
+      flushSave();
       const existing = loadCampaign();
       if (existing) {
         geoscape?.dispose();
@@ -142,28 +189,33 @@ function showGeoscape(): void {
       showBase(campaign);
     },
     onAdvanceTime: (hours) => {
-      const current = loadCampaign();
-      if (!current) return;
-      const updated = advanceGeoscape(current, hours);
-      saveCampaign(updated);
-      showGeoscape();
+      // The geoscape's own frame loop drives this; refresh in place instead of
+      // re-mounting (a dispose+mount here would flicker the globe and stall flow).
+      // Advance from the in-memory campaign so time accumulates across ticks;
+      // reading localStorage here would re-read the pre-flow snapshot every tick
+      // (the debounced save never fires while 30x/5x ticks keep re-arming it).
+      if (!currentCampaign) return;
+      currentCampaign = advanceGeoscape(currentCampaign, hours);
+      debouncedSave(currentCampaign);
+      geoscape?.update(currentCampaign);
     },
     onInterceptUfo: () => {
-      const current = loadCampaign();
-      if (!current) return;
-      const updated = startInterceptionEncounter(current);
-      saveCampaign(updated);
-      showGeoscape();
+      if (!currentCampaign) return;
+      currentCampaign = startInterceptionEncounter(currentCampaign);
+      debouncedSave(currentCampaign);
+      geoscape?.update(currentCampaign);
     },
     onInterceptionAction: (action: InterceptionAction) => {
-      const current = loadCampaign();
-      if (!current) return;
-      const updated = executeInterceptionAction(current, action);
-      saveCampaign(updated);
-      showGeoscape();
+      if (!currentCampaign) return;
+      currentCampaign = executeInterceptionAction(currentCampaign, action);
+      debouncedSave(currentCampaign);
+      geoscape?.update(currentCampaign);
     },
     onResetCampaign: () => {
+      // Flush before clearing so a pending debounced save can't resurrect it.
+      flushSave();
       clearCampaign();
+      currentCampaign = null;
       showGeoscape();
     },
   });
@@ -171,6 +223,11 @@ function showGeoscape(): void {
 }
 
 function showBase(campaign: CampaignState): void {
+  flushSave();
+  // Mirror the live campaign in memory; rapid base actions (recruit → assign →
+  // launch) chain off this so each sees the previous action's result without
+  // waiting on the deferred save.
+  currentCampaign = campaign;
   const operation = generateOperation(campaign);
   disposeTacticalIfExists();
   geoscape?.dispose();
@@ -180,47 +237,63 @@ function showBase(campaign: CampaignState): void {
     campaign,
     operation,
     onLaunchMission: () => {
-      if (campaign.strategic.status === "active") startTactical(campaign, operation);
+      // In-place updates keep the closed-over `campaign`/`operation` stale; read
+      // the live in-memory state so deployment, weapons, and the generated
+      // operation match the current squad before handing off to the tactical
+      // controller.
+      const current = currentCampaign ?? campaign;
+      if (current.strategic.status === "active") startTactical(current);
     },
     onStartResearch: (id) => {
-      const updated = startResearch(loadCampaign() ?? campaign, id);
-      saveCampaign(updated);
-      showBase(updated);
+      const updated = startResearch(currentCampaign ?? campaign, id);
+      currentCampaign = updated;
+      debouncedSave(updated);
+      baseView?.update(updated);
     },
     onBuildFacility: (id) => {
-      const updated = buildFacility(loadCampaign() ?? campaign, id);
-      saveCampaign(updated);
-      showBase(updated);
+      const updated = buildFacility(currentCampaign ?? campaign, id);
+      currentCampaign = updated;
+      debouncedSave(updated);
+      baseView?.update(updated);
     },
     onRecruitSoldier: () => {
-      if (campaign.strategic.status !== "active") return;
-      const updated = recruitSoldier(loadCampaign() ?? campaign);
-      saveCampaign(updated);
-      showBase(updated);
+      const current = currentCampaign ?? campaign;
+      if (current.strategic.status !== "active") return;
+      const updated = recruitSoldier(current);
+      currentCampaign = updated;
+      debouncedSave(updated);
+      baseView?.update(updated);
     },
     onAssignWeapon: (soldierId, weaponId) => {
-      const updated = assignSoldierWeapon(loadCampaign() ?? campaign, soldierId, weaponId);
-      saveCampaign(updated);
-      showBase(updated);
+      const updated = assignSoldierWeapon(currentCampaign ?? campaign, soldierId, weaponId);
+      currentCampaign = updated;
+      debouncedSave(updated);
+      baseView?.update(updated);
     },
     onToggleDeployment: (soldierId, deployed) => {
-      const updated = setSoldierDeployment(loadCampaign() ?? campaign, soldierId, deployed);
-      saveCampaign(updated);
-      showBase(updated);
+      const updated = setSoldierDeployment(currentCampaign ?? campaign, soldierId, deployed);
+      currentCampaign = updated;
+      debouncedSave(updated);
+      baseView?.update(updated);
     },
     onStartManufacturing: (id) => {
-      const updated = startManufacturing(loadCampaign() ?? campaign, id);
-      saveCampaign(updated);
-      showBase(updated);
+      const updated = startManufacturing(currentCampaign ?? campaign, id);
+      currentCampaign = updated;
+      debouncedSave(updated);
+      baseView?.update(updated);
     },
     onPurchaseWeapon: (weaponId: CampaignWeaponId) => {
-      const updated = purchaseWeapon(loadCampaign() ?? campaign, weaponId);
-      saveCampaign(updated);
-      showBase(updated);
+      const updated = purchaseWeapon(currentCampaign ?? campaign, weaponId);
+      currentCampaign = updated;
+      debouncedSave(updated);
+      baseView?.update(updated);
     },
     onOpenGeoscape: () => showGeoscape(),
     onResetCampaign: () => {
+      // Flush before clearing so a pending debounced save can't resurrect it.
+      flushSave();
       clearCampaign();
+      currentCampaign = null;
       showGeoscape();
     },
   });
@@ -228,6 +301,7 @@ function showBase(campaign: CampaignState): void {
 }
 
 function startTactical(campaign: CampaignState, operation: OperationPlan = generateOperation(campaign)): void {
+  flushSave();
   const deployment = deploymentSoldiers(campaign);
   const contactStatus = campaign.ufoContact?.status;
   // Launch for both "crashed" (classic shoot-down) and "landed" (terror, landed
@@ -652,7 +726,7 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
 
   /** Leave the tactical view after mission completion and return to base. */
   function returnToBase(): void {
-    const updated = completedCampaign ?? loadCampaign();
+    const updated = completedCampaign ?? currentCampaign ?? loadCampaign();
     disposeTactical();
     if (updated) showBase(updated);
     else showGeoscape();
@@ -661,6 +735,8 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
   /** Clear the campaign and present the new-game geoscape. */
   function startNewCampaign(): void {
     disposeTactical();
+    // Flush before clearing so a pending debounced save can't resurrect it.
+    flushSave();
     clearCampaign();
     showGeoscape();
   }
@@ -777,7 +853,7 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
 
   function completeMission(result: "success" | "failure"): void {
     if (completedCampaign) return;
-    const latest = loadCampaign() ?? campaign;
+    const latest = currentCampaign ?? campaign;
     const deployed = state.units
       .filter((unit) => unit.faction === "player" && unit.campaignSoldierId)
       .map((unit) => unit.campaignSoldierId!);
@@ -801,6 +877,7 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
       operation,
       { deployedSoldierIds: deployed, survivingSoldierIds: survivors, survivorHealth },
     );
+    currentCampaign = completedCampaign;
     saveCampaign(completedCampaign);
   }
 
