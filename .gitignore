@@ -4,3 +4,8 @@ dist/
 .DS_Store
 .vite/
 coverage/
+
+# Playwright smoke-test artifacts
+tests/smoke-shots/
+test-results/
+playwright-report/
