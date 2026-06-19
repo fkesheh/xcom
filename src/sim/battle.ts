@@ -498,6 +498,13 @@ export function applyCommand(state: BattleState, cmd: Command): GameEvent[] {
     case "setReserve":
       unit.reserve = cmd.reserve;
       return [];
+    // TODO(tactical-depth): implement in the sim-core wave.
+    case "throwItem":
+      return [{ type: "blocked", reason: "throw not yet implemented" }];
+    case "useItem":
+      return [{ type: "blocked", reason: "item not yet implemented" }];
+    case "primeItem":
+      return [{ type: "blocked", reason: "prime not yet implemented" }];
   }
 }
 

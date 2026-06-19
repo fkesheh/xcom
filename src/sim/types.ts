@@ -107,7 +107,7 @@ export interface Grid {
 }
 
 // ---------------------------------------------------------------------------
-// Units, stats, weapons
+// Units, stats, weapons, items
 // ---------------------------------------------------------------------------
 
 export type Faction = "player" | "enemy";
@@ -129,6 +129,8 @@ export interface UnitStats {
   firingAccuracy: number;
   /** Carry capacity / future encumbrance + throwing. */
   strength: number;
+  /** Bravery (classic 0..120 scale); governs morale retention and panic resistance. */
+  bravery?: number;
 }
 
 export type ShotKind = "snap" | "aimed" | "auto";
@@ -159,6 +161,47 @@ export interface Weapon {
   modes: ShotMode[];
 }
 
+/** Kind of a consumable battlefield item. */
+export type ItemKind = "grenade" | "medkit";
+
+/** A consumable battlefield item definition (data-driven; names are rebrandable). */
+export interface Item {
+  id: string;
+  name: string;
+  kind: ItemKind;
+  /** TU cost to use/throw, as a percentage of the user's MAX TU. */
+  tuPercent: number;
+  /** Grenade: blast radius in tiles (Chebyshev distance from impact). */
+  blastRadius?: number;
+  /** Grenade: damage at the blast center, before distance falloff. */
+  damage?: number;
+  /** Grenade: max throw range in tiles (clamped further by thrower strength). */
+  throwRange?: number;
+  /** Medkit: HP restored per use. */
+  healAmount?: number;
+}
+
+/** A specific carried instance of an {@link Item}. */
+export interface ItemInstance {
+  itemId: string;
+  /** Remaining uses (medkit charges; grenades are single-use). */
+  uses: number;
+  /** Grenade: primed and armed with a fuse. */
+  primed?: boolean;
+  /** Grenade: turns until detonation once primed (0 = impact-detonated on throw). */
+  fuseTurns?: number;
+}
+
+/** How a panicking unit behaves for the turn. */
+export type PanicBehavior = "freeze" | "flee" | "berserk";
+
+/** One unit struck by an area-of-effect blast. */
+export interface BlastHit {
+  unitId: UnitId;
+  damage: number;
+  killed: boolean;
+}
+
 /** A template used to spawn units (data-driven content). */
 export interface UnitTemplate {
   id: string;
@@ -167,6 +210,8 @@ export interface UnitTemplate {
   faction: Faction;
   stats: UnitStats;
   weaponId: string;
+  /** Starting consumable item ids this template spawns with (e.g. ["grenade"]). */
+  items?: string[];
   /** Sight range in tiles (full daylight v1). */
   sightRange: number;
   /** Half-angle of the forward vision cone in degrees (45 => a 90° arc). */
@@ -189,6 +234,10 @@ export interface Unit {
   weaponId: string;
   /** Rounds currently loaded in the weapon's magazine. */
   ammo: number;
+  /** Current morale (0..100); low morale can trigger panic. Populated by setup. */
+  morale?: number;
+  /** Carried consumable items (grenades, medkits). Populated by setup. */
+  items?: ItemInstance[];
   alive: boolean;
   /** Optional persistent campaign roster id for player units. */
   campaignSoldierId?: string;
@@ -218,6 +267,8 @@ export interface BattleState {
   grid: Grid;
   units: Unit[];
   weapons: Record<string, Weapon>;
+  /** Consumable item definitions available in this battle (keyed by id). */
+  items?: Record<string, Item>;
   /** 1-based round counter (increments when control returns to the player). */
   turn: number;
   activeFaction: Faction;
@@ -249,6 +300,9 @@ export type Command =
   | { type: "reload"; unitId: UnitId }
   | { type: "recoverObjective"; unitId: UnitId }
   | { type: "setReserve"; unitId: UnitId; reserve: ReserveMode }
+  | { type: "throwItem"; unitId: UnitId; target: Vec2; itemId: string }
+  | { type: "useItem"; unitId: UnitId; targetId: UnitId; itemId: string }
+  | { type: "primeItem"; unitId: UnitId; itemId: string; fuseTurns: number }
   | { type: "endTurn" };
 
 /**
@@ -281,6 +335,11 @@ export type GameEvent =
   | { type: "turnStarted"; faction: Faction; turn: number }
   | { type: "turnEnded"; faction: Faction }
   | { type: "gameOver"; status: BattleStatus }
+  | { type: "itemThrown"; unitId: UnitId; itemId: string; from: Vec2; to: Vec2; tuLeft: number }
+  | { type: "blastDetonated"; itemId: string; center: Vec2; radius: number; hits: BlastHit[] }
+  | { type: "itemUsed"; unitId: UnitId; targetId: UnitId; itemId: string; healed: number; tuLeft: number }
+  | { type: "panicked"; unitId: UnitId; behavior: PanicBehavior }
+  | { type: "moraleChanged"; unitId: UnitId; morale: number }
   | { type: "blocked"; reason: string };
 
 /**
@@ -294,6 +353,8 @@ export interface AiExecutor {
   shoot(unitId: UnitId, target: Vec2, mode: ShotKind): GameEvent[];
   reload(unitId: UnitId): GameEvent[];
   face(unitId: UnitId, dir: Dir8): GameEvent[];
+  /** Optional: throwing a grenade. The real reducer implements this; AI calls it when it elects to throw. */
+  throwItem?(unitId: UnitId, target: Vec2, itemId: string): GameEvent[];
 }
 
 /** Outcome of a single round of fire (auto fires several per action). */
@@ -355,4 +416,21 @@ export const TU_COST = {
   TURN_STEP: 1,
   /** Multiplier applied to a tile's base moveCost for diagonal entry (+50%). */
   DIAGONAL_MULT: 1.5,
+} as const;
+
+/**
+ * Morale & panic tuning. Morale is 0..100. Stressors subtract; each unit
+ * recovers a bravery-scaled amount at the start of its own turn. Below
+ * PANIC_THRESHOLD a unit must pass a bravery roll or panic (freeze/flee/berserk).
+ */
+export const MORALE = {
+  MAX: 100,
+  PANIC_THRESHOLD: 35,
+  SELF_WOUNDED_LOSS: 12,
+  ALLY_WOUNDED_LOSS: 6,
+  ALLY_DEATH_LOSS: 25,
+  /** Per-turn recovery, scaled by bravery (higher bravery => more recovery). */
+  RECOVERY_PER_TURN: 6,
+  /** Bravery used when a stat omits it (classic rookie baseline). */
+  DEFAULT_BRAVERY: 50,
 } as const;

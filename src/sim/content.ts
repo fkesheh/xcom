@@ -1,12 +1,12 @@
 /**
- * Data-driven game content: weapons, unit templates, and flavour name pools.
+ * Data-driven game content: weapons, items, unit templates, and flavour name pools.
  *
  * Everything here is generic and rebrandable — no trademarked names. Tuning
  * lives in data so balance is one edit away. Accuracy stays on the classic
  * 0..120 scale (interpreted as a percentage by the combat model).
  */
 
-import type { UnitTemplate, Weapon } from "./types";
+import type { Item, UnitTemplate, Weapon } from "./types";
 
 /** Weapon catalogue. Keyed by stable id (also stored on the weapon). */
 export const WEAPONS: Record<string, Weapon> = {
@@ -49,6 +49,26 @@ export const WEAPONS: Record<string, Weapon> = {
   },
 };
 
+/** Consumable item catalogue. Keyed by stable id. */
+export const ITEMS: Record<string, Item> = {
+  grenade: {
+    id: "grenade",
+    name: "Frag Grenade",
+    kind: "grenade",
+    tuPercent: 30,
+    blastRadius: 2,
+    damage: 56,
+    throwRange: 8,
+  },
+  medkit: {
+    id: "medkit",
+    name: "Medkit",
+    kind: "medkit",
+    tuPercent: 40,
+    healAmount: 30,
+  },
+};
+
 /** Spawnable unit templates. Keyed by stable id (also stored on the template). */
 export const TEMPLATES: Record<string, UnitTemplate> = {
   trooper: {
@@ -61,8 +81,10 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
       reactions: 50,
       firingAccuracy: 65,
       strength: 35,
+      bravery: 55,
     },
     weaponId: "rifle",
+    items: ["grenade", "medkit"],
     sightRange: 16,
     visionHalfAngleDeg: 45,
   },
@@ -76,6 +98,7 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
       reactions: 35,
       firingAccuracy: 50,
       strength: 40,
+      bravery: 90,
     },
     weaponId: "plasma",
     sightRange: 18,
@@ -91,8 +114,10 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
       reactions: 45,
       firingAccuracy: 58,
       strength: 50,
+      bravery: 60,
     },
     weaponId: "plasma",
+    items: ["grenade"],
     sightRange: 18,
     visionHalfAngleDeg: 45,
   },

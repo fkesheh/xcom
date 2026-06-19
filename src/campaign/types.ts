@@ -11,6 +11,8 @@ export type SoldierStatus = "active" | "wounded" | "kia";
 export type SoldierRank = "rookie" | "squaddie" | "sergeant" | "captain";
 export type CampaignWeaponId = "rifle" | "pistol" | "plasma";
 export type ManufacturingProjectId = "rifle" | "pistol" | "plasma";
+export type DifficultyLevel = "rookie" | "veteran" | "commander";
+export type MissionType = "crashSite" | "terror" | "landedUfo" | "baseDefense";
 export type CouncilRegion =
   | "North America"
   | "South America"
@@ -37,6 +39,8 @@ export interface StrategicState {
   threat: number;
   funding: number;
   score: number;
+  /** Chosen at campaign creation; scales enemy counts, UFO strength, funding pressure. */
+  difficulty?: DifficultyLevel;
 }
 
 export interface CampaignClock {
@@ -67,7 +71,9 @@ export interface InterceptorState {
 
 export interface UfoContact {
   id: string;
-  status: "tracked" | "crashed";
+  status: "tracked" | "landed" | "engaging" | "crashed" | "escaped";
+  /** Mission type this contact seeds when assaulted (defaults to crashSite). */
+  missionType?: MissionType;
   lat: number;
   lon: number;
   region: string;
@@ -89,6 +95,25 @@ export interface InterceptionReport {
   interceptorDamage: number;
   completedAtHour: number;
   summary: string;
+}
+
+/** Buyable equipment market: per-item stock and hours until restock. */
+export interface EquipmentMarket {
+  stock: Record<string, number>;
+  restockTimerHours: Record<string, number>;
+}
+
+/** In-progress interactive interception encounter (choice-based, deterministic). */
+export interface InterceptionEncounter {
+  contactId: string;
+  ufoHp: number;
+  ufoHpMax: number;
+  interceptorHp: number;
+  interceptorHpMax: number;
+  /** Engagement range in arbitrary units (0 = point-blank; affects hit odds). */
+  range: number;
+  roundsElapsed: number;
+  log: string[];
 }
 
 export interface ActiveResearch {
@@ -128,12 +153,20 @@ export interface SoldierStatBonus {
 
 export type OperationTheme = "farmland" | "urban" | "desert";
 
+/** Per-mission-type context (civilians for terror, facility for base defense). */
+export interface MissionContext {
+  civilianCount?: number;
+  defenderFacility?: string;
+}
+
 export interface OperationPlan {
   missionNumber: number;
   missionSeed: number;
   codename: string;
   region: string;
   themeId: OperationTheme;
+  missionType?: MissionType;
+  missionContext?: MissionContext;
   enemyCount: number;
   durationHours: number;
   width: number;
@@ -150,9 +183,14 @@ export interface MissionReport {
   result: MissionResult;
   region: string;
   themeId: OperationTheme;
+  missionType?: MissionType;
   enemyCount: number;
   durationHours: number;
   reward: CampaignResources;
+  /** Terror missions: civilians on the map. */
+  civilianCount?: number;
+  civiliansRescued?: number;
+  civilianCasualties?: number;
   deployedSoldierIds: string[];
   kiaSoldierIds: string[];
   woundedSoldierIds: string[];
@@ -185,6 +223,9 @@ export interface CampaignState {
   ufoContact?: UfoContact;
   resources: CampaignResources;
   armory: CampaignArmory;
+  market?: EquipmentMarket;
+  /** Active interactive interception encounter, if one is in progress. */
+  interception?: InterceptionEncounter;
   soldierLoadouts: Record<string, CampaignWeaponId>;
   deploymentSoldierIds: string[];
   facilities: string[];
