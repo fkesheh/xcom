@@ -7,13 +7,22 @@
  * keeping the rng stream identical for the battle that follows.
  */
 
-import type { BattleState, Dir8, Unit, UnitStats, UnitTemplate, Vec2 } from "./types";
+import type {
+  BattleState,
+  Dir8,
+  ItemInstance,
+  Unit,
+  UnitStats,
+  UnitTemplate,
+  Vec2,
+} from "./types";
+import { MORALE } from "./types";
 import { Rng } from "./rng";
 import { dir8Towards } from "./los";
 import { refillTU, revealFor } from "./battle";
 import { tileTypeAt } from "./grid";
 import { generateMap } from "./mapgen";
-import { ENEMY_NAMES, PLAYER_NAMES, TEMPLATES, WEAPONS } from "./content";
+import { ENEMY_NAMES, ITEMS, PLAYER_NAMES, TEMPLATES, WEAPONS } from "./content";
 
 export interface SkirmishOptions {
   seed: number;
@@ -25,8 +34,20 @@ export interface SkirmishOptions {
   playerNames?: readonly string[];
   playerSoldierIds?: readonly string[];
   playerStatBonuses?: readonly Partial<UnitStats>[];
+  /** Per-player-index item ids to ADD on top of the template's loadout. */
+  playerItems?: string[][];
   /** Force a terrain theme ("farmland" | "urban" | "desert"); seeded when omitted. */
   themeId?: string;
+}
+
+/** Build a carried item instance: grenades are single-use, medkits hold 3 charges. */
+function makeItemInstance(id: string): ItemInstance {
+  return { itemId: id, uses: id === "medkit" ? 3 : 1 };
+}
+
+/** Map a template's item ids to starting carried instances. */
+function itemInstancesFor(template: UnitTemplate): ItemInstance[] {
+  return (template.items ?? []).map(makeItemInstance);
 }
 
 const DEFAULT_WIDTH = 30;
@@ -53,6 +74,8 @@ function spawnUnit(
     stats: { ...template.stats },
     tu: template.stats.timeUnits,
     hp: template.stats.health,
+    morale: MORALE.MAX,
+    items: itemInstancesFor(template),
     weaponId: template.weaponId,
     ammo: weapon?.magazineSize ?? 0,
     alive: true,
@@ -149,6 +172,10 @@ export function createSkirmish(opts: SkirmishOptions): BattleState {
     const soldierId = opts.playerSoldierIds?.[i];
     if (soldierId) unit.campaignSoldierId = soldierId;
     applyStatBonus(unit, opts.playerStatBonuses?.[i]);
+    const extra = opts.playerItems?.[i];
+    if (extra && extra.length > 0) {
+      unit.items = [...(unit.items ?? []), ...extra.map(makeItemInstance)];
+    }
     units.push(unit);
     nextId++;
   }
@@ -166,6 +193,7 @@ export function createSkirmish(opts: SkirmishOptions): BattleState {
     grid,
     units,
     weapons: WEAPONS,
+    items: { ...ITEMS },
     turn: 1,
     activeFaction: "player",
     rng,

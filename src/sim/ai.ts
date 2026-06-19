@@ -28,8 +28,9 @@ import type {
 import { TU_COST } from "./types";
 import { canSee, hasLineOfSight } from "./los";
 import { findPath } from "./pathfinding";
-import { moveCost, tileTypeAt } from "./grid";
+import { inBounds, moveCost, tileTypeAt } from "./grid";
 import { findMode, previewShot, reloadTuCost, tileDistance, tuCostForMode } from "./combat";
+import { ITEMS } from "./content";
 
 /** Hard cap on action iterations per unit, to guarantee termination. */
 const MAX_ACTIONS_PER_UNIT = 6;
@@ -84,6 +85,66 @@ function chooseShot(state: BattleState, unit: Unit, visible: Unit[]): ShotPlan |
     }
   }
   return best;
+}
+
+/** Chebyshev (8-way) tile distance. */
+function chebyshev(a: Vec2, b: Vec2): number {
+  return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
+}
+
+/**
+ * Choose the best tile to lob a grenade at, or null. A throw is worth making
+ * only when at least two living players fall inside the blast. Candidate tiles
+ * are each visible player's own tile plus every tile adjacent to one; we score
+ * by how many players a blast there would catch and keep the best tile within
+ * throw range, breaking ties deterministically (lowest y, then x).
+ */
+function chooseGrenadeThrow(
+  state: BattleState,
+  unit: Unit,
+  visiblePlayers: Unit[],
+): Vec2 | null {
+  const grenadeDef = state.items?.["grenade"] ?? ITEMS.grenade;
+  if (!grenadeDef) return null;
+  const instance = unit.items?.find((it) => it.itemId === "grenade" && it.uses > 0);
+  if (!instance) return null;
+
+  const radius = grenadeDef.blastRadius ?? 2;
+  const maxRange = grenadeDef.throwRange ?? 6;
+  const livingPlayers = state.units.filter((u) => u.faction === "player" && u.alive);
+
+  // Candidate target tiles: each visible player's tile + its 8 neighbours.
+  const candidates: Vec2[] = [];
+  for (const p of visiblePlayers) {
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        candidates.push({ x: p.pos.x + dx, y: p.pos.y + dy });
+      }
+    }
+  }
+
+  let best: { tile: Vec2; covered: number } | null = null;
+  for (const tile of candidates) {
+    if (!inBounds(state.grid, tile.x, tile.y)) continue;
+    if (chebyshev(unit.pos, tile) > maxRange) continue;
+
+    let covered = 0;
+    for (const p of livingPlayers) {
+      if (chebyshev(p.pos, tile) <= radius) covered++;
+    }
+    if (covered < 2) continue;
+
+    if (
+      best === null ||
+      covered > best.covered ||
+      (covered === best.covered &&
+        (tile.y < best.tile.y || (tile.y === best.tile.y && tile.x < best.tile.x)))
+    ) {
+      best = { tile: { x: tile.x, y: tile.y }, covered };
+    }
+  }
+
+  return best?.tile ?? null;
 }
 
 interface MoveCandidate {
@@ -232,6 +293,20 @@ export function runEnemyTurn(state: BattleState, exec: AiExecutor): GameEvent[] 
       const visible = state.units.filter(
         (t) => t.faction === "player" && t.alive && canSee(state.grid, unit, t.pos),
       );
+
+      // Grenade first: if a throw catches >= 2 players and TU allows, lob it.
+      const grenadeTile = chooseGrenadeThrow(state, unit, visible);
+      if (grenadeTile && exec.throwItem) {
+        const grenadeDef = state.items?.["grenade"];
+        const grenadeTu = grenadeDef
+          ? Math.ceil((unit.stats.timeUnits * grenadeDef.tuPercent) / 100)
+          : 0;
+        if (unit.tu >= grenadeTu) {
+          const thrown = exec.throwItem(unit.id, grenadeTile, "grenade");
+          events.push(...thrown);
+          if (thrown.length > 0) continue;
+        }
+      }
 
       const plan = visible.length > 0 ? chooseShot(state, unit, visible) : null;
       if (plan) {

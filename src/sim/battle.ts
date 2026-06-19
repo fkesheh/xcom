@@ -19,17 +19,32 @@ import type {
   Dir8,
   Faction,
   GameEvent,
+  ItemInstance,
+  PanicBehavior,
   ShotKind,
   ShotPreview,
   Unit,
   UnitId,
   Vec2,
 } from "./types";
-import { TU_COST } from "./types";
+import { DIR8_VECTORS, MORALE, TU_COST } from "./types";
 import { cellIndex, moveCost } from "./grid";
-import { dir8Towards, lineOfFire, visibleEnemyIds, visibleTiles } from "./los";
+import { blocksMove, inBounds } from "./grid";
+import { canSee, dir8Towards, lineOfFire, visibleEnemyIds, visibleTiles } from "./los";
 import { findPath } from "./pathfinding";
-import { findMode, previewShot, reloadTuCost, resolveShot, tuCostForMode } from "./combat";
+import {
+  applyMoraleLoss,
+  chebyshev,
+  findMode,
+  moraleRecoveryFor,
+  previewShot,
+  reloadTuCost,
+  resolveBlast,
+  resolveHeal,
+  resolveShot,
+  rollPanic,
+  tuCostForMode,
+} from "./combat";
 import { triggerReactions } from "./reaction";
 import { runEnemyTurn } from "./ai";
 
@@ -410,10 +425,420 @@ export function executeShoot(
   if (result.killed && result.targetId !== null) {
     events.push({ type: "died", unitId: result.targetId });
     events.push(...dropObjectiveIfCarrierDown(state, result.targetId));
+    events.push(...moraleEventsForCasualty(state, result.targetId, true));
     const over = checkVictory(state);
     if (over) events.push(over);
+  } else if (result.targetId !== null && result.rounds.some((r) => r.damage > 0)) {
+    events.push(...moraleEventsForCasualty(state, result.targetId, false));
   }
 
+  return events;
+}
+
+// ---------------------------------------------------------------------------
+// Morale on casualties (the emotional core of the system)
+// ---------------------------------------------------------------------------
+
+/**
+ * Emit morale events for a wound or death, threaded into the event stream
+ * right after the causing shot/blast/died event.
+ *
+ * On a NON-lethal wound: the victim loses SELF_WOUNDED_LOSS and each living
+ * same-faction ally within 6 tiles loses ALLY_WOUNDED_LOSS. On a DEATH: each
+ * living same-faction ally within 8 tiles loses ALLY_DEATH_LOSS (the fallen
+ * unit itself is gone, so no self-wound applies).
+ *
+ * Units only participate in the morale system once they carry a `morale` value
+ * (the system is opt-in via setup); a moraleChanged event is emitted only when
+ * the value actually changes. This helper does NOT advance the rng.
+ */
+function moraleEventsForCasualty(
+  state: BattleState,
+  woundedId: UnitId,
+  killed: boolean,
+): GameEvent[] {
+  const events: GameEvent[] = [];
+  const victim = unitById(state, woundedId);
+  if (!victim || victim.morale === undefined) return events;
+  const faction = victim.faction;
+  const woundRadius = 6;
+  const deathRadius = 8;
+
+  if (!killed) {
+    const before = victim.morale;
+    const after = applyMoraleLoss(victim, MORALE.SELF_WOUNDED_LOSS);
+    if (after !== before) {
+      events.push({ type: "moraleChanged", unitId: woundedId, morale: after });
+    }
+    for (const ally of state.units) {
+      if (ally.id === woundedId || !ally.alive || ally.faction !== faction) continue;
+      if (ally.morale === undefined) continue;
+      if (chebyshev(ally.pos, victim.pos) > woundRadius) continue;
+      const aBefore = ally.morale;
+      const aAfter = applyMoraleLoss(ally, MORALE.ALLY_WOUNDED_LOSS);
+      if (aAfter !== aBefore) {
+        events.push({ type: "moraleChanged", unitId: ally.id, morale: aAfter });
+      }
+    }
+    return events;
+  }
+
+  for (const ally of state.units) {
+    if (ally.id === woundedId || !ally.alive || ally.faction !== faction) continue;
+    if (ally.morale === undefined) continue;
+    if (chebyshev(ally.pos, victim.pos) > deathRadius) continue;
+    const aBefore = ally.morale;
+    const aAfter = applyMoraleLoss(ally, MORALE.ALLY_DEATH_LOSS);
+    if (aAfter !== aBefore) {
+      events.push({ type: "moraleChanged", unitId: ally.id, morale: aAfter });
+    }
+  }
+  return events;
+}
+
+/** Drop `inst` from its carrier, either by spending a charge or removing it. */
+function consumeItem(unit: Unit, inst: ItemInstance): void {
+  if (inst.uses > 1) {
+    inst.uses--;
+    return;
+  }
+  unit.items = unit.items?.filter((x) => x !== inst);
+}
+
+/**
+ * Throw a grenade at `target` and resolve its blast. Performs no faction check:
+ * the same path serves the player command and the enemy AI executor (mirroring
+ * how executeMove/executeShoot back the AiExecutor move/shoot). TU is spent,
+ * the charge is consumed, the blast is resolved, and morale/died events are
+ * threaded in for every struck unit. Throwing does NOT trigger reaction fire.
+ */
+function performThrow(state: BattleState, unit: Unit, target: Vec2, itemId: string): GameEvent[] {
+  const inst = unit.items?.find((it) => it.itemId === itemId && it.uses > 0);
+  const def = state.items?.[itemId];
+  if (!inst || !def || def.kind !== "grenade") {
+    return [{ type: "blocked", reason: "no grenade" }];
+  }
+  const cost = Math.ceil((unit.stats.timeUnits * def.tuPercent) / 100);
+  if (unit.tu < cost) return [{ type: "blocked", reason: "not enough TU" }];
+  const maxRange = def.throwRange ?? 6;
+  if (chebyshev(unit.pos, target) > maxRange) {
+    return [{ type: "blocked", reason: "out of throw range" }];
+  }
+  if (!inBounds(state.grid, target.x, target.y)) {
+    return [{ type: "blocked", reason: "out of bounds" }];
+  }
+
+  unit.tu -= cost;
+  consumeItem(unit, inst);
+
+  const radius = def.blastRadius ?? 1;
+  const events: GameEvent[] = [
+    {
+      type: "itemThrown",
+      unitId: unit.id,
+      itemId,
+      from: { x: unit.pos.x, y: unit.pos.y },
+      to: { x: target.x, y: target.y },
+      tuLeft: unit.tu,
+    },
+  ];
+
+  const { hits } = resolveBlast(state, target, radius, def.damage ?? 0);
+  events.push({
+    type: "blastDetonated",
+    itemId,
+    center: { x: target.x, y: target.y },
+    radius,
+    hits,
+  });
+
+  for (const hit of hits) {
+    events.push(...moraleEventsForCasualty(state, hit.unitId, hit.killed));
+    if (hit.killed) {
+      events.push({ type: "died", unitId: hit.unitId });
+      events.push(...dropObjectiveIfCarrierDown(state, hit.unitId));
+    }
+  }
+
+  const over = checkVictory(state);
+  if (over) events.push(over);
+
+  return events;
+}
+
+/** Use a medkit on an adjacent ally, restoring HP capped at the target's max. */
+function executeUseItem(
+  state: BattleState,
+  unit: Unit,
+  targetId: UnitId,
+  itemId: string,
+): GameEvent[] {
+  const target = unitById(state, targetId);
+  if (!target || !target.alive) return [{ type: "blocked", reason: "no target" }];
+  const inst = unit.items?.find((it) => it.itemId === itemId && it.uses > 0);
+  const def = state.items?.[itemId];
+  if (!inst || !def || def.kind !== "medkit") {
+    return [{ type: "blocked", reason: "no medkit" }];
+  }
+  if (target.faction !== unit.faction) return [{ type: "blocked", reason: "not an ally" }];
+  if (chebyshev(unit.pos, target.pos) > 1) return [{ type: "blocked", reason: "too far" }];
+  const cost = Math.ceil((unit.stats.timeUnits * def.tuPercent) / 100);
+  if (unit.tu < cost) return [{ type: "blocked", reason: "not enough TU" }];
+
+  unit.tu -= cost;
+  consumeItem(unit, inst);
+
+  const { healed } = resolveHeal(state, target, def.healAmount ?? 0);
+  return [
+    {
+      type: "itemUsed",
+      unitId: unit.id,
+      targetId: target.id,
+      itemId,
+      healed,
+      tuLeft: unit.tu,
+    },
+  ];
+}
+
+/**
+ * Prime a carried grenade with a fuse. Costs half the throw TU. State change
+ * only: the primed grenade detonates on its carrier at the start of the
+ * carrier's next turn (see detonatePrimedGrenades). Emits no events; the HUD
+ * reflects the primed state on sync.
+ */
+function executePrimeItem(
+  state: BattleState,
+  unit: Unit,
+  itemId: string,
+  fuseTurns: number,
+): GameEvent[] {
+  const inst = unit.items?.find((it) => it.itemId === itemId && it.uses > 0);
+  const def = state.items?.[itemId];
+  if (!inst || !def || def.kind !== "grenade") {
+    return [{ type: "blocked", reason: "no grenade" }];
+  }
+  const cost = Math.ceil((unit.stats.timeUnits * def.tuPercent * 0.5) / 100);
+  if (unit.tu < cost) return [{ type: "blocked", reason: "not enough TU" }];
+
+  unit.tu -= cost;
+  inst.primed = true;
+  inst.fuseTurns = Math.max(1, fuseTurns);
+  state.log.push(`${unit.name} primes a ${def.name}.`);
+  return [];
+}
+
+// ---------------------------------------------------------------------------
+// Start-of-turn: primed detonation, morale recovery, and panic
+// ---------------------------------------------------------------------------
+//
+// At the start of each faction's turn, BEFORE it acts: carried primed grenades
+// tick down (and detonate on their carrier at zero), living units recover a
+// bravery-scaled amount of morale, and any unit still below the panic threshold
+// must roll for panic. All three phases iterate living units of the starting
+// faction in ascending id order for determinism; only the panic phase advances
+// the rng.
+
+/** Resolve all primed grenades carried by living units of `faction`. */
+function detonatePrimedGrenades(state: BattleState, faction: Faction): GameEvent[] {
+  const events: GameEvent[] = [];
+  const carriers = state.units
+    .filter((u) => u.faction === faction && u.alive && u.items && u.items.length > 0)
+    .sort((a, b) => a.id - b.id);
+
+  for (const carrier of carriers) {
+    // Snapshot the carried items: a detonation may remove an entry, and we
+    // process every primed charge the carrier began the turn with.
+    const carried = carrier.items ? [...carrier.items] : [];
+    for (const inst of carried) {
+      if (!inst.primed || inst.uses <= 0) continue;
+      inst.fuseTurns = Math.max(0, (inst.fuseTurns ?? 1) - 1);
+      if ((inst.fuseTurns ?? 0) > 0) continue;
+
+      const def = state.items?.[inst.itemId];
+      // Detonate even if the definition is missing (treat as a default grenade)
+      // and always clear the spent charge afterward.
+      const radius = def?.blastRadius ?? 1;
+      const damage = def?.damage ?? 0;
+      const { hits } = resolveBlast(state, carrier.pos, radius, damage);
+      events.push({
+        type: "blastDetonated",
+        itemId: inst.itemId,
+        center: { x: carrier.pos.x, y: carrier.pos.y },
+        radius,
+        hits,
+      });
+      for (const hit of hits) {
+        events.push(...moraleEventsForCasualty(state, hit.unitId, hit.killed));
+        if (hit.killed) {
+          events.push({ type: "died", unitId: hit.unitId });
+          events.push(...dropObjectiveIfCarrierDown(state, hit.unitId));
+        }
+      }
+      carrier.items = carrier.items?.filter((x) => x !== inst);
+    }
+  }
+
+  const over = checkVictory(state);
+  if (over) events.push(over);
+  return events;
+}
+
+/** Recover morale for every living unit of `faction` (opt-in via `morale`). */
+function recoverMorale(state: BattleState, faction: Faction): GameEvent[] {
+  const events: GameEvent[] = [];
+  for (const u of state.units) {
+    if (u.faction !== faction || !u.alive || u.morale === undefined) continue;
+    const before = u.morale;
+    const after = Math.min(MORALE.MAX, before + moraleRecoveryFor(u));
+    if (after !== before) {
+      u.morale = after;
+      events.push({ type: "moraleChanged", unitId: u.id, morale: after });
+    }
+  }
+  return events;
+}
+
+/** Nearest living enemy of `unit` (Chebyshev), tie-broken by ascending id. */
+function nearestLivingEnemy(state: BattleState, unit: Unit): Unit | undefined {
+  let best: Unit | undefined;
+  let bestD = Infinity;
+  for (const o of state.units) {
+    if (!o.alive || o.faction === unit.faction) continue;
+    const d = chebyshev(unit.pos, o.pos);
+    // Units are spawned in ascending id order, so strict `<` keeps the lowest id.
+    if (d < bestD) {
+      bestD = d;
+      best = o;
+    }
+  }
+  return best;
+}
+
+/** Nearest living enemy of `unit` that `unit` can currently see. */
+function nearestVisibleHostile(state: BattleState, unit: Unit): Unit | undefined {
+  let best: Unit | undefined;
+  let bestD = Infinity;
+  for (const o of state.units) {
+    if (!o.alive || o.faction === unit.faction) continue;
+    if (!canSee(state.grid, unit, o.pos)) continue;
+    const d = chebyshev(unit.pos, o.pos);
+    if (d < bestD) {
+      bestD = d;
+      best = o;
+    }
+  }
+  return best;
+}
+
+/**
+ * Best-effort one-tile flee: step onto the walkable, unoccupied adjacent tile
+ * that maximizes Chebyshev distance from the nearest living enemy. Emits a
+ * moveStep (with honest tuLeft) and pays the step's move cost. Returns false
+ * when no safe step exists. Deterministic: ties keep the lowest Dir8 index.
+ */
+function fleeOneTile(state: BattleState, unit: Unit, events: GameEvent[]): boolean {
+  const enemy = nearestLivingEnemy(state, unit);
+  if (!enemy) return false;
+
+  let best: Vec2 | undefined;
+  let bestDist = -1;
+  for (let i = 0; i < DIR8_VECTORS.length; i++) {
+    const v = DIR8_VECTORS[i]!;
+    const tx = unit.pos.x + v.x;
+    const ty = unit.pos.y + v.y;
+    if (!inBounds(state.grid, tx, ty)) continue;
+    if (blocksMove(state.grid, tx, ty)) continue;
+    if (state.units.some((o) => o.alive && o.pos.x === tx && o.pos.y === ty)) continue;
+    const dist = chebyshev({ x: tx, y: ty }, enemy.pos);
+    // Strict `>` keeps the lowest Dir8 index on a tie (iteration is ascending).
+    if (dist > bestDist) {
+      bestDist = dist;
+      best = { x: tx, y: ty };
+    }
+  }
+  if (!best) return false;
+
+  const diagonal = best.x !== unit.pos.x && best.y !== unit.pos.y;
+  const base = moveCost(state.grid, best.x, best.y);
+  const stepCost = diagonal ? Math.floor(base * TU_COST.DIAGONAL_MULT) : base;
+
+  const from: Vec2 = { x: unit.pos.x, y: unit.pos.y };
+  unit.pos = { x: best.x, y: best.y };
+  unit.facing = dir8Towards(from, best);
+  unit.tu = Math.max(0, unit.tu - stepCost);
+  events.push({
+    type: "moveStep",
+    unitId: unit.id,
+    from,
+    to: { x: best.x, y: best.y },
+    facing: unit.facing,
+    tuLeft: unit.tu,
+  });
+  return true;
+}
+
+/**
+ * Resolve a single panic roll for `unit`. Emits the `panicked` event with the
+ * rolled behavior and applies its effect: freeze drops TU to 0; flee stumbles
+ * one tile away from the nearest enemy (else freezes); berserk fires one snap
+ * shot at the nearest visible hostile (else freezes). Bounded + deterministic.
+ */
+function resolvePanic(state: BattleState, unit: Unit): GameEvent[] {
+  const events: GameEvent[] = [];
+  const behavior: PanicBehavior | null = rollPanic(state, unit);
+  if (!behavior) return events;
+
+  events.push({ type: "panicked", unitId: unit.id, behavior });
+
+  if (behavior === "freeze") {
+    unit.tu = 0;
+    return events;
+  }
+  if (behavior === "flee") {
+    if (!fleeOneTile(state, unit, events)) unit.tu = 0;
+    return events;
+  }
+  // berserk: fire one snap shot at the nearest visible hostile, else freeze.
+  const hostile = nearestVisibleHostile(state, unit);
+  if (hostile) {
+    const shotEvents = executeShoot(state, unit.id, hostile.pos, "snap");
+    events.push(...shotEvents);
+    if (!shotEvents.some((e) => e.type === "shot")) unit.tu = 0;
+  } else {
+    unit.tu = 0;
+  }
+  return events;
+}
+
+/** Roll panic for every living unit of `faction` still below the threshold. */
+function resolvePanicPhase(state: BattleState, faction: Faction): GameEvent[] {
+  const events: GameEvent[] = [];
+  const units = state.units
+    .filter((u) => u.faction === faction && u.alive)
+    .sort((a, b) => a.id - b.id);
+  for (const u of units) {
+    if (state.status !== "playing") break;
+    if (!u.alive) continue; // a prior berserk shot may have turned the battle.
+    const morale = u.morale ?? MORALE.MAX;
+    if (morale >= MORALE.PANIC_THRESHOLD) continue;
+    events.push(...resolvePanic(state, u));
+  }
+  return events;
+}
+
+/**
+ * Run the full start-of-turn sequence for `faction`: detonate primed grenades,
+ * recover morale, then resolve panic. Short-circuits once the battle is decided.
+ * Emits nothing and advances no rng for factions whose units carry no items and
+ * no morale (the default-skirmish case), so this is a no-op for legacy tests.
+ */
+function startFactionTurn(state: BattleState, faction: Faction): GameEvent[] {
+  const events: GameEvent[] = [];
+  events.push(...detonatePrimedGrenades(state, faction));
+  if (state.status !== "playing") return events;
+  events.push(...recoverMorale(state, faction));
+  events.push(...resolvePanicPhase(state, faction));
   return events;
 }
 
@@ -432,12 +857,18 @@ function endPlayerTurn(state: BattleState): GameEvent[] {
   state.activeFaction = "enemy";
   refillTU(state, "enemy");
   events.push({ type: "turnStarted", faction: "enemy", turn: state.turn });
+  events.push(...startFactionTurn(state, "enemy"));
+  if (state.status !== "playing") return events;
 
   const exec: AiExecutor = {
     move: (id, to) => executeMove(state, id, to),
     shoot: (id, target, mode) => executeShoot(state, id, target, mode),
     reload: (id) => executeReload(state, id),
     face: (id, dir) => executeFace(state, id, dir),
+    throwItem: (id, target, itemId) => {
+      const u = unitById(state, id);
+      return u ? performThrow(state, u, target, itemId) : [];
+    },
   };
   events.push(...runEnemyTurn(state, exec));
 
@@ -453,6 +884,7 @@ function endPlayerTurn(state: BattleState): GameEvent[] {
     if (u.faction === "player" && u.alive) revealFor(state, u);
   }
   events.push({ type: "turnStarted", faction: "player", turn: state.turn });
+  events.push(...startFactionTurn(state, "player"));
 
   return events;
 }
@@ -498,13 +930,12 @@ export function applyCommand(state: BattleState, cmd: Command): GameEvent[] {
     case "setReserve":
       unit.reserve = cmd.reserve;
       return [];
-    // TODO(tactical-depth): implement in the sim-core wave.
     case "throwItem":
-      return [{ type: "blocked", reason: "throw not yet implemented" }];
+      return performThrow(state, unit, cmd.target, cmd.itemId);
     case "useItem":
-      return [{ type: "blocked", reason: "item not yet implemented" }];
+      return executeUseItem(state, unit, cmd.targetId, cmd.itemId);
     case "primeItem":
-      return [{ type: "blocked", reason: "prime not yet implemented" }];
+      return executePrimeItem(state, unit, cmd.itemId, cmd.fuseTurns);
   }
 }
 

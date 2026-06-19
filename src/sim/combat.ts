@@ -15,6 +15,8 @@
 
 import type {
   BattleState,
+  BlastHit,
+  PanicBehavior,
   ShotKind,
   ShotMode,
   ShotPreview,
@@ -24,7 +26,7 @@ import type {
   Vec2,
   Weapon,
 } from "./types";
-import { COMBAT } from "./types";
+import { COMBAT, MORALE } from "./types";
 import { lineOfFire } from "./los";
 
 function clamp(value: number, min: number, max: number): number {
@@ -234,4 +236,109 @@ export function resolveShot(
   }
 
   return { rounds, targetId, killed };
+}
+
+// ---------------------------------------------------------------------------
+// Area-of-effect blasts, items, morale, and panic
+// ---------------------------------------------------------------------------
+//
+// These pure helpers extend the combat model for consumable battlefield items
+// (grenades / medkits) and the morale + panic layer. As with resolveShot, the
+// ONLY randomness is state.rng, advanced in a stable order; HP/morale mutation
+// happens here, while TU spend + event emission stay with the reducer.
+
+/** Chebyshev (chessboard) distance between two tiles: max(|dx|, |dy|). */
+export function chebyshev(a: Vec2, b: Vec2): number {
+  return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
+}
+
+/**
+ * Resolve an area-of-effect blast centered on `center`. Every LIVING unit
+ * within `radius` (Chebyshev) takes damage that falls off with distance from
+ * the center; each hit rolls the same damage spread resolveShot uses. The rng
+ * is advanced once per struck unit, in ascending unit-id order, so the same
+ * (state, center, radius, baseDamage) is fully deterministic. Mutates hp/alive
+ * on the struck units directly (like resolveShot).
+ */
+export function resolveBlast(
+  state: BattleState,
+  center: Vec2,
+  radius: number,
+  baseDamage: number,
+): { hits: BlastHit[] } {
+  const hits: BlastHit[] = [];
+  const affected = state.units
+    .filter((u) => u.alive && chebyshev(u.pos, center) <= radius)
+    .sort((a, b) => a.id - b.id);
+
+  for (const u of affected) {
+    const dist = chebyshev(u.pos, center);
+    const falloff = Math.max(0.2, 1 - dist * 0.25);
+    const dmg = Math.max(
+      1,
+      Math.round(
+        baseDamage * falloff * state.rng.uniform(COMBAT.DAMAGE_MIN_MULT, COMBAT.DAMAGE_MAX_MULT),
+      ),
+    );
+    u.hp -= dmg;
+    let killed = false;
+    if (u.hp <= 0) {
+      u.hp = 0;
+      u.alive = false;
+      killed = true;
+    }
+    hits.push({ unitId: u.id, damage: dmg, killed });
+  }
+  return { hits };
+}
+
+/**
+ * Heal `target` by `amount`, capped at its max health. Mutates hp directly and
+ * returns the HP actually gained (0 when already at full).
+ */
+export function resolveHeal(state: BattleState, target: Unit, amount: number): { healed: number } {
+  void state; // resolveHeal is side-effect-free apart from the target's hp; kept for API symmetry.
+  const before = target.hp;
+  target.hp = Math.min(target.stats.health, before + amount);
+  return { healed: target.hp - before };
+}
+
+/** A unit's bravery, falling back to the classic rookie baseline when unset. */
+export function braveryOf(unit: Unit): number {
+  return unit.stats.bravery ?? MORALE.DEFAULT_BRAVERY;
+}
+
+/**
+ * Per-turn morale recovery, scaled by bravery (bravery 60 => the configured
+ * base; the result is never below 1 so a brave unit always steadies a little).
+ */
+export function moraleRecoveryFor(unit: Unit): number {
+  return Math.max(1, Math.round((MORALE.RECOVERY_PER_TURN * braveryOf(unit)) / 60));
+}
+
+/**
+ * Roll whether a unit panics this turn and how. Returns null when morale is at
+ * or above the panic threshold, or when the unit resists via its bravery.
+ * Advances the rng once to resist, then (on failure) once more to pick the
+ * behavior. Pure apart from the rng stream; does NOT mutate the unit.
+ */
+export function rollPanic(state: BattleState, unit: Unit): PanicBehavior | null {
+  const morale = unit.morale ?? MORALE.MAX;
+  if (morale >= MORALE.PANIC_THRESHOLD) return null;
+  const resistChance = braveryOf(unit) / 120;
+  if (state.rng.uniform(0, 1) < resistChance) return null;
+  const r = state.rng.uniform(0, 1);
+  if (r < 0.5) return "freeze";
+  if (r < 0.8) return "flee";
+  return "berserk";
+}
+
+/**
+ * Apply a morale loss (clamped to [0, MAX]) and return the new morale. If the
+ * unit has no morale value yet it is treated as MAX for the clamp, then the
+ * result is written back so the unit joins the morale system.
+ */
+export function applyMoraleLoss(unit: Unit, loss: number): number {
+  unit.morale = clamp((unit.morale ?? MORALE.MAX) - loss, 0, MORALE.MAX);
+  return unit.morale;
 }
