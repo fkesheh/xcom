@@ -930,6 +930,9 @@ export function applyCommand(state: BattleState, cmd: Command): GameEvent[] {
     case "setReserve":
       unit.reserve = cmd.reserve;
       return [];
+    case "setStance":
+      // TODO(tactical-depth): implement in the sim-core wave.
+      return [{ type: "blocked", reason: "stance not yet implemented" }];
     case "throwItem":
       return performThrow(state, unit, cmd.target, cmd.itemId);
     case "useItem":

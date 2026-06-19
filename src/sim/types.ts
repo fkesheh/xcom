@@ -69,7 +69,11 @@ export interface TileType {
   blocksSight: boolean;
   /** Base Time Units to enter this tile (integer). Ignored if blocksMove. */
   moveCost: number;
-  /** 0 = no cover, 1 = half cover, 2 = full cover (reserved for future use). */
+  /**
+   * Cover this tile provides to an adjacent defender against fire coming from
+   * the tile's side: 0 = none, 1 = half cover, 2 = full cover. Cover tiles are
+   * typically blocksMove=true (can't enter) + blocksSight=false (shoot over).
+   */
   cover: 0 | 1 | 2;
   /** Whether the tile can be destroyed (reserved for future destruction). */
   destructible: boolean;
@@ -114,6 +118,9 @@ export type Faction = "player" | "enemy";
 
 /** How much TU a unit holds back for reaction fire during its own turn. */
 export type ReserveMode = "none" | "snap" | "aimed" | "auto";
+
+/** Body stance. Kneeling improves accuracy and shrinks the unit's target profile. */
+export type UnitStance = "stand" | "kneel";
 
 export type UnitId = number;
 
@@ -243,6 +250,8 @@ export interface Unit {
   campaignSoldierId?: string;
   /** TU the unit reserves for reaction fire during its own turn. */
   reserve: ReserveMode;
+  /** Current body stance (kneel = better accuracy, smaller target). Defaults to stand. */
+  stance?: UnitStance;
   sightRange: number;
   visionHalfAngleDeg: number;
 }
@@ -300,6 +309,7 @@ export type Command =
   | { type: "reload"; unitId: UnitId }
   | { type: "recoverObjective"; unitId: UnitId }
   | { type: "setReserve"; unitId: UnitId; reserve: ReserveMode }
+  | { type: "setStance"; unitId: UnitId; stance: UnitStance }
   | { type: "throwItem"; unitId: UnitId; target: Vec2; itemId: string }
   | { type: "useItem"; unitId: UnitId; targetId: UnitId; itemId: string }
   | { type: "primeItem"; unitId: UnitId; itemId: string; fuseTurns: number }
@@ -340,6 +350,7 @@ export type GameEvent =
   | { type: "itemUsed"; unitId: UnitId; targetId: UnitId; itemId: string; healed: number; tuLeft: number }
   | { type: "panicked"; unitId: UnitId; behavior: PanicBehavior }
   | { type: "moraleChanged"; unitId: UnitId; morale: number }
+  | { type: "stanceChanged"; unitId: UnitId; stance: UnitStance; tuLeft: number }
   | { type: "blocked"; reason: string };
 
 /**
@@ -433,4 +444,27 @@ export const MORALE = {
   RECOVERY_PER_TURN: 6,
   /** Bravery used when a stat omits it (classic rookie baseline). */
   DEFAULT_BRAVERY: 50,
+} as const;
+
+/** Stance tuning. Kneeling trades a little mobility for accuracy and a smaller profile. */
+export const STANCE = {
+  /** TU cost to toggle stance (stand <-> kneel). */
+  TOGGLE_TU: 4,
+  /** Firing-accuracy bonus while kneeling (added to effective accuracy, classic 0..120 scale). */
+  KNEEL_ACCURACY_BONUS: 20,
+  /** Hit-chance reduction against a kneeling target (presents a smaller profile). */
+  KNEEL_TARGET_DEFENSE: 0.2,
+  /** Movement TU multiplier while kneeling (kneeling moves are a bit costlier). */
+  KNEEL_MOVE_MULT: 1.25,
+} as const;
+
+/**
+ * Cover tuning. Cover is DIRECTIONAL: only cover tiles sitting between the
+ * defender and the shooter protect the defender. See combat.coverDefenseFor().
+ */
+export const COVER = {
+  /** Hit-chance reduction against a defender in HALF cover (tile.cover === 1). */
+  HALF_DEFENSE: 0.25,
+  /** Hit-chance reduction against a defender in FULL cover (tile.cover === 2). */
+  FULL_DEFENSE: 0.45,
 } as const;
