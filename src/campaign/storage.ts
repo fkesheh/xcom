@@ -8,18 +8,22 @@ import type {
   CampaignStatus,
   FundingReport,
   InterceptionReport,
+  InterceptionEncounter,
   InterceptorState,
   CampaignSoldier,
   CampaignResources,
   CampaignState,
   CampaignWeaponId,
   CouncilRegion,
+  DifficultyLevel,
+  EquipmentMarket,
   ManufacturingProjectId,
   SoldierRank,
   SoldierStatBonus,
   StrategicState,
   MissionReport,
   MissionResult,
+  MissionType,
   OperationPlan,
   OperationTheme,
   ProjectReport,
@@ -94,6 +98,92 @@ export const STARTING_CLOCK: CampaignClock = {
   lastContactHour: 0,
   lastFundingHour: 0,
 };
+
+export interface DifficultyConfig {
+  label: string;
+  startingThreat: number;
+  startingFunding: number;
+  startingCredits: number;
+  enemyCountMult: number;
+  ufoStrengthBonus: number;
+  interceptionDamageMult: number;
+  fundingPressureMult: number;
+  panicMult: number;
+  upkeepMult: number;
+}
+
+export const DIFFICULTY_CONFIGS: Record<DifficultyLevel, DifficultyConfig> = {
+  rookie: {
+    label: "Rookie",
+    startingThreat: 15,
+    startingFunding: 720,
+    startingCredits: 800,
+    enemyCountMult: 0.8,
+    ufoStrengthBonus: 0,
+    interceptionDamageMult: 0.8,
+    fundingPressureMult: 0.7,
+    panicMult: 0.7,
+    upkeepMult: 0.8,
+  },
+  veteran: {
+    label: "Veteran",
+    startingThreat: STARTING_STRATEGIC.threat,
+    startingFunding: STARTING_STRATEGIC.funding,
+    startingCredits: STARTING_RESOURCES.credits,
+    enemyCountMult: 1.0,
+    ufoStrengthBonus: 0,
+    interceptionDamageMult: 1.0,
+    fundingPressureMult: 1.0,
+    panicMult: 1.0,
+    upkeepMult: 1.0,
+  },
+  commander: {
+    label: "Commander",
+    startingThreat: 35,
+    startingFunding: 520,
+    startingCredits: 550,
+    enemyCountMult: 1.3,
+    ufoStrengthBonus: 1,
+    interceptionDamageMult: 1.2,
+    fundingPressureMult: 1.3,
+    panicMult: 1.4,
+    upkeepMult: 1.2,
+  },
+};
+
+export function difficultyConfig(campaign: CampaignState): DifficultyConfig {
+  return DIFFICULTY_CONFIGS[campaign.strategic.difficulty ?? "veteran"];
+}
+
+export const MARKET_CONFIG: Record<
+  CampaignWeaponId,
+  { price: number; maxStock: number; restockHours: number }
+> = {
+  rifle: { price: 400, maxStock: 6, restockHours: 48 },
+  pistol: { price: 250, maxStock: 6, restockHours: 48 },
+  plasma: { price: 1200, maxStock: 6, restockHours: 48 },
+};
+
+export const STARTING_MARKET: EquipmentMarket = {
+  stock: {
+    rifle: MARKET_CONFIG.rifle.maxStock,
+    pistol: MARKET_CONFIG.pistol.maxStock,
+    plasma: MARKET_CONFIG.plasma.maxStock,
+  },
+  restockTimerHours: {},
+};
+
+const WEAPON_LABELS: Record<CampaignWeaponId, string> = {
+  rifle: "Service rifle",
+  pistol: "Sidearm",
+  plasma: "Plasma caster",
+};
+
+const TERROR_EXTRA_PANIC_LOCAL = 14;
+const TERROR_EXTRA_PANIC_SPILLOVER = 4;
+const TERROR_RESCUE_CREDITS_PER_CIVILIAN = 20;
+const TERROR_RESCUE_FUNDING_PER_CIVILIAN = 5;
+const TERROR_RESCUE_SCORE_PER_CIVILIAN = 10;
 
 export const RESEARCH_COSTS: Record<ResearchId, CampaignResources> = {
   plasmaWeapons: {
@@ -231,22 +321,36 @@ function startingDeployment(soldiers: readonly CampaignSoldier[]): string[] {
   return soldiers.slice(0, DEPLOYMENT_SIZE).map((soldier) => soldier.id);
 }
 
-export function createCampaign(base: BaseLocation, seed: number): CampaignState {
+export function createCampaign(
+  base: BaseLocation,
+  seed: number,
+  difficulty: DifficultyLevel = "veteran",
+): CampaignState {
+  const config = DIFFICULTY_CONFIGS[difficulty];
   const soldiers = startingSoldiers();
+  const strategic: StrategicState = {
+    status: STARTING_STRATEGIC.status,
+    threat: config.startingThreat,
+    funding: config.startingFunding,
+    score: STARTING_STRATEGIC.score,
+    // Veteran is the default; omitting the key preserves the historical strategic shape.
+    ...(difficulty !== "veteran" ? { difficulty } : {}),
+  };
   return {
     version: 1,
     id: campaignId(seed),
     seed: seed >>> 0,
     createdAt: new Date().toISOString(),
     base,
-    strategic: { ...STARTING_STRATEGIC },
+    strategic,
     regionalPanic: { ...STARTING_REGIONAL_PANIC },
     clock: { ...STARTING_CLOCK },
     lastFundingReport: undefined,
     interceptor: { ...STARTING_INTERCEPTOR },
     lastInterceptionReport: undefined,
-    resources: { ...STARTING_RESOURCES },
+    resources: { ...STARTING_RESOURCES, credits: config.startingCredits },
     armory: cloneArmory(STARTING_ARMORY),
+    market: cloneMarket(STARTING_MARKET),
     soldierLoadouts: startingLoadouts(soldiers),
     deploymentSoldierIds: startingDeployment(soldiers),
     facilities: starterFacilityIds(),
@@ -346,11 +450,14 @@ export function adjustRegionalPanic(
   region: string,
   localDelta: number,
   spilloverDelta = 0,
+  panicMult = 1,
 ): Record<CouncilRegion, number> {
   const councilRegion = councilRegionFor(region);
   const next = { ...regionalPanic };
+  const scaledLocal = Math.round(localDelta * panicMult);
+  const scaledSpillover = Math.round(spilloverDelta * panicMult);
   for (const one of COUNCIL_REGIONS) {
-    const delta = one === councilRegion ? localDelta : spilloverDelta;
+    const delta = one === councilRegion ? scaledLocal : scaledSpillover;
     next[one] = Math.max(0, Math.min(100, Math.round((next[one] ?? STARTING_REGIONAL_PANIC[one]) + delta)));
   }
   return next;
@@ -563,6 +670,62 @@ export function deploymentWeaponIds(campaign: CampaignState): CampaignWeaponId[]
   return deploymentSoldiers(campaign).map((soldier) => soldierWeaponId(campaign, soldier.id));
 }
 
+export function canPurchaseWeapon(
+  campaign: CampaignState,
+  weaponId: CampaignWeaponId,
+): { ok: boolean; reason?: string } {
+  const stock = campaign.market?.stock[weaponId] ?? 0;
+  if (stock <= 0) {
+    return { ok: false, reason: `${WEAPON_LABELS[weaponId]} is out of stock` };
+  }
+  if (campaign.resources.credits < MARKET_CONFIG[weaponId].price) {
+    return { ok: false, reason: `Insufficient credits for ${WEAPON_LABELS[weaponId]}` };
+  }
+  return { ok: true };
+}
+
+export function purchaseWeapon(campaign: CampaignState, weaponId: CampaignWeaponId): CampaignState {
+  if (!canPurchaseWeapon(campaign, weaponId).ok) return campaign;
+  const price = MARKET_CONFIG[weaponId].price;
+  const market = campaign.market ?? cloneMarket(STARTING_MARKET);
+  const stock = Math.max(0, (market.stock[weaponId] ?? 0) - 1);
+  return {
+    ...campaign,
+    resources: { ...campaign.resources, credits: campaign.resources.credits - price },
+    armory: addWeapon(campaign.armory, weaponId, 1),
+    market: {
+      stock: { ...market.stock, [weaponId]: stock },
+      restockTimerHours: { ...market.restockTimerHours },
+    },
+  };
+}
+
+export function restockMarket(campaign: CampaignState, hoursAdvanced: number): CampaignState {
+  const hours = Math.max(0, Math.floor(hoursAdvanced));
+  if (hours <= 0) return campaign;
+  const market = campaign.market ?? cloneMarket(STARTING_MARKET);
+  const stock = { ...market.stock };
+  const restockTimerHours = { ...market.restockTimerHours };
+  for (const id of CAMPAIGN_WEAPON_IDS) {
+    const config = MARKET_CONFIG[id];
+    const maxStock = config.maxStock;
+    const currentStock = typeof stock[id] === "number" ? stock[id]! : maxStock;
+    if (currentStock >= maxStock) {
+      restockTimerHours[id] = 0;
+      continue;
+    }
+    let timer = (typeof restockTimerHours[id] === "number" ? restockTimerHours[id]! : 0) + hours;
+    let nextStock = currentStock;
+    while (timer >= config.restockHours && nextStock < maxStock) {
+      nextStock += 1;
+      timer -= config.restockHours;
+    }
+    stock[id] = nextStock;
+    restockTimerHours[id] = nextStock >= maxStock ? 0 : timer;
+  }
+  return { ...campaign, market: { stock, restockTimerHours } };
+}
+
 export function constructedFacilities(campaign: CampaignState): BaseFacility[] {
   return facilitiesForIds(campaign.facilities);
 }
@@ -740,6 +903,10 @@ export interface MissionRosterOutcome {
   deployedSoldierIds: readonly string[];
   survivingSoldierIds: readonly string[];
   survivorHealth?: Readonly<Record<string, { hp: number; maxHp: number }>>;
+  /** Terror missions: civilians on the map and their outcome. */
+  civilianCount?: number;
+  civiliansRescued?: number;
+  civilianCasualties?: number;
 }
 
 export function recordMissionResult(
@@ -774,6 +941,7 @@ export function recordMissionResult(
     result,
     woundRecovery,
   );
+  const terrorRescue = terrorRescueBonus(operation, result, rosterOutcome);
   const report: MissionReport = {
     missionNumber: operation.missionNumber,
     missionSeed: operation.missionSeed,
@@ -781,9 +949,13 @@ export function recordMissionResult(
     result,
     region: operation.region,
     themeId: operation.themeId,
+    missionType: operation.missionType,
     enemyCount: operation.enemyCount,
     durationHours,
     reward: result === "success" ? operation.reward : failureReward(),
+    civilianCount: rosterOutcome?.civilianCount,
+    civiliansRescued: rosterOutcome?.civiliansRescued,
+    civilianCasualties: rosterOutcome?.civilianCasualties,
     deployedSoldierIds: [...deployedSoldierIds],
     kiaSoldierIds,
     woundedSoldierIds,
@@ -799,21 +971,20 @@ export function recordMissionResult(
         : missionFailureSummary(kiaSoldierIds.length, deployedSoldierIds.length - kiaSoldierIds.length),
   };
   const missionsCompleted = campaign.missionsCompleted + (result === "success" ? 1 : 0);
-  const resources = awardMissionResources(campaign.resources, report.reward);
-  const regionalPanic = updateRegionalPanicForMission(campaign.regionalPanic, operation.region, result);
+  const baseResources = awardMissionResources(campaign.resources, report.reward);
+  const resources = terrorRescue.credits > 0
+    ? { ...baseResources, credits: baseResources.credits + terrorRescue.credits }
+    : baseResources;
+  const regionalPanic = updateRegionalPanicForMission(campaign, operation, result, rosterOutcome);
+  const strategic = applyTerrorRescueBonus(
+    updateStrategic(campaign, result, operation, missionsCompleted, resources, updatedSoldiers, regionalPanic),
+    terrorRescue,
+  );
   return completeStrategicProgress({
     ...campaign,
     clock: completedClock,
     ufoContact: undefined,
-    strategic: updateStrategic(
-      campaign,
-      result,
-      operation,
-      missionsCompleted,
-      resources,
-      updatedSoldiers,
-      regionalPanic,
-    ),
+    strategic,
     regionalPanic,
     resources,
     soldiers: updatedSoldiers,
@@ -825,13 +996,60 @@ export function recordMissionResult(
 }
 
 function updateRegionalPanicForMission(
-  regionalPanic: Record<CouncilRegion, number>,
-  region: string,
+  campaign: CampaignState,
+  operation: OperationPlan,
   result: MissionResult,
+  rosterOutcome: MissionRosterOutcome | undefined,
 ): Record<CouncilRegion, number> {
-  return result === "success"
-    ? adjustRegionalPanic(regionalPanic, region, -18)
-    : adjustRegionalPanic(regionalPanic, region, 18, 2);
+  const panicMult = difficultyConfig(campaign).panicMult;
+  const region = operation.region;
+  const regionalPanic =
+    result === "success"
+      ? adjustRegionalPanic(campaign.regionalPanic, region, -18, 0, panicMult)
+      : adjustRegionalPanic(campaign.regionalPanic, region, 18, 2, panicMult);
+
+  if (operation.missionType === "terror") {
+    const civilianCasualties = rosterOutcome?.civilianCasualties ?? 0;
+    if (result === "failure" || civilianCasualties > 0) {
+      // Extra panic for terror missions where civilians were lost; pre-scaled by panicMult.
+      return adjustRegionalPanic(
+        regionalPanic,
+        region,
+        Math.round(TERROR_EXTRA_PANIC_LOCAL * panicMult),
+        Math.round(TERROR_EXTRA_PANIC_SPILLOVER * panicMult),
+      );
+    }
+  }
+  return regionalPanic;
+}
+
+function terrorRescueBonus(
+  operation: OperationPlan,
+  result: MissionResult,
+  rosterOutcome: MissionRosterOutcome | undefined,
+): { credits: number; funding: number; score: number } {
+  if (operation.missionType !== "terror" || result !== "success") {
+    return { credits: 0, funding: 0, score: 0 };
+  }
+  const rescued = Math.max(0, rosterOutcome?.civiliansRescued ?? 0);
+  if (rescued <= 0) return { credits: 0, funding: 0, score: 0 };
+  return {
+    credits: rescued * TERROR_RESCUE_CREDITS_PER_CIVILIAN,
+    funding: rescued * TERROR_RESCUE_FUNDING_PER_CIVILIAN,
+    score: rescued * TERROR_RESCUE_SCORE_PER_CIVILIAN,
+  };
+}
+
+function applyTerrorRescueBonus(
+  strategic: StrategicState,
+  bonus: { funding: number; score: number },
+): StrategicState {
+  if (bonus.funding <= 0 && bonus.score <= 0) return strategic;
+  return {
+    ...strategic,
+    funding: strategic.funding + bonus.funding,
+    score: strategic.score + bonus.score,
+  };
 }
 
 function missionFailureSummary(casualties: number, survivors: number): string {
@@ -1077,6 +1295,13 @@ function cloneArmory(armory: CampaignArmory): CampaignArmory {
   };
 }
 
+function cloneMarket(market: EquipmentMarket): EquipmentMarket {
+  return {
+    stock: { ...market.stock },
+    restockTimerHours: { ...market.restockTimerHours },
+  };
+}
+
 function isCampaignWeaponId(value: unknown): value is CampaignWeaponId {
   return value === "rifle" || value === "pistol" || value === "plasma";
 }
@@ -1147,8 +1372,10 @@ export function loadCampaign(): CampaignState | null {
       interceptor: normalizeInterceptor(parsed.interceptor, clock),
       lastInterceptionReport: normalizeInterceptionReport(parsed.lastInterceptionReport),
       ufoContact: normalizeUfoContact(parsed.ufoContact, clock),
+      interception: normalizeInterception(parsed.interception),
       resources,
       armory,
+      market: normalizeMarket(parsed.market),
       soldierLoadouts: normalizeSoldierLoadouts(parsed.soldierLoadouts, soldiers, armory),
       deploymentSoldierIds: normalizeDeploymentSoldierIds(parsed.deploymentSoldierIds, soldiers),
       facilities: normalizeFacilities(parsed.facilities),
@@ -1195,7 +1422,9 @@ function normalizeCampaignStatus(
 }
 
 function normalizeStrategic(value: unknown): StrategicState {
-  if (!value || typeof value !== "object") return { ...STARTING_STRATEGIC };
+  if (!value || typeof value !== "object") {
+    return { ...STARTING_STRATEGIC, difficulty: "veteran" };
+  }
   const maybe = value as Partial<StrategicState>;
   const status =
     maybe.status === "active" || maybe.status === "won" || maybe.status === "lost"
@@ -1206,7 +1435,12 @@ function normalizeStrategic(value: unknown): StrategicState {
     threat: typeof maybe.threat === "number" ? Math.max(0, Math.min(100, maybe.threat)) : STARTING_STRATEGIC.threat,
     funding: typeof maybe.funding === "number" ? Math.max(0, maybe.funding) : STARTING_STRATEGIC.funding,
     score: typeof maybe.score === "number" ? maybe.score : STARTING_STRATEGIC.score,
+    difficulty: normalizeDifficultyLevel(maybe.difficulty),
   };
+}
+
+function normalizeDifficultyLevel(value: unknown): DifficultyLevel {
+  return value === "rookie" || value === "veteran" || value === "commander" ? value : "veteran";
 }
 
 function normalizeRegionalPanic(value: unknown): Record<CouncilRegion, number> {
@@ -1327,9 +1561,19 @@ function normalizeUfoContact(value: unknown, clock: CampaignClock): UfoContact |
   ) {
     return undefined;
   }
+  // applyInterceptionOutcome clears ufoContact on escape, so a persisted "escaped"
+  // contact is stale (the UFO is gone for good) — drop it rather than revive it.
+  if (maybe.status === "escaped") return undefined;
   return {
     id: maybe.id,
-    status: maybe.status === "crashed" ? "crashed" : "tracked",
+    status:
+      maybe.status === "crashed" ||
+      maybe.status === "landed" ||
+      maybe.status === "engaging" ||
+      maybe.status === "tracked" ||
+      maybe.status === "escaped"
+        ? maybe.status
+        : "tracked",
     lat: Math.max(-90, Math.min(90, Math.round(maybe.lat * 10) / 10)),
     lon: Math.max(-180, Math.min(180, Math.round(maybe.lon * 10) / 10)),
     region: maybe.region,
@@ -1339,9 +1583,16 @@ function normalizeUfoContact(value: unknown, clock: CampaignClock): UfoContact |
     expiresAtHour: Math.max(0, Math.floor(maybe.expiresAtHour)),
     missionSeed: maybe.missionSeed >>> 0,
     strength: Math.max(1, Math.floor(maybe.strength)),
+    missionType: normalizeUfoContactMissionType(maybe.missionType),
     interceptorDamage:
       typeof maybe.interceptorDamage === "number" ? Math.max(0, Math.floor(maybe.interceptorDamage)) : undefined,
   };
+}
+
+function normalizeUfoContactMissionType(value: unknown): MissionType {
+  return value === "crashSite" || value === "terror" || value === "landedUfo" || value === "baseDefense"
+    ? value
+    : "crashSite";
 }
 
 function normalizeMissionReport(report: MissionReport): MissionReport {
@@ -1352,15 +1603,29 @@ function normalizeMissionReport(report: MissionReport): MissionReport {
     result: report.result,
     region: report.region,
     themeId: normalizeTheme(report.themeId),
+    missionType: normalizeMissionType(report.missionType),
     enemyCount: typeof report.enemyCount === "number" ? report.enemyCount : 0,
     durationHours: typeof report.durationHours === "number" ? Math.max(0, Math.floor(report.durationHours)) : 0,
     reward: normalizeResources(report.reward),
+    civilianCount: normalizeOptionalCount(report.civilianCount),
+    civiliansRescued: normalizeOptionalCount(report.civiliansRescued),
+    civilianCasualties: normalizeOptionalCount(report.civilianCasualties),
     deployedSoldierIds: normalizeStringList(report.deployedSoldierIds),
     kiaSoldierIds: normalizeStringList(report.kiaSoldierIds),
     woundedSoldierIds: normalizeStringList(report.woundedSoldierIds),
     completedAt: report.completedAt,
     summary: report.summary,
   };
+}
+
+function normalizeMissionType(value: unknown): MissionType | undefined {
+  return value === "crashSite" || value === "terror" || value === "landedUfo" || value === "baseDefense"
+    ? value
+    : undefined;
+}
+
+function normalizeOptionalCount(value: unknown): number | undefined {
+  return typeof value === "number" ? Math.max(0, Math.floor(value)) : undefined;
 }
 
 function normalizeProjectReports(value: unknown): ProjectReport[] {
@@ -1399,6 +1664,56 @@ function normalizeResources(value: unknown): CampaignResources {
     alloys: typeof maybe.alloys === "number" ? maybe.alloys : STARTING_RESOURCES.alloys,
     elerium: typeof maybe.elerium === "number" ? maybe.elerium : STARTING_RESOURCES.elerium,
     alienData: typeof maybe.alienData === "number" ? maybe.alienData : STARTING_RESOURCES.alienData,
+  };
+}
+
+function normalizeMarket(value: unknown): EquipmentMarket {
+  if (!value || typeof value !== "object") return cloneMarket(STARTING_MARKET);
+  const maybe = value as Partial<EquipmentMarket>;
+  const rawStock =
+    maybe.stock && typeof maybe.stock === "object" ? (maybe.stock as Record<string, unknown>) : {};
+  const rawTimers =
+    maybe.restockTimerHours && typeof maybe.restockTimerHours === "object"
+      ? (maybe.restockTimerHours as Record<string, unknown>)
+      : {};
+  const stock: Record<string, number> = {};
+  const restockTimerHours: Record<string, number> = {};
+  for (const id of CAMPAIGN_WEAPON_IDS) {
+    const storedStock = rawStock[id];
+    stock[id] =
+      typeof storedStock === "number"
+        ? Math.max(0, Math.min(MARKET_CONFIG[id].maxStock, Math.floor(storedStock)))
+        : MARKET_CONFIG[id].maxStock;
+    const storedTimer = rawTimers[id];
+    restockTimerHours[id] = typeof storedTimer === "number" ? Math.max(0, Math.floor(storedTimer)) : 0;
+  }
+  return { stock, restockTimerHours };
+}
+
+function normalizeInterception(value: unknown): InterceptionEncounter | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const maybe = value as Partial<InterceptionEncounter>;
+  if (
+    typeof maybe.contactId !== "string" ||
+    typeof maybe.ufoHp !== "number" ||
+    typeof maybe.ufoHpMax !== "number" ||
+    typeof maybe.interceptorHp !== "number" ||
+    typeof maybe.interceptorHpMax !== "number" ||
+    typeof maybe.range !== "number" ||
+    typeof maybe.roundsElapsed !== "number" ||
+    !Array.isArray(maybe.log)
+  ) {
+    return undefined;
+  }
+  return {
+    contactId: maybe.contactId,
+    ufoHp: Math.max(0, Math.floor(maybe.ufoHp)),
+    ufoHpMax: Math.max(1, Math.floor(maybe.ufoHpMax)),
+    interceptorHp: Math.max(0, Math.floor(maybe.interceptorHp)),
+    interceptorHpMax: Math.max(1, Math.floor(maybe.interceptorHpMax)),
+    range: Math.max(0, Math.floor(maybe.range)),
+    roundsElapsed: Math.max(0, Math.floor(maybe.roundsElapsed)),
+    log: maybe.log.filter((line): line is string => typeof line === "string"),
   };
 }
 

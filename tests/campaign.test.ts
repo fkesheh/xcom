@@ -435,6 +435,31 @@ describe("campaign state", () => {
     expect(highPanic.lastFundingReport?.summary).toContain("regional panic cut 80c");
   });
 
+  it.each<[string, number]>([
+    ["rookie", 310],
+    ["veteran", 387],
+    ["commander", 464],
+  ])("scales monthly upkeep by difficulty upkeepMult (%s)", (difficulty, expectedUpkeep) => {
+    const campaign = createCampaign(
+      { lat: 2, lon: 14.2, region: "Africa" },
+      12345,
+      difficulty as "rookie" | "veteran" | "commander",
+    );
+    const report = advanceGeoscape(campaign, FUNDING_REPORT_INTERVAL_HOURS);
+
+    expect(report.lastFundingReport?.upkeep).toBe(expectedUpkeep);
+  });
+
+  it("applies upkeepMult so commander upkeep > veteran upkeep > rookie upkeep", () => {
+    const base = { lat: 2, lon: 14.2, region: "Africa" } as const;
+    const rookie = advanceGeoscape(createCampaign(base, 12345, "rookie"), FUNDING_REPORT_INTERVAL_HOURS);
+    const veteran = advanceGeoscape(createCampaign(base, 12345, "veteran"), FUNDING_REPORT_INTERVAL_HOURS);
+    const commander = advanceGeoscape(createCampaign(base, 12345, "commander"), FUNDING_REPORT_INTERVAL_HOURS);
+
+    expect(commander.lastFundingReport?.upkeep).toBeGreaterThan(veteran.lastFundingReport!.upkeep);
+    expect(veteran.lastFundingReport?.upkeep).toBeGreaterThan(rookie.lastFundingReport!.upkeep);
+  });
+
   it("records mission reports and advances the next mission seed", () => {
     const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 12345);
     const firstOperation = generateOperation(campaign);

@@ -3,7 +3,11 @@ import type {
   CampaignResources,
   CampaignState,
   FundingReport,
+  InterceptionEncounter,
   InterceptionReport,
+  InterceptionResult,
+  InterceptorState,
+  MissionType,
   StrategicState,
   UfoContact,
 } from "./types";
@@ -16,10 +20,12 @@ import {
   completeFinishedResearch,
   completeFinishedManufacturing,
   constructedFacilities,
+  difficultyConfig,
   hasBaseFacility,
   highestRegionalPanic,
   livingSoldiers,
   recoverWoundedSoldiers,
+  restockMarket,
 } from "./storage";
 
 export const GEOSCAPE_SCAN_HOURS = 6;
@@ -30,6 +36,14 @@ export const INTERCEPTOR_REPAIR_MIN_HOURS = 6;
 export const INTERCEPTOR_REPAIR_MAX_HOURS = 72;
 const INTERCEPTOR_BASE_SCORE = 68;
 const UFO_BASE_SCORE = 44;
+
+/** Starting engagement range for an interactive interception encounter. */
+const ENCOUNTER_START_RANGE = 3;
+/** Salt for the deterministic mission-type roll on contact spawn. */
+const MISSION_TYPE_ROLL_SALT = 0x9e3779ba;
+/** Hit/damage scaling salts for interactive encounter rounds. */
+const ENCOUNTER_INTERCEPTOR_SALT = 0x1b1b1b1b;
+const ENCOUNTER_UFO_SALT = 0x2d2d2d2d;
 
 export interface InterceptionForecast {
   contactId: string;
@@ -82,29 +96,62 @@ function offset(seed: number, magnitude: number): number {
   return ((seed % 2001) / 1000 - 1) * magnitude;
 }
 
-export function createUfoContact(campaign: CampaignState, detectedAtHour: number): UfoContact {
+/** Mission type a contact seeds when assaulted (defaults to a UFO crash-site recovery). */
+export function contactMissionType(contact: UfoContact | undefined): MissionType {
+  return contact?.missionType ?? "crashSite";
+}
+
+/**
+ * Deterministic UFO strength for a mission type. crashSite and terror reuse the
+ * legacy formula exactly; landed craft and base assaults field starker opposition.
+ */
+function ufoStrengthForMission(missionType: MissionType, seed: number): number {
+  const base = 1 + (hash(seed ^ 0xc2b2ae35) % 3);
+  switch (missionType) {
+    case "landedUfo":
+      return base + 1;
+    case "baseDefense":
+      return base + 2;
+    case "terror":
+    case "crashSite":
+    default:
+      return base;
+  }
+}
+
+export function createUfoContact(
+  campaign: CampaignState,
+  detectedAtHour: number,
+  missionType: MissionType = "crashSite",
+): UfoContact {
   const seed = hash(campaign.seed ^ (campaign.missionsAttempted * 0x9e3779b9) ^ detectedAtHour);
   const zone = CONTACT_ZONES[seed % CONTACT_ZONES.length]!;
   const lat = Math.max(-56, Math.min(68, zone.lat + offset(hash(seed ^ 0xa511e9b3), 7)));
   const lonRaw = zone.lon + offset(hash(seed ^ 0x63d83595), 11);
   const lon = lonRaw > 180 ? lonRaw - 360 : lonRaw < -180 ? lonRaw + 360 : lonRaw;
+  // Ground assaults (landed UFO, terror, base defense) spawn already on the ground;
+  // only crash-site contacts begin tracked for an air-to-air shoot-down.
+  const groundAssault = missionType !== "crashSite";
   return {
     id: `UFO-${String(campaign.missionsAttempted + 1).padStart(2, "0")}-${seed.toString(16).slice(0, 4).toUpperCase()}`,
-    status: "tracked",
+    status: groundAssault ? "landed" : "tracked",
+    missionType,
     lat: Math.round(lat * 10) / 10,
     lon: Math.round(lon * 10) / 10,
     region: zone.region,
     detectedAtHour,
     expiresAtHour: detectedAtHour + UFO_CONTACT_LIFETIME_HOURS,
     missionSeed: hash(seed ^ 0x85ebca6b),
-    strength: 1 + (hash(seed ^ 0xc2b2ae35) % 3),
+    strength: ufoStrengthForMission(missionType, seed),
   };
 }
 
 export function canLaunchInterceptor(campaign: CampaignState): boolean {
+  const contact = campaign.ufoContact;
   return (
     campaign.strategic.status === "active" &&
-    campaign.ufoContact?.status === "tracked" &&
+    contact?.status === "tracked" &&
+    contactMissionType(contact) === "crashSite" &&
     isInterceptorReady(campaign)
   );
 }
@@ -188,25 +235,27 @@ export function interceptionForecast(campaign: CampaignState): InterceptionForec
   };
 }
 
-export function interceptUfo(campaign: CampaignState): CampaignState {
-  const forecast = interceptionForecast(campaign);
-  if (!forecast?.canLaunch) return campaign;
-  const contact = campaign.ufoContact!;
-  const succeeded = forecast.succeeds;
-  const damage = forecast.damage;
-  const totalDamage = Math.min(100, campaign.interceptor.damage + damage);
-  const interceptor = {
+/**
+ * Shared outcome resolver for both the instant auto-resolve (`interceptUfo`) and
+ * the terminal transitions of an interactive encounter. Applies the interceptor's
+ * final damage, records the report, and mutates strategic/regional state per the
+ * result. A resolved outcome always clears any active encounter.
+ */
+function applyInterceptionOutcome(
+  campaign: CampaignState,
+  contact: UfoContact,
+  result: InterceptionResult,
+  finalInterceptorDamage: number,
+  reportDamage: number,
+): CampaignState {
+  const totalDamage = Math.max(0, Math.min(100, Math.floor(finalInterceptorDamage)));
+  const interceptor: InterceptorState = {
     damage: totalDamage,
     sorties: campaign.interceptor.sorties + 1,
     repairedAtHour: campaign.clock.elapsedHours + interceptorRepairHours(campaign, totalDamage),
   };
-  const report = makeInterceptionReport(
-    contact,
-    succeeded ? "crashed" : "escaped",
-    damage,
-    campaign.clock.elapsedHours,
-  );
-  if (!succeeded) {
+  const report = makeInterceptionReport(contact, result, reportDamage, campaign.clock.elapsedHours);
+  if (result === "escaped") {
     const regionalPanic = adjustRegionalPanic(campaign.regionalPanic, contact.region, 12, 1);
     const strategic = statusAfterStrategicChange({ ...campaign, regionalPanic }, {
       ...campaign.strategic,
@@ -222,6 +271,7 @@ export function interceptUfo(campaign: CampaignState): CampaignState {
       strategic,
       regionalPanic,
       ufoContact: undefined,
+      interception: undefined,
     };
   }
   return {
@@ -238,7 +288,157 @@ export function interceptUfo(campaign: CampaignState): CampaignState {
       status: "crashed",
       interceptedAtHour: campaign.clock.elapsedHours,
       expiresAtHour: campaign.clock.elapsedHours + CRASH_SITE_LIFETIME_HOURS,
-      interceptorDamage: damage,
+      interceptorDamage: reportDamage,
+    },
+    interception: undefined,
+  };
+}
+
+export function interceptUfo(campaign: CampaignState): CampaignState {
+  const forecast = interceptionForecast(campaign);
+  if (!forecast?.canLaunch) return campaign;
+  const contact = campaign.ufoContact!;
+  const result: InterceptionResult = forecast.succeeds ? "crashed" : "escaped";
+  const finalDamage = Math.min(100, campaign.interceptor.damage + forecast.damage);
+  return applyInterceptionOutcome(campaign, contact, result, finalDamage, forecast.damage);
+}
+
+/** Player choice during an interactive interception encounter. */
+export type InterceptionAction = "close" | "attack" | "disengage";
+
+function rollFraction(seed: number): number {
+  return (hash(seed) >>> 0) / 0x100000000;
+}
+
+function encounterRoundSeed(campaign: CampaignState, contact: UfoContact, round: number): number {
+  return (campaign.seed ^ (contact.missionSeed >>> 0) ^ (Math.max(0, round) * 0x9e3779b9)) >>> 0;
+}
+
+/** Outgoing interceptor damage at the current range; closer range hits harder. */
+function interceptorAttackDamage(range: number, mult: number, roundSeed: number): number {
+  const base = 10 + (ENCOUNTER_START_RANGE - range) * 8;
+  const factor = 0.6 + 0.4 * rollFraction(hash(roundSeed ^ ENCOUNTER_INTERCEPTOR_SALT));
+  return Math.max(1, Math.round(base * factor * mult));
+}
+
+/** Incoming UFO return fire at the current range; closer range is deadlier both ways. */
+function ufoReturnFireDamage(range: number, strength: number, mult: number, roundSeed: number): number {
+  const base = 5 + strength * 2 + (ENCOUNTER_START_RANGE - range) * 3;
+  const factor = 0.6 + 0.4 * rollFraction(hash(roundSeed ^ ENCOUNTER_UFO_SALT));
+  return Math.max(1, Math.round(base * factor * mult));
+}
+
+function encounterUfoHpMax(contact: UfoContact): number {
+  return 20 + contact.strength * 10;
+}
+
+function encounterInterceptorHp(campaign: CampaignState): number {
+  return Math.max(1, 100 - campaign.interceptor.damage);
+}
+
+/** An interactive, choice-based interception encounter is currently in progress. */
+export function canResolveInterception(campaign: CampaignState): boolean {
+  return campaign.interception !== undefined && campaign.ufoContact?.status === "engaging";
+}
+
+/**
+ * Begins an interactive interception against a tracked crash-site contact. Scales
+ * UFO HP from the contact's strength and interceptor HP from its current condition.
+ * No-op unless the contact is a tracked crashSite and the interceptor is ready.
+ */
+export function startInterceptionEncounter(campaign: CampaignState): CampaignState {
+  const contact = campaign.ufoContact;
+  if (!contact || contact.status !== "tracked") return campaign;
+  if (contactMissionType(contact) !== "crashSite") return campaign;
+  if (!isInterceptorReady(campaign)) return campaign;
+  const ufoHpMax = encounterUfoHpMax(contact);
+  const interceptorHp = encounterInterceptorHp(campaign);
+  const encounter: InterceptionEncounter = {
+    contactId: contact.id,
+    ufoHp: ufoHpMax,
+    ufoHpMax,
+    interceptorHp,
+    interceptorHpMax: 100,
+    range: ENCOUNTER_START_RANGE,
+    roundsElapsed: 0,
+    log: ["Interception engaged"],
+  };
+  return {
+    ...campaign,
+    ufoContact: { ...contact, status: "engaging" },
+    interception: encounter,
+  };
+}
+
+/**
+ * Resolves one round of an active encounter. "close" cuts range (improving future
+ * damage), "attack" exchanges fire at the current range, "disengage" returns the
+ * UFO to tracked without further interceptor damage. Terminal outcomes (UFO down
+ * or interceptor lost) reuse the shared auto-resolve resolver. No-op without an
+ * active engaging encounter.
+ */
+export function executeInterceptionAction(
+  campaign: CampaignState,
+  action: InterceptionAction,
+): CampaignState {
+  const encounter = campaign.interception;
+  const contact = campaign.ufoContact;
+  if (!encounter || !contact || contact.status !== "engaging") return campaign;
+
+  const round = encounter.roundsElapsed;
+  const roundLabel = `Round ${round + 1}`;
+
+  if (action === "disengage") {
+    return {
+      ...campaign,
+      ufoContact: { ...contact, status: "tracked" },
+      interception: undefined,
+    };
+  }
+
+  if (action === "close") {
+    const range = Math.max(0, encounter.range - 1);
+    return {
+      ...campaign,
+      interception: {
+        ...encounter,
+        range,
+        roundsElapsed: round + 1,
+        log: [...encounter.log, `${roundLabel}: closing to range ${range}.`],
+      },
+    };
+  }
+
+  const mult = difficultyConfig(campaign).interceptionDamageMult;
+  const roundSeed = encounterRoundSeed(campaign, contact, round);
+  const interceptorDmg = interceptorAttackDamage(encounter.range, mult, roundSeed);
+  const ufoDmg = ufoReturnFireDamage(encounter.range, contact.strength, mult, roundSeed);
+  const ufoHp = Math.max(0, encounter.ufoHp - interceptorDmg);
+  const interceptorHp = Math.max(0, encounter.interceptorHp - ufoDmg);
+  const log = [
+    ...encounter.log,
+    `${roundLabel}: interceptor hits ${contact.id} for ${interceptorDmg}; UFO returns ${ufoDmg}.`,
+  ];
+
+  // A simultaneous kill is resolved in the interceptor's favor (UFO forced down).
+  if (ufoHp <= 0) {
+    const finalInterceptorDamage = 100 - interceptorHp;
+    const reportDamage = Math.max(0, finalInterceptorDamage - campaign.interceptor.damage);
+    return applyInterceptionOutcome(campaign, contact, "crashed", finalInterceptorDamage, reportDamage);
+  }
+  if (interceptorHp <= 0) {
+    const reportDamage = Math.max(0, 100 - campaign.interceptor.damage);
+    return applyInterceptionOutcome(campaign, contact, "escaped", 100, reportDamage);
+  }
+
+  return {
+    ...campaign,
+    interception: {
+      ...encounter,
+      ufoHp,
+      interceptorHp,
+      roundsElapsed: round + 1,
+      log,
     },
   };
 }
@@ -298,7 +498,7 @@ function monthlyUpkeep(campaign: CampaignState): number {
   const rosterCost = livingSoldiers(campaign).length * 25;
   const facilityCost = summary.facilities * 12 + Math.floor(summary.staffAssigned * 1.5);
   const researchCost = campaign.activeResearch ? 35 : 0;
-  return rosterCost + facilityCost + researchCost;
+  return Math.round((rosterCost + facilityCost + researchCost) * difficultyConfig(campaign).upkeepMult);
 }
 
 function fundingPressure(threat: number): number {
@@ -316,6 +516,11 @@ function regionalFundingPressure(campaign: CampaignState): number {
   if (max >= 75) return 50;
   if (average >= 60) return 30;
   return 0;
+}
+
+/** Difficulty-scaled funding pressure multiplier; veteran/no-difficulty is identity (legacy math). */
+function fundingPressureMult(campaign: CampaignState): number {
+  return difficultyConfig(campaign).fundingPressureMult;
 }
 
 function makeFundingReport(
@@ -356,8 +561,9 @@ function applyFundingReports(campaign: CampaignState, clock: CampaignClock): Cam
     const reportHour = next.clock.lastFundingHour + FUNDING_REPORT_INTERVAL_HOURS;
     const income = next.strategic.funding;
     const upkeep = monthlyUpkeep(next);
-    const threatPressure = fundingPressure(next.strategic.threat);
-    const panicPressure = regionalFundingPressure(next);
+    const pressureMult = fundingPressureMult(next);
+    const threatPressure = Math.round(fundingPressure(next.strategic.threat) * pressureMult);
+    const panicPressure = Math.round(regionalFundingPressure(next) * pressureMult);
     const pressure = threatPressure + panicPressure;
     const strategic: StrategicState = statusAfterStrategicChange(next, {
       ...next.strategic,
@@ -373,6 +579,24 @@ function applyFundingReports(campaign: CampaignState, clock: CampaignClock): Cam
     };
   }
   return next;
+}
+
+/**
+ * Deterministic mission type for a freshly detected contact. ~70% crashSite,
+ * ~18% landedUfo, ~12% terror. When regional or campaign threat is very high
+ * (>= 85) a rare roll converts the spawn into a baseDefense contact. The roll
+ * is derived from the same seed mix createUfoContact uses, so spawn count and
+ * timing are untouched.
+ */
+function rollContactMissionType(campaign: CampaignState, detectedAtHour: number): MissionType {
+  const base = hash(campaign.seed ^ (campaign.missionsAttempted * 0x9e3779b9) ^ detectedAtHour);
+  const roll = hash(base ^ MISSION_TYPE_ROLL_SALT);
+  const threat = Math.max(campaign.strategic.threat, highestRegionalPanic(campaign).panic);
+  if (threat >= 85 && roll % 100 < 6) return "baseDefense";
+  const bucket = roll % 100;
+  if (bucket < 70) return "crashSite";
+  if (bucket < 88) return "landedUfo";
+  return "terror";
 }
 
 export function advanceGeoscape(
@@ -397,16 +621,18 @@ export function advanceGeoscape(
   }
 
   if (!contact && clock.elapsedHours >= clock.lastContactHour + contactInterval(campaign)) {
-    contact = createUfoContact(nextCampaign, clock.elapsedHours);
+    const missionType = rollContactMissionType(nextCampaign, clock.elapsedHours);
+    contact = createUfoContact(nextCampaign, clock.elapsedHours, missionType);
     clock = { ...clock, lastContactHour: clock.elapsedHours };
   }
 
-  return repairInterceptor(completeFinishedConstruction(completeFinishedManufacturing(recoverWoundedSoldiers(completeFinishedResearch({
+  const composed = repairInterceptor(completeFinishedConstruction(completeFinishedManufacturing(recoverWoundedSoldiers(completeFinishedResearch({
     ...nextCampaign,
     clock,
     strategic,
     ufoContact: contact,
   })))));
+  return restockMarket(composed, Math.max(0, Math.floor(hours)));
 }
 
 export function formatCampaignClock(clock: CampaignClock): string {
