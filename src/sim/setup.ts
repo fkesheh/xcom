@@ -80,6 +80,7 @@ function spawnUnit(
     ammo: weapon?.magazineSize ?? 0,
     alive: true,
     reserve: "none",
+    stance: "stand",
     sightRange: template.sightRange,
     visionHalfAngleDeg: template.visionHalfAngleDeg,
   };

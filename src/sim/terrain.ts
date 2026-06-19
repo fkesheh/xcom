@@ -46,8 +46,10 @@ function tile(t: TileType): TileType {
  * Tactical flag conventions:
  *  - WALKABLE OPEN (cover 0): plain ground / floors / roads.
  *  - PARTIAL COVER (cover 1): fence + window block move, NOT sight (shoot
- *    over/through); crate + barrel block move, NOT sight; rubble + hedge + bush
- *    are walkable; hedge/bush block SIGHT (concealment).
+ *    over/through); crate + barrel + sandbags block move, NOT sight; rubble +
+ *    hedge + bush are walkable; hedge/bush block SIGHT (concealment).
+ *  - LOW FULL COVER (cover 2): low_wall blocks move but NOT sight — full cover
+ *    you can still fire OVER (a concrete barrier / field wall).
  *  - FULL COVER / BLOCKERS (cover 2): walls / rock / tree / hulls block move AND
  *    sight.
  *  - OPENINGS: door / ufo_door are walkable and do NOT block sight.
@@ -113,6 +115,12 @@ export const TILES = {
     id: "barrel", label: "Barrel", render: "barrel",
     blocksMove: true, blocksSight: false, moveCost: 0, cover: 1, destructible: true,
   }),
+  // Sandbag emplacement: half cover that blocks movement but NOT sight. A
+  // universal defensive prop the generator scatters as tactical cover.
+  sandbags: tile({
+    id: "sandbags", label: "Sandbags", render: "sandbags",
+    blocksMove: true, blocksSight: false, moveCost: 0, cover: 1, destructible: true,
+  }),
   // Walkable difficult terrain that still grants partial cover.
   rubble: tile({
     id: "rubble", label: "Rubble", render: "rubble",
@@ -126,6 +134,15 @@ export const TILES = {
   bush: tile({
     id: "bush", label: "Bush", render: "bush",
     blocksMove: false, blocksSight: true, moveCost: 5, cover: 1, destructible: true,
+  }),
+
+  // -- Low full cover / shoot-over (cover 2): block move, NOT sight --------
+  // A low wall / concrete barrier: grants FULL cover and can't be entered, yet
+  // can be fired OVER (blocksSight false). Distinct from the sight-blocking
+  // walls below, which fully occlude line of fire as well as movement.
+  low_wall: tile({
+    id: "low_wall", label: "Low Wall", render: "low_wall",
+    blocksMove: true, blocksSight: false, moveCost: 0, cover: 2, destructible: true,
   }),
 
   // -- Full cover / blockers (cover 2): block move AND sight ---------------
@@ -181,7 +198,9 @@ export const RENDER_CATEGORIES: readonly string[] = [
   "grass", "soil", "crop", "road", "pavement", "sand",
   "floor_wood", "floor_concrete", "ufo_floor", "dropship_floor",
   // partial cover
-  "fence", "window", "crate", "barrel", "rubble", "hedge", "bush",
+  "fence", "window", "crate", "barrel", "sandbags", "rubble", "hedge", "bush",
+  // low full cover / shoot-over
+  "low_wall",
   // full cover / blockers
   "wall_building", "wall_interior", "rock", "tree", "ufo_hull", "dropship_hull",
   // openings
@@ -347,6 +366,8 @@ const FARMLAND_PALETTE: TileType[] = [
   TILES.wall_interior,
   TILES.tree,
   TILES.rock,
+  TILES.sandbags,
+  TILES.low_wall,
 ];
 
 const FARMLAND_BLOCKS: TerrainBlock[] = [
@@ -432,6 +453,8 @@ const URBAN_PALETTE: TileType[] = [
   TILES.wall_building,
   TILES.wall_interior,
   TILES.tree,
+  TILES.sandbags,
+  TILES.low_wall,
 ];
 
 const URBAN_BLOCKS: TerrainBlock[] = [
@@ -517,6 +540,8 @@ const DESERT_PALETTE: TileType[] = [
   TILES.wall_interior,
   TILES.tree,
   TILES.rock,
+  TILES.sandbags,
+  TILES.low_wall,
 ];
 
 const DESERT_BLOCKS: TerrainBlock[] = [

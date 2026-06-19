@@ -17,7 +17,7 @@
  *     which makes every returned spawn mutually reachable by construction.
  */
 
-import type { Grid, Vec2 } from "./types";
+import type { Grid, TileType, Vec2 } from "./types";
 import type { Rng } from "./rng";
 import type { Legend, TerrainBlock } from "./terrain";
 import {
@@ -355,6 +355,152 @@ function collectScatter(
 }
 
 // ---------------------------------------------------------------------------
+// Cover scatter
+// ---------------------------------------------------------------------------
+
+/**
+ * Outdoor open ground ids the cover scatter may upgrade into a cover prop.
+ * Restricted to natural ground so cover lands in the fighting lanes — beside
+ * roads, around structures — and never on the carved road corridor (the trunk
+ * that guarantees dropship-to-UFO connectivity), on floors, or inside a
+ * structure. Scattered cover is tactical furniture, not a re-skin of walls.
+ */
+const SCATTER_GROUND_IDS: ReadonlySet<string> = new Set([
+  "grass", "soil", "crop", "sand", "pavement",
+]);
+
+/** Minimum chebyshev spacing between two cover cluster anchors (no solid walls). */
+const COVER_SPACING = 2;
+/** Margin around the dropship/UFO rects kept clear of scattered cover. */
+const COVER_KEEP_CLEAR = 1;
+/** Probability a placed anchor grows a single adjacent buddy (a 2-tile nest). */
+const COVER_CLUSTER_CHANCE = 0.2;
+/**
+ * Fraction of the feature-adjacent candidate pool turned into cover. Kept low so
+ * cover never chokes movement: a tactical accent along roads and walls, not a maze.
+ */
+const COVER_FRACTION = 0.035;
+/** Hard caps so density stays tactically meaningful without choking movement. */
+const COVER_MIN = 4;
+const COVER_MAX = 18;
+
+/** 8-way offsets used to grow a 2-tile cover cluster off a placed anchor. */
+const CLUSTER_DIRS: ReadonlyArray<readonly [number, number]> = [
+  [1, 0], [-1, 0], [0, 1], [0, -1],
+  [1, 1], [1, -1], [-1, 1], [-1, -1],
+];
+
+/** True when (x, y) borders at least one non-ground feature (road/structure/cover). */
+function hasFeatureNeighbor(grid: Grid, x: number, y: number): boolean {
+  for (const [dx, dy] of CLUSTER_DIRS) {
+    const t = tileTypeAt(grid, x + dx, y + dy);
+    if (t && !SCATTER_GROUND_IDS.has(t.id)) return true;
+  }
+  return false;
+}
+
+/**
+ * Deterministically scatter half/full cover props (sandbags + low walls) across
+ * outdoor open ground. Consumes only `rng` (same seed => identical placements),
+ * never overwrites roads, structures, floors, spawns, or the UFO/dropship
+ * footprints, and only ever upgrades bare natural ground (cover 0) so no
+ * existing cover/wall is lost. Cover is placed only where it borders a feature
+ * (a road, structure, or existing cover) — the tactical seams — so open movement
+ * lanes stay clear; clusters are spaced at least {@link COVER_SPACING} apart so
+ * cover never walls off movement, and the road trunk stays open, keeping the
+ * dropship-to-UFO connection intact. Run before the connectivity flood so cover
+ * tiles are naturally excluded from the spawn candidates.
+ */
+function scatterCover(
+  grid: Grid,
+  palette: TileType[],
+  rng: Rng,
+  avoid: ReadonlyArray<MapRect>,
+): void {
+  const halfIdx = paletteIndexById(palette, "sandbags");
+  const fullIdx = paletteIndexById(palette, "low_wall");
+  if (halfIdx < 0 && fullIdx < 0) return;
+
+  // Choose the cover palette index for the next prop (favour half cover: it is
+  // more common and less movement-restricting than a full shoot-over wall).
+  const chooseKind = (): number => {
+    if (halfIdx < 0) return fullIdx;
+    if (fullIdx < 0) return halfIdx;
+    return rng.chance(0.7) ? halfIdx : fullIdx;
+  };
+
+  // True when (x, y) sits inside any avoid rect expanded by COVER_KEEP_CLEAR.
+  const isKeptClear = (x: number, y: number): boolean => {
+    for (const r of avoid) {
+      if (
+        x >= r.x - COVER_KEEP_CLEAR &&
+        x < r.x + r.w + COVER_KEEP_CLEAR &&
+        y >= r.y - COVER_KEEP_CLEAR &&
+        y < r.y + r.h + COVER_KEEP_CLEAR
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Row-major candidate scan gives a deterministic order before the shuffle.
+  const candidates: Vec2[] = [];
+  for (let y = 0; y < grid.height; y++) {
+    for (let x = 0; x < grid.width; x++) {
+      const tile = tileTypeAt(grid, x, y);
+      if (!tile || !SCATTER_GROUND_IDS.has(tile.id)) continue;
+      if (isKeptClear(x, y)) continue;
+      // Only nest cover against a feature (road / structure / cover) — the
+      // tactical seams — so open movement lanes stay clear and clusters read as
+      // props beside roads and around buildings, not a uniform grid.
+      if (!hasFeatureNeighbor(grid, x, y)) continue;
+      candidates.push({ x, y });
+    }
+  }
+  if (candidates.length === 0) return;
+  rng.shuffle(candidates);
+
+  const target = Math.max(
+    COVER_MIN,
+    Math.min(COVER_MAX, Math.round(candidates.length * COVER_FRACTION)),
+  );
+  const anchors: Vec2[] = [];
+  const isCover = (x: number, y: number): boolean => {
+    const t = tileTypeAt(grid, x, y);
+    return !!t && t.cover > 0;
+  };
+  const spacedFrom = (p: Vec2, pts: ReadonlyArray<Vec2>): boolean =>
+    pts.every((a) => cheb(a, p) >= COVER_SPACING);
+
+  for (const c of candidates) {
+    if (anchors.length >= target) break;
+    if (isCover(c.x, c.y) || !spacedFrom(c, anchors)) continue;
+    const kind = chooseKind();
+    setTile(grid, c.x, c.y, kind);
+    anchors.push(c);
+
+    // Optionally grow one adjacent buddy to form a small nest. The buddy may
+    // sit next to its parent but must stay spaced from every other anchor.
+    if (!rng.chance(COVER_CLUSTER_CHANCE)) continue;
+    const dirs = [...CLUSTER_DIRS];
+    rng.shuffle(dirs);
+    for (const [dx, dy] of dirs) {
+      const bx = c.x + dx;
+      const by = c.y + dy;
+      if (!inBounds(grid, bx, by)) continue;
+      const bt = tileTypeAt(grid, bx, by);
+      if (!bt || !SCATTER_GROUND_IDS.has(bt.id) || isCover(bx, by)) continue;
+      if (isKeptClear(bx, by)) continue;
+      if (!spacedFrom({ x: bx, y: by }, anchors.slice(0, -1))) continue;
+      setTile(grid, bx, by, kind);
+      anchors.push({ x: bx, y: by });
+      break;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Generator
 // ---------------------------------------------------------------------------
 
@@ -426,6 +572,15 @@ export function generateMap(rng: Rng, opts: GenerateMapOptions = {}): GeneratedM
   const anchor = firstTileById(grid, dsRect, "dropship_floor") ?? anyWalkableTile(grid);
   const ufoInterior = firstTileById(grid, ufoRect, "ufo_floor") ?? { x: ufoRect.x, y: ufoRect.y };
   carveCorridor(grid, anchor, ufoInterior, walkIndex);
+
+  // Scatter deterministic tactical cover (sandbags + low walls) over outdoor
+  // open ground — beside the road trunk, around structures — keeping spawns,
+  // the corridor, and the UFO/dropship footprints clear. Run before the flood
+  // so cover tiles are naturally excluded from the spawn candidates. Cover
+  // randomness is branched off the main stream so it never perturbs the downstream
+  // unit-setup / combat rolls (same seed => identical cover AND identical battle).
+  const coverRng = rng.clone();
+  scatterCover(grid, palette, coverRng, [dsRect, ufoRect]);
 
   const comp = floodFill(grid, anchor);
 

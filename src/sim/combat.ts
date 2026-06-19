@@ -16,6 +16,7 @@
 import type {
   BattleState,
   BlastHit,
+  Grid,
   PanicBehavior,
   ShotKind,
   ShotMode,
@@ -26,8 +27,9 @@ import type {
   Vec2,
   Weapon,
 } from "./types";
-import { COMBAT, MORALE } from "./types";
+import { COMBAT, COVER, MORALE, STANCE } from "./types";
 import { lineOfFire } from "./los";
+import { tileTypeAt } from "./grid";
 
 function clamp(value: number, min: number, max: number): number {
   if (value < min) return min;
@@ -64,9 +66,12 @@ export function effectiveAccuracy(
     dist <= weapon.range
       ? 1
       : Math.max(0.05, 1 - (dist - weapon.range) * COMBAT.RANGE_FALLOFF_PER_TILE);
-  return clamp01(
-    (shooter.stats.firingAccuracy / 100) * (mode.accuracy / 100) * rangeFactor,
-  );
+  // Kneeling steadies the aim: the classic-scale bonus is added to the firer's
+  // skill before scaling, so a 60-accuracy kneel shoots like an 80-accuracy stand.
+  const skill =
+    shooter.stats.firingAccuracy +
+    (shooter.stance === "kneel" ? STANCE.KNEEL_ACCURACY_BONUS : 0);
+  return clamp01((skill / 100) * (mode.accuracy / 100) * rangeFactor);
 }
 
 /** Angular spread (radians) for a given effective accuracy. */
@@ -81,18 +86,22 @@ export function targetHalfAngle(dist: number): number {
 
 /**
  * Per-shot hit probability in [MIN_HIT_CHANCE, MAX_HIT_CHANCE]. Monotonic:
- * closer => higher, more accurate => higher.
+ * closer => higher, more accurate => higher. `defense` (default 0) is the
+ * cover + kneeling-target reduction in [0, 0.8]; it shrinks the raw odds BEFORE
+ * the MIN/MAX cap, so the preview and the resolve roll agree exactly.
  */
 export function hitChance(
   shooter: Unit,
   weapon: Weapon,
   mode: ShotMode,
   dist: number,
+  defense: number = 0,
 ): number {
   const acc = effectiveAccuracy(shooter, weapon, mode, dist);
   const spread = spreadForAccuracy(acc);
   const half = targetHalfAngle(dist);
-  return clamp(half / spread, COMBAT.MIN_HIT_CHANCE, COMBAT.MAX_HIT_CHANCE);
+  const defended = (half / spread) * (1 - defense);
+  return clamp(defended, COMBAT.MIN_HIT_CHANCE, COMBAT.MAX_HIT_CHANCE);
 }
 
 /** TU a firing mode costs this unit (ceil of a percentage of its max TU). */
@@ -113,6 +122,49 @@ export function findMode(weapon: Weapon, kind: ShotKind): ShotMode | undefined {
 /** First LIVING unit standing on the given tile, or undefined. */
 function occupantAt(state: BattleState, pos: Vec2): Unit | undefined {
   return state.units.find((u) => u.alive && u.pos.x === pos.x && u.pos.y === pos.y);
+}
+
+/**
+ * Best directional cover protecting `defender` from a shot fired by `shooter`.
+ * Pure: no rng, no mutation. Looks at the 1-2 cardinal neighbors of the defender
+ * that sit between it and the shooter (sign(shooter - defender) per axis) and
+ * returns the max cover value among them, or 0 when none provides cover. A
+ * diagonal shooter checks both axis neighbors (take the max); a cardinal one
+ * checks only the single tile it must fire across.
+ */
+export function coverDefenseFor(grid: Grid, defender: Vec2, shooter: Vec2): 0 | 1 | 2 {
+  const dx = Math.sign(shooter.x - defender.x);
+  const dy = Math.sign(shooter.y - defender.y);
+  let best: 0 | 1 | 2 = 0;
+  if (dx !== 0) {
+    const tile = tileTypeAt(grid, defender.x + dx, defender.y);
+    if (tile && tile.cover > best) best = tile.cover;
+  }
+  if (dy !== 0) {
+    const tile = tileTypeAt(grid, defender.x, defender.y + dy);
+    if (tile && tile.cover > best) best = tile.cover;
+  }
+  return best;
+}
+
+/**
+ * Total hit-chance reduction for a shot arriving at `defenderPos` from
+ * `shooterPos`: directional cover plus the smaller-profile bonus when the
+ * defender is kneeling. Capped at 0.8 so a shot always keeps at least 20% of its
+ * base odds. Pure apart from reading the defender's stance field.
+ */
+function totalDefenseFor(
+  grid: Grid,
+  defenderPos: Vec2,
+  shooterPos: Vec2,
+  defender: Unit | undefined,
+): number {
+  const cover = coverDefenseFor(grid, defenderPos, shooterPos);
+  const coverDefense =
+    cover === 2 ? COVER.FULL_DEFENSE : cover === 1 ? COVER.HALF_DEFENSE : 0;
+  const stanceDefense =
+    defender && defender.stance === "kneel" ? STANCE.KNEEL_TARGET_DEFENSE : 0;
+  return Math.min(0.8, coverDefense + stanceDefense);
 }
 
 /**
@@ -142,7 +194,9 @@ export function previewShot(
   const tuCost = tuCostForMode(shooter, mode);
   const ammoCost = mode.shots;
   const dist = tileDistance(shooter.pos, targetPos);
-  const chance = hitChance(shooter, weapon, mode, dist);
+  const defender = occupantAt(state, targetPos);
+  const defense = totalDefenseFor(state.grid, targetPos, shooter.pos, defender);
+  const chance = hitChance(shooter, weapon, mode, dist, defense);
   const expectedHits = chance * mode.shots;
 
   if (!lineOfFire(state.grid, shooter.pos, targetPos).clear) {
@@ -203,15 +257,18 @@ export function resolveShot(
   const dist = tileDistance(shooter.pos, targetPos);
   const acc = effectiveAccuracy(shooter, weapon, mode, dist);
   const spread = spreadForAccuracy(acc);
+  const occupant = occupantAt(state, targetPos);
   // Sample against the SAME probability the preview reports. The clamped hit
   // chance maps back to an effective half-angle (chance * spread); when the
   // chance is not clamped this is exactly the geometric half-angle, so honest
   // cone behaviour is preserved while the MIN/MAX floor + ceiling (e.g. the
   // 0.99 "nothing is certain" cap) apply identically to preview and resolve.
-  const chance = hitChance(shooter, weapon, mode, dist);
+  // Cover + a kneeling target shrink the odds through the SAME totalDefense so
+  // the displayed chance matches what the dice actually roll.
+  const defense = totalDefenseFor(state.grid, targetPos, shooter.pos, occupant);
+  const chance = hitChance(shooter, weapon, mode, dist, defense);
   const effHalf = chance * spread;
 
-  const occupant = occupantAt(state, targetPos);
   const targetId: UnitId | null = occupant ? occupant.id : null;
 
   for (let i = 0; i < mode.shots; i++) {

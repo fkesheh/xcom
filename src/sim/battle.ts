@@ -25,9 +25,10 @@ import type {
   ShotPreview,
   Unit,
   UnitId,
+  UnitStance,
   Vec2,
 } from "./types";
-import { DIR8_VECTORS, MORALE, TU_COST } from "./types";
+import { DIR8_VECTORS, MORALE, STANCE, TU_COST } from "./types";
 import { cellIndex, moveCost } from "./grid";
 import { blocksMove, inBounds } from "./grid";
 import { canSee, dir8Towards, lineOfFire, visibleEnemyIds, visibleTiles } from "./los";
@@ -278,6 +279,26 @@ export function executeFace(state: BattleState, unitId: UnitId, dir: Dir8): Game
 }
 
 /**
+ * Toggle a unit's body stance (stand <-> kneel) for a fixed STANCE.TOGGLE_TU.
+ * Rejected with `blocked` when the unit can't afford it; otherwise spends the
+ * TU, records the stance, and emits a single stanceChanged event. Stance feeds
+ * the hit model (firer accuracy, defender profile) and the move cost (see
+ * combat.ts and executeMove).
+ */
+export function executeSetStance(
+  state: BattleState,
+  unit: Unit,
+  stance: UnitStance,
+): GameEvent[] {
+  void state; // kept for API symmetry with the other executors; stance is unit-local.
+  const cost = STANCE.TOGGLE_TU;
+  if (unit.tu < cost) return [{ type: "blocked", reason: "not enough TU" }];
+  unit.tu -= cost;
+  unit.stance = stance;
+  return [{ type: "stanceChanged", unitId: unit.id, stance, tuLeft: unit.tu }];
+}
+
+/**
  * Walk a unit toward `to` along the cheapest path (other living units block
  * intermediate tiles; the goal itself is allowed as a destination). Each step
  * pays its TU cost (diagonal = floor(base * DIAGONAL_MULT)); the walk stops the
@@ -333,7 +354,11 @@ export function executeMove(state: BattleState, unitId: UnitId, to: Vec2): GameE
 
     const diagonal = step.x !== unit.pos.x && step.y !== unit.pos.y;
     const base = moveCost(state.grid, step.x, step.y);
-    const cost = diagonal ? Math.floor(base * TU_COST.DIAGONAL_MULT) : base;
+    const diagonalMult = diagonal ? TU_COST.DIAGONAL_MULT : 1;
+    // Kneeling moves are costlier (the unit isn't up and walking); combine the
+    // multipliers before flooring so standing (mult 1) is byte-for-byte unchanged.
+    const stanceMult = unit.stance === "kneel" ? STANCE.KNEEL_MOVE_MULT : 1;
+    const cost = Math.floor(base * diagonalMult * stanceMult);
     if (!Number.isFinite(cost) || cost > unit.tu || unit.tu - cost < reservedTU) break;
 
     const from: Vec2 = { x: unit.pos.x, y: unit.pos.y };
@@ -931,8 +956,7 @@ export function applyCommand(state: BattleState, cmd: Command): GameEvent[] {
       unit.reserve = cmd.reserve;
       return [];
     case "setStance":
-      // TODO(tactical-depth): implement in the sim-core wave.
-      return [{ type: "blocked", reason: "stance not yet implemented" }];
+      return executeSetStance(state, unit, cmd.stance);
     case "throwItem":
       return performThrow(state, unit, cmd.target, cmd.itemId);
     case "useItem":

@@ -50,7 +50,7 @@ import {
   tileTypeAt,
   TU_COST,
 } from "../src/sim/index";
-import type { BattleState, GameEvent, Unit, Vec2 } from "../src/sim/types";
+import type { BattleState, GameEvent, ShotKind, Unit, Vec2 } from "../src/sim/types";
 
 // ---------------------------------------------------------------------------
 // Shared constants & helpers
@@ -67,6 +67,14 @@ function cheb(a: Vec2, b: Vec2): number {
 function dist(a: Vec2, b: Vec2): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
+
+/**
+ * Grenade tuning; mirrors the frag entry in src/sim/content.ts (blast radius +
+ * throw range are not re-exported through the sim barrel, so the auto-player
+ * reads them here rather than reaching into the content table by path).
+ */
+const GRENADE_BLAST_RADIUS = 2;
+const GRENADE_THROW_RANGE = 8;
 
 /** Seed a campaign with a crashed crash-site UFO contact (the launchable state). */
 function campaignWithCrashedContact(seed: number, difficulty: DifficultyLevel = "veteran"): CampaignState {
@@ -100,25 +108,6 @@ function stepCost(state: BattleState, from: Vec2, to: Vec2): number {
   return diagonal ? Math.floor(base * TU_COST.DIAGONAL_MULT) : base;
 }
 
-function furthestAffordable(
-  state: BattleState,
-  unit: Unit,
-  path: Vec2[],
-  enemyPos: Vec2,
-): Vec2 | undefined {
-  let cost = 0;
-  let prev = unit.pos;
-  let best: Vec2 | undefined;
-  for (const step of path) {
-    cost += stepCost(state, prev, step);
-    if (cost > unit.tu) break;
-    prev = step;
-    const isEnemyTile = step.x === enemyPos.x && step.y === enemyPos.y;
-    if (!isEnemyTile && !occupiedByOther(state, unit.id, step.x, step.y)) best = { ...step };
-  }
-  return best;
-}
-
 function nearest(from: Vec2, units: Unit[]): Unit | undefined {
   let best: Unit | undefined;
   let bestD = Infinity;
@@ -132,6 +121,123 @@ function nearest(from: Vec2, units: Unit[]): Unit | undefined {
   return best;
 }
 
+/**
+ * Best grenade impact tile for `thrower`, or undefined when no throw is worth
+ * making. A throw is worth making when the blast covers >=2 living enemies OR a
+ * single heavy (sentinel-class) whose HP auto-fire struggles to burn down, AND
+ * no living player (the thrower included) is caught in it, so the squad never
+ * frags itself. Candidate tiles are each visible enemy's tile plus its 8
+ * neighbours; we keep the one within throw range with the greatest total enemy
+ * HP in blast, breaking ties deterministically (lowest y, then x) like the
+ * alien AI's own grenade picker. Pure read of state.
+ */
+function bestGrenadeTile(
+  state: BattleState,
+  thrower: Unit,
+  visibleEnemies: Unit[],
+): Vec2 | undefined {
+  if (!thrower.items?.some((i) => i.itemId === "grenade" && i.uses > 0)) return undefined;
+  const allEnemies = livingUnits(state, "enemy");
+  const allPlayers = livingUnits(state, "player");
+
+  let best: { tile: Vec2; value: number } | undefined;
+  for (const e of visibleEnemies) {
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const tile: Vec2 = { x: e.pos.x + dx, y: e.pos.y + dy };
+        if (cheb(thrower.pos, tile) > GRENADE_THROW_RANGE) continue;
+        let caught = 0;
+        let hpValue = 0;
+        for (const o of allEnemies) {
+          if (cheb(o.pos, tile) <= GRENADE_BLAST_RADIUS) {
+            caught++;
+            hpValue += o.hp;
+          }
+        }
+        // >=2 hostiles, or a lone heavy worth a frag to one-shot.
+        if (caught < 2 && hpValue < 40) continue;
+        // Safety: the blast must not catch any living player (thrower included).
+        let safe = true;
+        for (const p of allPlayers) {
+          if (cheb(p.pos, tile) <= GRENADE_BLAST_RADIUS) {
+            safe = false;
+            break;
+          }
+        }
+        if (!safe) continue;
+        if (
+          !best ||
+          hpValue > best.value ||
+          (hpValue === best.value &&
+            (tile.y < best.tile.y || (tile.y === best.tile.y && tile.x < best.tile.x)))
+        ) {
+          best = { tile: { x: tile.x, y: tile.y }, value: hpValue };
+        }
+      }
+    }
+  }
+  return best?.tile;
+}
+
+/**
+ * Walk `unit` toward `destTarget` along the cheapest path, but never closer than
+ * `minCheb` (chebyshev) to the destination: the squad wants to reach engagement
+ * range, not charge into a point-blank plasma kill-zone. Pass minCheb 0 to
+ * advance all the way (used when hunting an unseen enemy to regain LOS). Returns
+ * true when the unit actually moved. Mirrors furthestAffordable's cost rule.
+ */
+function advanceCapped(
+  state: BattleState,
+  unit: Unit,
+  destTarget: Vec2,
+  minCheb: number,
+): boolean {
+  const result = findPath(state.grid, unit.pos, destTarget, {
+    isBlocked: (x, y) => occupiedByOther(state, unit.id, x, y),
+  });
+  if (!result || result.path.length === 0) return false;
+  let cost = 0;
+  let prev: Vec2 = unit.pos;
+  let best: Vec2 | undefined;
+  for (const step of result.path) {
+    cost += stepCost(state, prev, step);
+    if (cost > unit.tu) break;
+    prev = step;
+    if (cheb(step, destTarget) < minCheb) break; // do not close inside minCheb
+    const isTargetTile = step.x === destTarget.x && step.y === destTarget.y;
+    if (!isTargetTile && !occupiedByOther(state, unit.id, step.x, step.y)) best = { ...step };
+  }
+  if (!best) return false;
+  const tuBefore = unit.tu;
+  applyCommand(state, { type: "move", unitId: unit.id, to: best });
+  return unit.tu !== tuBefore;
+}
+
+/** Firing modes tried, in order of preference for the auto-player's damage output. */
+const FIRE_MODES: readonly ShotKind[] = ["auto", "snap", "aimed"];
+
+/**
+ * Tactics-aware auto-player. The cover-aware, survival-first alien AI plus
+ * scattered cover made the old greedy "snap the nearest visible target, else
+ * close along the cheapest path" driver lose the squad almost every seed: the
+ * plasma hostiles out-range (14 vs 12) and out-damage (40 vs 26) the rifles, so
+ * a straight attrition race is lost. This driver instead wins the exchange by
+ * leaning on the squad's actual advantages:
+ *   - GRENADES first: a frag (56 dmg, radius 2) thrown into a cluster or at a
+ *     lone sentinel one-shots hostiles that rifle fire would spend rounds on,
+ *     ignores line of fire, and draws no reaction fire -- the safe opening blow.
+ *   - AUTO fire up close: the rifle's auto mode (3 rounds) dominates snap on
+ *     expected hits at engagement range, so the picked mode is the one with the
+ *     highest expected hits; long-range pot-shots are skipped to preserve TU for
+ *     closing into range.
+ *   - Hold at engagement range (cheb 7): close enough to throw and to hit, far
+ *     enough to keep the aliens' hit chance down; hunt uncapped when no enemy is
+ *     in sight to regain LOS.
+ *   - Medkit a critically-wounded adjacent ally and reload when the magazine is
+ *     empty, so the squad sustains through the fight.
+ * Everything stays fully deterministic: fixed seeds, pure cover/stance-free
+ * reads, and every action goes through the public applyCommand API.
+ */
 function takePlayerTurn(state: BattleState): void {
   for (let guard = 0; guard < 60; guard++) {
     const players = livingUnits(state, "player").filter((u) => u.tu > 0);
@@ -142,32 +248,93 @@ function takePlayerTurn(state: BattleState): void {
     for (const pu of players) {
       if (pu.tu <= 0 || state.status !== "playing") continue;
 
-      const targets = enemies
-        .filter((e) => e.alive && canSee(state.grid, pu, e.pos))
-        .sort((a, b) => dist(pu.pos, a.pos) - dist(pu.pos, b.pos) || a.id - b.id);
-
-      let didShoot = false;
-      for (const t of targets) {
-        if (previewPlayerShot(state, pu.id, t.pos, "snap").possible) {
-          applyCommand(state, { type: "shoot", unitId: pu.id, target: t.pos, mode: "snap" });
-          didShoot = true;
-          acted = true;
-          break;
+      // Medkit a critically-wounded adjacent ally before fighting on.
+      if (pu.items?.some((i) => i.itemId === "medkit" && i.uses > 0)) {
+        let patient: Unit | undefined;
+        for (const ally of livingUnits(state, "player")) {
+          if (ally.id === pu.id || !ally.alive) continue;
+          if (cheb(pu.pos, ally.pos) > 1) continue;
+          if (ally.hp < ally.stats.health * 0.6) {
+            patient = ally;
+            break;
+          }
+        }
+        if (patient) {
+          const used = applyCommand(state, {
+            type: "useItem",
+            unitId: pu.id,
+            targetId: patient.id,
+            itemId: "medkit",
+          });
+          if (used.some((e) => e.type === "itemUsed")) acted = true;
         }
       }
-      if (didShoot) continue;
 
-      const target = nearest(pu.pos, enemies);
-      if (!target) continue;
-      const result = findPath(state.grid, pu.pos, target.pos, {
-        isBlocked: (x, y) => occupiedByOther(state, pu.id, x, y),
-      });
-      if (!result || result.path.length === 0) continue;
-      const dest = furthestAffordable(state, pu, result.path, target.pos);
-      if (!dest) continue;
-      const tuBefore = pu.tu;
-      applyCommand(state, { type: "move", unitId: pu.id, to: dest });
-      if (pu.tu !== tuBefore) acted = true;
+      // Visible enemies, ordered for focus fire: lowest current HP first (the
+      // most killable target this pass), then nearest, then id.
+      const targets = enemies
+        .filter((e) => e.alive && canSee(state.grid, pu, e.pos))
+        .sort((a, b) => a.hp - b.hp || dist(pu.pos, a.pos) - dist(pu.pos, b.pos) || a.id - b.id);
+
+      // Grenade tempo: the highest-value action when a worthwhile, safe target
+      // exists. Lobbed before shooting; recompute per unit so once a cluster is
+      // gone the next unit finds nothing worth throwing at.
+      const grenadeTile = bestGrenadeTile(state, pu, targets);
+      if (grenadeTile) {
+        const thrown = applyCommand(state, {
+          type: "throwItem",
+          unitId: pu.id,
+          target: grenadeTile,
+          itemId: "grenade",
+        });
+        if (thrown.some((e) => e.type === "itemThrown")) {
+          acted = true;
+          continue;
+        }
+      }
+
+      // Fire the affordable target+mode with the highest expected hits, but only
+      // inside engagement range (or at genuinely high odds): outside that, save
+      // the TU for closing. Auto's 3 rounds usually beat snap up close.
+      let bestShot: { target: Unit; mode: ShotKind; eh: number } | undefined;
+      for (const t of targets) {
+        const inRange = cheb(pu.pos, t.pos) <= 9;
+        for (const mode of FIRE_MODES) {
+          const pv = previewPlayerShot(state, pu.id, t.pos, mode);
+          if (!pv.possible) continue;
+          if (!inRange && pv.hitChance < 0.4) continue;
+          if (!bestShot || pv.expectedHits > bestShot.eh) {
+            bestShot = { target: t, mode, eh: pv.expectedHits };
+          }
+        }
+        if (bestShot) break; // fire at the first (lowest-HP) target we can hit
+      }
+      if (bestShot) {
+        applyCommand(state, {
+          type: "shoot",
+          unitId: pu.id,
+          target: bestShot.target.pos,
+          mode: bestShot.mode,
+        });
+        acted = true;
+        continue;
+      }
+
+      // Targets in sight but no fire possible (empty magazine): reload.
+      if (targets.length > 0 && pu.ammo === 0) {
+        const reloaded = applyCommand(state, { type: "reload", unitId: pu.id });
+        if (reloaded.some((e) => e.type === "reloaded")) acted = true;
+      }
+
+      // Advance toward the nearest enemy. Hold at cheb 7 when enemies are
+      // visible (engagement range); hunt uncapped when nothing is in sight.
+      const dest = nearest(pu.pos, enemies);
+      if (dest) {
+        const cap = targets.length > 0 ? 7 : 0;
+        if (cheb(pu.pos, dest.pos) > cap) {
+          if (advanceCapped(state, pu, dest.pos, cap)) acted = true;
+        }
+      }
     }
     if (!acted) break;
   }
