@@ -88,6 +88,20 @@ const TRAJECTORY_SEGMENTS = 24;
 const INTERCEPTOR_FLIGHT_MS = 1300;
 /** Arc fraction the launch flight covers; the remaining slice is range-driven closing. */
 const INTERCEPTOR_FLIGHT_END = 0.75;
+/** Skyranger transport flight (base -> mission site) on mission launch, in milliseconds. */
+const DEPLOYMENT_FLIGHT_MS = 2800;
+/** Sampling resolution of the base->site Skyranger trajectory line. */
+const DEPLOYMENT_SEGMENTS = 32;
+/** Particles per interception impact burst (precomputed; no per-frame allocation). */
+const BURST_PARTICLES = 14;
+
+/** Interception combat-FX durations, in milliseconds. */
+const FX_TRACER_MS = 200;
+const FX_MUZZLE_MS = 130;
+const FX_BURST_MS = 430;
+const FX_SHAKE_MS = 240;
+/** Camera shake magnitude (world units) at hit onset; decays over FX_SHAKE_MS. */
+const FX_SHAKE_MAGNITUDE = 0.03;
 
 interface SpeedOption {
   speed: number;
@@ -595,6 +609,46 @@ const CSS = `
   border-color: rgba(248,113,113,.7);
   color: #fecaca;
 }
+#geoscape .geo-damage-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 7;
+  pointer-events: none;
+}
+#geoscape .geo-dmg {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  color: #fff;
+  font: 800 14px/1 ui-monospace, monospace;
+  letter-spacing: .03em;
+  text-shadow: 0 1px 3px rgba(0,0,0,.9), 0 0 8px rgba(0,0,0,.6);
+  animation: geo-dmg-float .9s ease-out forwards;
+  white-space: nowrap;
+}
+#geoscape .geo-dmg.ufo { color: #fdba74; }
+#geoscape .geo-dmg.interceptor { color: #fda4af; }
+@keyframes geo-dmg-float {
+  0% { opacity: 0; transform: translate(-50%, -30%) scale(.7); }
+  15% { opacity: 1; transform: translate(-50%, -55%) scale(1.05); }
+  100% { opacity: 0; transform: translate(-50%, -140%) scale(1); }
+}
+#geoscape .geo-deploy {
+  align-items: center;
+  justify-content: center;
+}
+#geoscape .geo-deploy-panel {
+  width: min(420px, calc(100vw - 48px));
+  padding: 18px;
+  border: 1px solid rgba(103,232,249,.5);
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(12,30,43,.96), rgba(3,9,15,.97));
+  box-shadow: 0 30px 90px rgba(0,0,0,.55);
+  text-align: center;
+}
+#geoscape .geo-deploy-panel .eyebrow { color: #67e8f9; }
+#geoscape .geo-deploy-panel h2 { color: #e8fbff; margin-bottom: 6px; }
+#geoscape .geo-deploy-panel p { color: #a9c8d7; font-size: 11px; }
+#geoscape .geo-deploy-panel .geo-bar { margin: 12px 0 0; text-align: left; }
 @media (max-width: 820px) {
   #geoscape .geo-panel { width: calc(100vw - 24px); padding: 13px; }
   #geoscape .geo-left { left: 12px; right: 12px; }
@@ -1029,6 +1083,44 @@ export class GeoscapeView {
   private readonly scratchB = new Vector3();
   private readonly scratchC = new Vector3();
   private readonly scratchBasis = new Matrix4();
+  /** Scratch for projecting a marker to screen space for damage numbers (per hit, not per frame). */
+  private readonly scratchProject = new Vector3();
+
+  // --- Interception combat FX (allocated once in buildCombatFx, reused per hit) ---
+  private tracerLineFx!: Line;
+  private muzzleFlash!: Mesh;
+  private ufoBurst!: Points;
+  private interceptorBurst!: Points;
+  private readonly ufoBurstVel = new Float32Array(BURST_PARTICLES * 3);
+  private readonly interceptorBurstVel = new Float32Array(BURST_PARTICLES * 3);
+  private prevUfoHp: number | null = null;
+  private prevInterceptorHp: number | null = null;
+  private fxTracerStartMs = 0;
+  private fxMuzzleStartMs = 0;
+  /** Shared burst clock: the UFO + interceptor bursts fire together in one exchange. */
+  private fxBurstStartMs = 0;
+  private fxTracerActive = false;
+  private fxMuzzleActive = false;
+  private fxUfoBurstActive = false;
+  private fxInterceptorBurstActive = false;
+  private shakeStartMs = 0;
+  private shakeActive = false;
+  private readonly cameraBase = new Vector3();
+  private damageLayer: HTMLDivElement | null = null;
+
+  // --- Skyranger deployment flight (staged on mission launch) ---
+  private deploying = false;
+  private deploymentFlight: {
+    baseN: Vector3;
+    siteN: Vector3;
+    region: string;
+    startMs: number;
+    arrived: boolean;
+    onArrived: () => void;
+  } | null = null;
+  private readonly skyrangerMarker = new Group();
+  private deploymentLine!: Line;
+  private deploymentFill: HTMLDivElement | null = null;
 
   constructor(private readonly opts: GeoscapeOptions) {
     injectStyle();
@@ -1058,6 +1150,9 @@ export class GeoscapeView {
     // Trajectory line is allocated once; its positions are rewritten per engagement.
     this.trajectoryLine = this.makeTrajectoryLine();
     this.earthMesh = this.buildScene();
+    this.buildCombatFx();
+    this.buildDeploymentFx();
+    this.buildDamageLayer();
     const panels = this.buildHud();
     this.selectedRegion = panels.region;
     this.selectedCoords = panels.coords;
@@ -1118,6 +1213,10 @@ export class GeoscapeView {
     disposeObject(this.scene);
     this.renderer.dispose();
     this.root.remove();
+    // Drop any in-flight deployment callback/state so a torn-down view can't fire it.
+    this.deploymentFlight = null;
+    this.deploying = false;
+    this.damageLayer = null;
   }
 
   private buildScene(): Mesh {
@@ -1454,6 +1553,9 @@ export class GeoscapeView {
    * or rebuilds the three.js scene — only moves markers and refreshes DOM text.
    */
   private refresh(): void {
+    // Detect HP deltas before refreshInterceptor updates wasEngaging, so a
+    // resolving encounter still reads the previous engaging state.
+    this.detectEncounterDamage();
     this.notifyCampaignEvent();
     this.refreshForcedPause();
     this.refreshStats();
@@ -1488,7 +1590,8 @@ export class GeoscapeView {
 
   /** Force pause whenever the overlay is up or the campaign is no longer active. */
   private refreshForcedPause(): void {
-    if (this.isEngaging() && this.timeSpeed !== 0) this.setTimeSpeed(0);
+    if (this.deploying && this.timeSpeed !== 0) this.setTimeSpeed(0);
+    else if (this.isEngaging() && this.timeSpeed !== 0) this.setTimeSpeed(0);
     else if (this.campaign && this.campaign.strategic.status !== "active" && this.timeSpeed !== 0) {
       this.setTimeSpeed(0);
     }
@@ -1504,7 +1607,11 @@ export class GeoscapeView {
   }
 
   private refreshSpeedState(): void {
-    const interactive = !!this.campaign && this.campaign.strategic.status === "active" && !this.isEngaging();
+    const interactive =
+      !!this.campaign &&
+      this.campaign.strategic.status === "active" &&
+      !this.isEngaging() &&
+      !this.deploying;
     for (const btn of this.speedButtons) {
       const speed = Number(btn.dataset.speed);
       btn.setAttribute("aria-pressed", String(this.timeSpeed === speed));
@@ -1616,8 +1723,12 @@ export class GeoscapeView {
   }
 
   private refreshOverlay(): void {
-    const overlay = this.buildInterceptionOverlay();
-    this.overlaySlot.replaceChildren(...(overlay ? [overlay] : []));
+    const encounter = this.buildInterceptionOverlay();
+    const deploy = this.deploying ? this.buildDeploymentOverlay() : null;
+    this.overlaySlot.replaceChildren(
+      ...(encounter ? [encounter] : []),
+      ...(deploy ? [deploy] : []),
+    );
   }
 
   /** Reposition the base + UFO markers; rebuild the UFO marker when its mission type changes. */
@@ -1735,10 +1846,170 @@ export class GeoscapeView {
     this.interceptorMarker.scale.setScalar(1 + Math.sin(now * 0.012) * 0.18);
   }
 
+  /** Crisp DOM layer above the canvas for floating "-N" damage numbers. */
+  private buildDamageLayer(): void {
+    const layer = el("div", "geo-damage-layer");
+    this.canvasWrap.appendChild(layer);
+    this.damageLayer = layer;
+  }
+
+  /**
+   * Allocate the reusable interception combat-FX objects once and parent them to
+   * earthGroup (so they share the globe's frame as the markers). All start hidden;
+   * per-hit triggers reposition + reactivate them. Disposed via disposeObject(scene).
+   */
+  private buildCombatFx(): void {
+    // Tracer beam: interceptor -> UFO (two-point additive line, faded per shot).
+    const tracerGeo = new BufferGeometry();
+    tracerGeo.setAttribute("position", new Float32BufferAttribute(new Float32Array(6), 3));
+    this.tracerLineFx = new Line(
+      tracerGeo,
+      new LineBasicMaterial({ color: 0xfff7cc, transparent: true, opacity: 0, blending: AdditiveBlending }),
+    );
+    this.tracerLineFx.frustumCulled = false;
+    this.tracerLineFx.visible = false;
+    this.earthGroup.add(this.tracerLineFx);
+
+    // Muzzle flash at the interceptor nose.
+    this.muzzleFlash = new Mesh(
+      new SphereGeometry(0.022, 10, 8),
+      new MeshBasicMaterial({ color: 0xfff1b0, transparent: true, opacity: 0, blending: AdditiveBlending }),
+    );
+    this.muzzleFlash.visible = false;
+    this.earthGroup.add(this.muzzleFlash);
+
+    this.ufoBurst = this.makeBurst(0xfb923c, this.ufoBurstVel);
+    this.interceptorBurst = this.makeBurst(0xfb7185, this.interceptorBurstVel);
+    this.earthGroup.add(this.ufoBurst, this.interceptorBurst);
+  }
+
+  /** Particle burst (additive Points) with deterministic precomputed spark directions. */
+  private makeBurst(color: number, velocities: Float32Array): Points {
+    const positions = new Float32Array(BURST_PARTICLES * 3);
+    const geo = new BufferGeometry();
+    geo.setAttribute("position", new Float32BufferAttribute(positions, 3));
+    for (let i = 0; i < BURST_PARTICLES; i++) {
+      const ax = Math.sin(i * 52.13) * 43758.5453;
+      const ay = Math.sin(i * 91.7) * 24634.6345;
+      const az = Math.sin(i * 17.39) * 13579.1234;
+      const dx = (ax - Math.floor(ax)) * 2 - 1;
+      const dy = (ay - Math.floor(ay)) * 2 - 1;
+      const dz = (az - Math.floor(az)) * 2 - 1;
+      const len = Math.hypot(dx, dy, dz) || 1;
+      velocities[i * 3] = dx / len;
+      velocities[i * 3 + 1] = dy / len;
+      velocities[i * 3 + 2] = dz / len;
+    }
+    const points = new Points(
+      geo,
+      new PointsMaterial({
+        color,
+        size: 0.03,
+        transparent: true,
+        opacity: 0,
+        blending: AdditiveBlending,
+        sizeAttenuation: true,
+      }),
+    );
+    points.frustumCulled = false;
+    points.visible = false;
+    return points;
+  }
+
+  /**
+   * Diff the encounter HP versus the previous render and fire combat FX for any
+   * damage dealt. An "attack" round decreases both ufoHp (interceptor volley) and
+   * interceptorHp (UFO return fire) in the same update, so both sides can light up
+   * together. The terminal round resolves the encounter (clears `interception`),
+   * so a just-resolved transition plays the finishing volley from prevUfoHp.
+   */
+  private detectEncounterDamage(): void {
+    const enc = this.campaign?.interception;
+    const engaging = this.isEngaging();
+    if (engaging && enc) {
+      if (this.prevUfoHp !== null && this.prevInterceptorHp !== null) {
+        const ufoDmg = this.prevUfoHp - enc.ufoHp;
+        const intDmg = this.prevInterceptorHp - enc.interceptorHp;
+        if (ufoDmg > 0) this.triggerInterceptorVolley(ufoDmg);
+        if (intDmg > 0) this.triggerInterceptorHit(intDmg);
+      }
+      this.prevUfoHp = enc.ufoHp;
+      this.prevInterceptorHp = enc.interceptorHp;
+      return;
+    }
+    // Encounter just resolved this update (was engaging, now cleared): play the
+    // killing volley on the UFO using its last known HP as the finishing damage.
+    if (this.wasEngaging && this.prevUfoHp !== null && this.prevUfoHp > 0) {
+      this.triggerInterceptorVolley(this.prevUfoHp);
+    }
+    this.prevUfoHp = null;
+    this.prevInterceptorHp = null;
+  }
+
+  /** Interceptor deals damage to the UFO: muzzle flash + tracer + UFO impact burst. */
+  private triggerInterceptorVolley(dmg: number): void {
+    const now = performance.now();
+    const from = this.interceptorMarker.position;
+    const to = this.ufoMarker.position;
+    const attr = this.tracerLineFx.geometry.getAttribute("position") as Float32BufferAttribute;
+    const arr = attr.array as Float32Array;
+    arr[0] = from.x; arr[1] = from.y; arr[2] = from.z;
+    arr[3] = to.x; arr[4] = to.y; arr[5] = to.z;
+    attr.needsUpdate = true;
+    (this.tracerLineFx.material as LineBasicMaterial).opacity = 0.95;
+    this.tracerLineFx.visible = true;
+    this.fxTracerStartMs = now;
+    this.fxTracerActive = true;
+
+    this.muzzleFlash.position.copy(from);
+    (this.muzzleFlash.material as MeshBasicMaterial).opacity = 1;
+    this.muzzleFlash.scale.setScalar(1);
+    this.muzzleFlash.visible = true;
+    this.fxMuzzleStartMs = now;
+    this.fxMuzzleActive = true;
+
+    this.fireBurst(this.ufoBurst, to, now);
+    this.fxUfoBurstActive = true;
+    this.spawnDamageNumber(this.ufoMarker, Math.round(dmg), "ufo");
+    this.kickCamera();
+  }
+
+  /** UFO return fire hits the interceptor: impact burst at the interceptor marker. */
+  private triggerInterceptorHit(dmg: number): void {
+    this.fireBurst(this.interceptorBurst, this.interceptorMarker.position, performance.now());
+    this.fxInterceptorBurstActive = true;
+    this.spawnDamageNumber(this.interceptorMarker, Math.round(dmg), "interceptor");
+    this.kickCamera();
+  }
+
+  /** Reset a burst to `pos` and arm it; particles radiate from local origin over FX_BURST_MS. */
+  private fireBurst(burst: Points, pos: Vector3, now: number): void {
+    const attr = burst.geometry.getAttribute("position") as Float32BufferAttribute;
+    (attr.array as Float32Array).fill(0);
+    attr.needsUpdate = true;
+    burst.position.copy(pos);
+    (burst.material as PointsMaterial).opacity = 1;
+    burst.scale.setScalar(1);
+    burst.visible = true;
+    this.fxBurstStartMs = now;
+  }
+
+  /** Arm a decaying camera shake (applied around the controls base each frame). */
+  private kickCamera(): void {
+    this.shakeStartMs = performance.now();
+    this.shakeActive = true;
+  }
+
   /** Flowing time: advance game hours on a timer scaled by the chosen speed. */
   private advanceFlowingTime(now: number): void {
     const speed = this.timeSpeed;
-    if (speed <= 0 || !this.campaign || this.campaign.strategic.status !== "active" || this.isEngaging()) {
+    if (
+      speed <= 0 ||
+      this.deploying ||
+      !this.campaign ||
+      this.campaign.strategic.status !== "active" ||
+      this.isEngaging()
+    ) {
       this.lastFlowMs = 0;
       this.timeAccumulatorMs = 0;
       return;
@@ -1752,6 +2023,269 @@ export class GeoscapeView {
       this.timeAccumulatorMs %= tick.ms;
       this.opts.onAdvanceTime(tick.hours);
     }
+  }
+
+  /** Advance every active combat effect one frame; deactivate each when it expires. */
+  private updateCombatFx(now: number): void {
+    if (this.fxTracerActive) {
+      const t = (now - this.fxTracerStartMs) / FX_TRACER_MS;
+      if (t >= 1) {
+        this.fxTracerActive = false;
+        this.tracerLineFx.visible = false;
+      } else {
+        (this.tracerLineFx.material as LineBasicMaterial).opacity = 0.95 * (1 - t);
+      }
+    }
+    if (this.fxMuzzleActive) {
+      const t = (now - this.fxMuzzleStartMs) / FX_MUZZLE_MS;
+      if (t >= 1) {
+        this.fxMuzzleActive = false;
+        this.muzzleFlash.visible = false;
+      } else {
+        (this.muzzleFlash.material as MeshBasicMaterial).opacity = 1 - t;
+        this.muzzleFlash.scale.setScalar(1 + t * 1.8);
+      }
+    }
+    // Both bursts share fxBurstStartMs (an exchange fires them together).
+    this.fxUfoBurstActive = this.advanceBurst(this.ufoBurst, this.ufoBurstVel, this.fxUfoBurstActive, now);
+    this.fxInterceptorBurstActive = this.advanceBurst(
+      this.interceptorBurst,
+      this.interceptorBurstVel,
+      this.fxInterceptorBurstActive,
+      now,
+    );
+  }
+
+  private advanceBurst(burst: Points, vel: Float32Array, active: boolean, now: number): boolean {
+    if (!active) return false;
+    const t = (now - this.fxBurstStartMs) / FX_BURST_MS;
+    if (t >= 1) {
+      burst.visible = false;
+      return false;
+    }
+    const attr = burst.geometry.getAttribute("position") as Float32BufferAttribute;
+    const arr = attr.array as Float32Array;
+    const spread = 0.05 * t;
+    for (let i = 0; i < BURST_PARTICLES; i++) {
+      const vx = vel[i * 3] ?? 0;
+      const vy = vel[i * 3 + 1] ?? 0;
+      const vz = vel[i * 3 + 2] ?? 0;
+      arr[i * 3] = vx * spread;
+      arr[i * 3 + 1] = vy * spread;
+      arr[i * 3 + 2] = vz * spread;
+    }
+    attr.needsUpdate = true;
+    (burst.material as PointsMaterial).opacity = 1 - t;
+    burst.scale.setScalar(1 + t * 0.6);
+    return true;
+  }
+
+  /**
+   * Offset the camera by a decaying tremor for the render only; the caller restores
+   * the base position afterward so OrbitControls' internal state never drifts.
+   */
+  private applyCameraShake(now: number): void {
+    if (!this.shakeActive) return;
+    const t = (now - this.shakeStartMs) / FX_SHAKE_MS;
+    if (t >= 1) {
+      this.shakeActive = false;
+      return;
+    }
+    const decay = 1 - t;
+    // Deterministic sin-based jitter reads as a hit bump without per-frame randomness.
+    this.scratchA
+      .set(Math.sin(now * 0.13), Math.sin(now * 0.091), Math.cos(now * 0.117))
+      .normalize();
+    this.camera.position.addScaledVector(this.scratchA, FX_SHAKE_MAGNITUDE * decay);
+  }
+
+  /**
+   * Project a marker's world position to screen space and float a "-N" damage chip
+   * that removes itself after the CSS animation. Color is paired with the "UFO"/
+   * "Interceptor" label context so the target is never conveyed by color alone.
+   */
+  private spawnDamageNumber(marker: Group, amount: number, kind: "ufo" | "interceptor"): void {
+    if (!this.damageLayer || amount <= 0) return;
+    marker.getWorldPosition(this.scratchProject);
+    this.scratchProject.project(this.camera);
+    const rect = this.canvasWrap.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    const x = (this.scratchProject.x * 0.5 + 0.5) * rect.width;
+    const y = (-this.scratchProject.y * 0.5 + 0.5) * rect.height;
+    const node = el("div", `geo-dmg ${kind}`);
+    node.textContent = `-${amount}`;
+    node.style.left = `${x}px`;
+    node.style.top = `${y}px`;
+    this.damageLayer.appendChild(node);
+    window.setTimeout(() => {
+      node.remove();
+    }, 950);
+  }
+
+  /**
+   * Orient a craft marker so its +Y (nose) points along the great-circle tangent
+   * from its current surface position toward `towardUnit`, with +Z as the surface
+   * normal. Shares the interceptor's orientation math; reused by the Skyranger.
+   */
+  private orientMarker(marker: Group, posUnit: Vector3, towardUnit: Vector3): void {
+    const posN = this.scratchB.copy(posUnit);
+    const tangent = this.scratchC.copy(towardUnit).addScaledVector(posN, -posN.dot(towardUnit));
+    if (tangent.lengthSq() > 1e-8) tangent.normalize();
+    this.scratchBasis.makeBasis(this.scratchA.copy(tangent).cross(posN), tangent, posN);
+    marker.quaternion.setFromRotationMatrix(this.scratchBasis);
+  }
+
+  /** Allocate the Skyranger transport marker + its base->site trajectory line once. */
+  private buildDeploymentFx(): void {
+    const positions = new Float32Array((DEPLOYMENT_SEGMENTS + 1) * 3);
+    const geo = new BufferGeometry();
+    geo.setAttribute("position", new Float32BufferAttribute(positions, 3));
+    this.deploymentLine = new Line(
+      geo,
+      new LineBasicMaterial({ color: 0xbbf7d0, transparent: true, opacity: 0.5 }),
+    );
+    this.deploymentLine.visible = false;
+    this.earthGroup.add(this.deploymentLine);
+    this.buildSkyrangerMarker();
+    this.skyrangerMarker.visible = false;
+    this.earthGroup.add(this.skyrangerMarker);
+  }
+
+  /**
+   * Heavy-lift transport silhouette: a bulkier slate-green airframe with a green
+   * cargo stripe accent, distinct from the cyan interceptor and amber base cone.
+   * +Y is the nose (aligned by orientMarker along the travel tangent). The green
+   * livery is paired with the "Skyranger / Deploying squad" text in the overlay.
+   */
+  private buildSkyrangerMarker(): void {
+    const body = new MeshStandardMaterial({
+      color: 0xe2e8f0,
+      emissive: new Color(0x94a3b8),
+      emissiveIntensity: 0.8,
+      roughness: 0.4,
+      metalness: 0.5,
+    });
+    const fuselage = new Mesh(new CylinderGeometry(0.014, 0.02, 0.2, 8), body);
+    const nose = new Mesh(new ConeGeometry(0.014, 0.05, 8), body);
+    nose.position.y = 0.125;
+    const wingGeo = new BoxGeometry(0.1, 0.04, 0.007);
+    const wingR = new Mesh(wingGeo, body);
+    wingR.position.set(0.055, -0.02, 0);
+    wingR.rotation.z = -0.35;
+    const wingL = new Mesh(wingGeo, body);
+    wingL.position.set(-0.055, -0.02, 0);
+    wingL.rotation.z = 0.35;
+    const tail = new Mesh(new BoxGeometry(0.05, 0.006, 0.006), body);
+    tail.position.set(0, -0.09, 0);
+    const fin = new Mesh(new BoxGeometry(0.006, 0.035, 0.02), body);
+    fin.position.set(0, -0.075, 0.013);
+    const stripe = new Mesh(
+      new BoxGeometry(0.004, 0.16, 0.016),
+      new MeshStandardMaterial({
+        color: 0x4ade80,
+        emissive: new Color(0x22c55e),
+        emissiveIntensity: 1.2,
+        roughness: 0.3,
+        metalness: 0.3,
+      }),
+    );
+    stripe.position.set(0, 0.01, 0.006);
+    const ring = new Mesh(
+      new RingGeometry(0.07, 0.095, 20),
+      new MeshBasicMaterial({
+        color: 0xbbf7d0,
+        transparent: true,
+        opacity: 0.45,
+        side: DoubleSide,
+        blending: AdditiveBlending,
+      }),
+    );
+    ring.rotation.x = -Math.PI / 2;
+    this.skyrangerMarker.add(fuselage, nose, wingR, wingL, tail, fin, stripe, ring);
+  }
+
+  private fillDeploymentTrajectory(baseN: Vector3, siteN: Vector3): void {
+    const attr = this.deploymentLine.geometry.getAttribute("position") as Float32BufferAttribute;
+    const arr = attr.array as Float32Array;
+    for (let i = 0; i <= DEPLOYMENT_SEGMENTS; i++) {
+      const t = i / DEPLOYMENT_SEGMENTS;
+      slerpUnit(baseN, siteN, t, this.scratchA);
+      this.scratchA.multiplyScalar(EARTH_RADIUS + 0.02);
+      arr[i * 3] = this.scratchA.x;
+      arr[i * 3 + 1] = this.scratchA.y;
+      arr[i * 3 + 2] = this.scratchA.z;
+    }
+    attr.needsUpdate = true;
+  }
+
+  /**
+   * Stage the Skyranger deployment flight: fly a transport marker from the base to
+   * the mission site along a great-circle arc over DEPLOYMENT_FLIGHT_MS, show a
+   * "Deploying squad" overlay + trajectory line, then invoke onArrived (which the
+   * controller routes into the battlescape). Pauses time flow for the duration.
+   */
+  playDeploymentFlight(campaign: CampaignState, onArrived: () => void): void {
+    if (this.disposed) return;
+    const contact = campaign.ufoContact;
+    if (!contact) {
+      onArrived();
+      return;
+    }
+    const baseN = latLonToVector(campaign.base.lat, campaign.base.lon, 1).normalize();
+    const siteN = latLonToVector(contact.lat, contact.lon, 1).normalize();
+    this.fillDeploymentTrajectory(baseN, siteN);
+    this.deploymentLine.visible = true;
+    this.skyrangerMarker.visible = true;
+    this.deploying = true;
+    this.setTimeSpeed(0);
+    this.deploymentFlight = {
+      baseN,
+      siteN,
+      region: contact.region,
+      startMs: performance.now(),
+      arrived: false,
+      onArrived,
+    };
+    this.refreshOverlay();
+  }
+
+  /** Advance the Skyranger along its arc; on arrival, hand off to onArrived once. */
+  private updateDeployment(now: number): void {
+    const dep = this.deploymentFlight;
+    if (!dep || !this.deploying) return;
+    const t = Math.min(1, (now - dep.startMs) / DEPLOYMENT_FLIGHT_MS);
+    slerpUnit(dep.baseN, dep.siteN, t, this.scratchA); // unit surface direction
+    this.skyrangerMarker.position.copy(this.scratchA).multiplyScalar(EARTH_RADIUS + 0.16);
+    this.orientMarker(this.skyrangerMarker, this.scratchA, dep.siteN);
+    this.skyrangerMarker.scale.setScalar(1 + Math.sin(now * 0.01) * 0.12);
+    if (this.deploymentFill) this.deploymentFill.style.width = `${Math.round(t * 100)}%`;
+    if (t >= 1 && !dep.arrived) {
+      dep.arrived = true;
+      this.deploying = false;
+      this.deploymentFlight = null;
+      dep.onArrived(); // -> startTactical -> disposes this view mid-frame
+    }
+  }
+
+  private buildDeploymentOverlay(): HTMLElement {
+    const overlay = el("div", "geo-overlay geo-deploy");
+    const panel = el("div", "geo-deploy-panel");
+    const eye = el("div", "eyebrow");
+    eye.textContent = "✈ Skyranger en route";
+    const heading = el("h2");
+    heading.textContent = "Deploying squad";
+    const copy = el("p");
+    copy.textContent = `Inbound to ${this.deploymentFlight?.region ?? "mission site"}. Stand by for landing.`;
+    const bar = el("div", "geo-bar");
+    const track = el("div", "geo-bar-track");
+    const fill = el("div", "geo-bar-fill interceptor");
+    fill.style.width = "0%";
+    track.append(fill);
+    bar.append(track);
+    panel.append(eye, heading, copy, bar);
+    overlay.append(panel);
+    this.deploymentFill = fill;
+    return overlay;
   }
 
   /** Concise contact card: id, status instruction, region, time-left. Drops the prose. */
@@ -2135,8 +2669,18 @@ export class GeoscapeView {
     // onAdvanceTime may synchronously dispose+remount this view (current controller);
     // bail before touching the disposed renderer/controls in that case.
     if (this.disposed) return;
+    this.updateCombatFx(now);
+    this.updateDeployment(now);
+    // Deployment arrival hands control back to main.ts (startTactical), which
+    // disposes this view mid-frame; bail before rendering a torn-down scene.
+    if (this.disposed) return;
     this.updateTerminator();
     this.controls.update();
+    // Camera shake: offset around the controls-derived base, then restore so the
+    // next controls.update() is unaffected (no drift into OrbitControls state).
+    this.cameraBase.copy(this.camera.position);
+    this.applyCameraShake(now);
     this.renderer.render(this.scene, this.camera);
+    this.camera.position.copy(this.cameraBase);
   };
 }

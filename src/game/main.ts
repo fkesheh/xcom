@@ -38,6 +38,7 @@ import type {
   Vec2,
 } from "../sim/index";
 import type {
+  BaseLocation,
   CampaignState,
   CampaignWeaponId,
   DifficultyLevel,
@@ -157,19 +158,17 @@ function flushSave(): void {
   if (snapshot) saveCampaign(snapshot);
 }
 
-function showGeoscape(): void {
-  flushSave();
-  // Seed the in-memory campaign once from storage; every geoscape callback then
-  // advances from `currentCampaign` instead of re-reading localStorage (which
-  // returns stale state while a debounced save is pending).
-  currentCampaign = loadCampaign();
-  disposeTacticalIfExists();
-  baseView?.dispose();
-  baseView = null;
-  geoscape?.dispose();
-  geoscape = new GeoscapeView({
-    campaign: currentCampaign,
-    onConfirmBase: (base, difficulty) => {
+/**
+ * Shared GeoscapeView callback set. Every closure advances from the in-memory
+ * `currentCampaign` (not localStorage, which goes stale while a debounced save is
+ * pending), and routes screen transitions through the in-process helpers below.
+ * Extracted so both the normal geoscape mount and the deployment-flight mount
+ * (mission launch) build identical views.
+ */
+function buildGeoscapeCallbacks(campaign: CampaignState | null) {
+  return {
+    campaign,
+    onConfirmBase: (base: BaseLocation, difficulty?: DifficultyLevel) => {
       // "Review base" mid-campaign must NOT recreate the campaign (that would
       // wipe soldiers, research, facilities, resources, and the seed). Only the
       // new-game flow (no saved campaign) calls createCampaign; otherwise we
@@ -182,13 +181,13 @@ function showGeoscape(): void {
         showBase(existing);
         return;
       }
-      const campaign = createCampaign(base, newCampaignSeed(), difficulty ?? "veteran");
-      saveCampaign(campaign);
+      const created = createCampaign(base, newCampaignSeed(), difficulty ?? "veteran");
+      saveCampaign(created);
       geoscape?.dispose();
       geoscape = null;
-      showBase(campaign);
+      showBase(created);
     },
-    onAdvanceTime: (hours) => {
+    onAdvanceTime: (hours: number) => {
       // The geoscape's own frame loop drives this; refresh in place instead of
       // re-mounting (a dispose+mount here would flicker the globe and stall flow).
       // Advance from the in-memory campaign so time accumulates across ticks;
@@ -218,8 +217,27 @@ function showGeoscape(): void {
       currentCampaign = null;
       showGeoscape();
     },
-  });
+  };
+}
+
+/** Dispose any prior geoscape, build + mount a fresh one bound to `campaign`. */
+function mountGeoscape(campaign: CampaignState | null): GeoscapeView {
+  geoscape?.dispose();
+  geoscape = new GeoscapeView(buildGeoscapeCallbacks(campaign));
   geoscape.mount(appRoot);
+  return geoscape;
+}
+
+function showGeoscape(): void {
+  flushSave();
+  // Seed the in-memory campaign once from storage; every geoscape callback then
+  // advances from `currentCampaign` instead of re-reading localStorage (which
+  // returns stale state while a debounced save is pending).
+  currentCampaign = loadCampaign();
+  disposeTacticalIfExists();
+  baseView?.dispose();
+  baseView = null;
+  mountGeoscape(currentCampaign);
 }
 
 function showBase(campaign: CampaignState): void {
@@ -242,7 +260,26 @@ function showBase(campaign: CampaignState): void {
       // operation match the current squad before handing off to the tactical
       // controller.
       const current = currentCampaign ?? campaign;
-      if (current.strategic.status === "active") startTactical(current);
+      if (current.strategic.status !== "active") return;
+      const contactStatus = current.ufoContact?.status;
+      // Without a staged mission site there is nowhere to fly to — preserve the
+      // prior direct handoff (startTactical no-ops without a valid contact).
+      if (contactStatus !== "crashed" && contactStatus !== "landed") {
+        startTactical(current);
+        return;
+      }
+      // Stage the Skyranger deployment flight on the globe, then enter the
+      // battlescape on arrival. The geoscape pauses time for the flight; on
+      // arrival, onArrived routes into the existing startTactical launch path.
+      flushSave();
+      currentCampaign = current;
+      disposeTacticalIfExists();
+      baseView?.dispose();
+      baseView = null;
+      const view = mountGeoscape(current);
+      view.playDeploymentFlight(current, () => {
+        startTactical(currentCampaign ?? current);
+      });
     },
     onStartResearch: (id) => {
       const updated = startResearch(currentCampaign ?? campaign, id);
