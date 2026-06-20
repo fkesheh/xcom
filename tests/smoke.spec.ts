@@ -111,9 +111,10 @@ test.describe("Blacksite boot smoke", () => {
       page.getByRole("button", { name: /recover ufo core/i }),
     ).toBeEnabled();
 
-    // The market now lives behind the Market tab — open it, then assert the
-    // market panel (with Buy buttons) is visible for the screenshot.
-    await page.getByRole("tab", { name: "Market" }).click();
+    // The market now lives inside the Hangar room — open it from the base hub's
+    // facility list, then assert the market panel (with Buy buttons) is visible
+    // for the screenshot.
+    await page.getByRole("button", { name: /hangar & armory/i }).click();
     await expect(page.locator("#base-view .market-card")).toBeVisible();
 
     // Scroll the market into view for a representative screenshot.

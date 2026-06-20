@@ -36,6 +36,7 @@ import {
   facilityCost,
   STARTER_BASE_GRID,
   type BaseFacility,
+  type FacilityKind,
   summarizeBaseFacilities,
 } from "../campaign/base";
 import {
@@ -394,38 +395,82 @@ const CSS = `
   letter-spacing: 0;
   text-transform: none;
 }
-#base-view .tablist {
-  display: flex;
-  gap: 4px;
-  padding: 4px;
-  border: 1px solid rgba(103,232,249,.18);
-  border-radius: 10px;
-  background: rgba(2,12,20,.5);
-}
-#base-view .tab {
+#base-view .facility-room {
   flex: 1;
-  min-height: 34px;
-  padding: 0 6px;
-  cursor: pointer;
-  color: #9db5c5;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  background: transparent;
-  font: 700 12px/1 ui-monospace, monospace;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+#base-view .room-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(103,232,249,.2);
+}
+#base-view .room-back {
+  min-height: 32px;
+  padding: 0 11px;
+  margin-right: 2px;
+  font-size: 12px;
+}
+#base-view .room-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(103,232,249,.4);
+  border-radius: 8px;
+  color: #67e8f9;
+  background: rgba(8,28,40,.5);
+  font-size: 15px;
+  flex: none;
+}
+#base-view .room-title {
+  color: #e7f7ff;
+  font: 800 14px/1 ui-monospace, monospace;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+#base-view .room-body {
+  flex: 1;
+  min-height: 0;
+  padding: 1px;
+  overflow: auto;
+}
+#base-view .hub-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+#base-view .room-nav {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+#base-view .room-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  min-height: 70px;
+  padding: 10px 11px;
+  text-align: left;
+  text-transform: none;
+  letter-spacing: 0;
+  font: 600 12px/1.3 Inter, sans-serif;
+}
+#base-view .room-card .room-name {
+  color: #e7f7ff;
+  font: 800 12px/1 ui-monospace, monospace;
   letter-spacing: .04em;
   text-transform: uppercase;
 }
-#base-view .tab:hover { color: #cfeaf6; background: rgba(103,232,249,.08); }
-#base-view .tab[aria-selected="true"] {
-  color: #04141c;
-  border-color: rgba(103,232,249,.6);
-  background: linear-gradient(180deg, #8feffb, #22d3ee);
-}
-#base-view .tabpanel {
-  flex: 1;
-  min-height: 0;
-  padding: 2px 1px;
-  overflow: auto;
+#base-view .room-card .room-blurb {
+  color: #9db5c5;
+  font: 500 11px/1.35 Inter, sans-serif;
 }
 #base-view .panel-head {
   display: flex;
@@ -968,20 +1013,86 @@ function disposeObject(obj: Group | Scene): void {
   });
 }
 
-type TabId = "soldiers" | "research" | "engineering" | "market" | "build";
+type RoomId = "overview" | "research" | "engineering" | "barracks" | "hangar" | "construction";
 
-interface TabDef {
-  id: TabId;
+interface RoomDef {
+  id: RoomId;
   label: string;
+  icon: string;
+  blurb: string;
 }
 
-const TABS: readonly TabDef[] = [
-  { id: "soldiers", label: "Soldiers" },
-  { id: "research", label: "Research" },
-  { id: "engineering", label: "Engineering" },
-  { id: "market", label: "Market" },
-  { id: "build", label: "Build" },
+const ROOM_META: Record<RoomId, RoomDef> = {
+  overview: {
+    id: "overview",
+    label: "Base Overview",
+    icon: "◈",
+    blurb: "Base command hub — facilities, capacity, and status at a glance.",
+  },
+  research: {
+    id: "research",
+    label: "Research Lab",
+    icon: "⚗",
+    blurb: "Analyse recovered data and unlock field upgrades.",
+  },
+  engineering: {
+    id: "engineering",
+    label: "Workshop",
+    icon: "⚙",
+    blurb: "Fabricate weapons, armor, and field equipment.",
+  },
+  barracks: {
+    id: "barracks",
+    label: "Barracks",
+    icon: "⚑",
+    blurb: "Roster, deploy, and equip your operatives.",
+  },
+  hangar: {
+    id: "hangar",
+    label: "Hangar & Armory",
+    icon: "✈",
+    blurb: "Interceptor status and the council equipment market.",
+  },
+  construction: {
+    id: "construction",
+    label: "Construction",
+    icon: "▣",
+    blurb: "Expand the base — new facilities, power, and capacity.",
+  },
+};
+
+/** Rooms reachable from the overview hub's facility list. */
+const ROOM_NAV: readonly RoomId[] = [
+  "research",
+  "engineering",
+  "barracks",
+  "hangar",
+  "construction",
 ];
+
+/** Map a constructed facility's kind to the dedicated room that manages it.
+ *  Facilities without their own screen (power, radar, stores, etc.) fall back
+ *  to the overview hub. */
+function roomForFacilityKind(kind: FacilityKind): RoomId {
+  switch (kind) {
+    case "lab":
+      return "research";
+    case "workshop":
+      return "engineering";
+    case "living":
+      return "barracks";
+    case "hangar":
+      return "hangar";
+    case "command":
+    case "stores":
+    case "medbay":
+    case "power":
+    case "radar":
+    case "access":
+    default:
+      return "overview";
+  }
+}
 
 export class BaseView {
   private readonly root: HTMLDivElement;
@@ -1002,14 +1113,14 @@ export class BaseView {
   private facilityMeshes: Array<{ mesh: Mesh; facilityId: string }> = [];
   private hoveredFacilityId: string | null = null;
   private selectedFacilityId: string | null = null;
-  private activeTab: TabId = "soldiers";
+  private activeRoom: RoomId = "overview";
   private expandedSoldierId: string | null = null;
   private tooltipEl: HTMLDivElement | null = null;
   private topbarChips: HTMLElement | null = null;
   private clockEl: HTMLElement | null = null;
   private primaryHost: HTMLElement | null = null;
   private objectiveHost: HTMLElement | null = null;
-  private tabPanelEl: HTMLElement | null = null;
+  private roomHost: HTMLElement | null = null;
 
   constructor(private readonly opts: BaseViewOptions) {
     injectStyle();
@@ -1830,10 +1941,8 @@ export class BaseView {
     }
   }
 
-  /** Build the persistent DOM shell once (panels, hint, toast). All campaign-
-   *  dependent content is filled in by refreshHud(), which update() re-invokes. */
   /** Build the persistent DOM shell once: a full-width top bar, a right sidebar
-   *  (primary CTA + objective strip + tabbed detail panel), a corner footer, a
+   *  (primary CTA + objective strip + facility-room detail), a corner footer, a
    *  floating facility tooltip, and the transient notice toast. All campaign-
    *  dependent content is filled in by refreshHud(). */
   private buildHud(): void {
@@ -1851,29 +1960,8 @@ export class BaseView {
     const sidebar = el("aside", "base-sidebar");
     const primaryHost = el("div");
     const objectiveHost = el("div");
-    const tablist = el("div", "tablist");
-    tablist.setAttribute("role", "tablist");
-    for (const tab of TABS) {
-      const btn = el("button", "tab");
-      btn.setAttribute("role", "tab");
-      btn.textContent = tab.label;
-      btn.dataset.tab = tab.id;
-      btn.setAttribute("aria-selected", String(this.activeTab === tab.id));
-      btn.addEventListener("click", () => {
-        this.activeTab = tab.id;
-        for (const node of Array.from(tablist.children)) {
-          (node as HTMLButtonElement).setAttribute(
-            "aria-selected",
-            String((node as HTMLButtonElement).dataset.tab === tab.id),
-          );
-        }
-        this.refreshHud();
-      });
-      tablist.appendChild(btn);
-    }
-    const tabPanel = el("div", "tabpanel");
-    tabPanel.setAttribute("role", "tabpanel");
-    sidebar.append(primaryHost, objectiveHost, tablist, tabPanel);
+    const roomHost = el("div", "facility-room");
+    sidebar.append(primaryHost, objectiveHost, roomHost);
 
     const footer = el("div", "base-footer");
     const earth = el("button");
@@ -1894,7 +1982,7 @@ export class BaseView {
     this.clockEl = clock;
     this.primaryHost = primaryHost;
     this.objectiveHost = objectiveHost;
-    this.tabPanelEl = tabPanel;
+    this.roomHost = roomHost;
     this.tooltipEl = tooltip;
     this.noticeEl = notice;
 
@@ -1903,11 +1991,11 @@ export class BaseView {
   }
 
   /** Re-render every dynamic region (top-bar chips/clock, primary CTA, objective
-   *  strip, active tab) from the current campaign/operation. Rebuilds DOM
-   *  children only — the 3D scene, renderer, and rAF loop are never touched, so
-   *  this is safe to call repeatedly (including from update()). */
+   *  strip, active facility room) from the current campaign/operation. Rebuilds
+   *  DOM children only — the 3D scene, renderer, and rAF loop are never touched,
+   *  so this is safe to call repeatedly (including from update()). */
   private refreshHud(): void {
-    if (!this.primaryHost || !this.tabPanelEl || !this.objectiveHost) return;
+    if (!this.primaryHost || !this.roomHost || !this.objectiveHost) return;
     const campaign = this.opts.campaign;
     const operation = this.opts.operation;
     const contact = campaign.ufoContact;
@@ -1922,7 +2010,7 @@ export class BaseView {
       this.renderPrimaryCard(campaign, operation, contact, launchContact),
     );
     this.objectiveHost.replaceChildren(this.renderObjectiveStrip(campaign));
-    this.tabPanelEl.replaceChildren(this.renderTabPanel(campaign));
+    this.roomHost.replaceChildren(this.renderRoom(campaign));
     this.applyFacilityHighlight();
   }
 
@@ -2090,32 +2178,129 @@ export class BaseView {
     return strip;
   }
 
-  /** Render only the active tab's content into the tabpanel. */
-  private renderTabPanel(campaign: CampaignState): HTMLElement {
-    switch (this.activeTab) {
+  /** Render the active facility room: a header (icon + facility name + back to
+   *  base) followed by the room's focused body. The selected room persists across
+   *  update() refreshes because activeRoom is a class field. */
+  private renderRoom(campaign: CampaignState): HTMLElement {
+    const meta = ROOM_META[this.activeRoom];
+    const room = el("div", "facility-room");
+    room.append(this.renderRoomHeader(meta, this.activeRoom !== "overview"));
+    const body = el("div", "room-body");
+    switch (this.activeRoom) {
       case "research":
-        return this.renderResearchTab(campaign);
+        body.append(this.renderResearchRoom(campaign));
+        break;
       case "engineering":
-        return this.renderEngineeringTab(campaign);
-      case "market":
-        return this.buildMarketPanel();
-      case "build":
-        return this.renderBuildTab(campaign);
-      case "soldiers":
+        body.append(this.renderEngineeringRoom(campaign));
+        break;
+      case "barracks":
+        body.append(this.renderBarracksRoom(campaign));
+        break;
+      case "hangar":
+        body.append(this.renderHangarRoom(campaign));
+        break;
+      case "construction":
+        body.append(this.renderConstructionRoom(campaign));
+        break;
+      case "overview":
       default:
-        return this.renderSoldiersTab(campaign);
+        body.append(this.renderOverview(campaign));
+        break;
     }
+    room.append(body);
+    return room;
   }
 
-  /** Soldiers tab: compact table — deploy toggle, name, rank, status chip,
-   *  weapon select — one row per operative. Click a row to expand inline stats. */
-  private renderSoldiersTab(campaign: CampaignState): HTMLElement {
+  /** Room header: a "Back to Base" affordance (hidden on the overview hub) plus
+   *  the facility-type icon and name, so the screen is never identified by color
+   *  alone. */
+  private renderRoomHeader(meta: RoomDef, showBack: boolean): HTMLElement {
+    const header = el("div", "room-header");
+    if (showBack) {
+      const back = el("button", "room-back");
+      back.textContent = "← Back to Base";
+      back.addEventListener("click", () => {
+        this.activeRoom = "overview";
+        this.refreshHud();
+      });
+      header.appendChild(back);
+    }
+    const icon = el("span", "room-icon");
+    icon.textContent = meta.icon;
+    const title = el("span", "room-title");
+    title.textContent = meta.label;
+    header.append(icon, title);
+    return header;
+  }
+
+  /** Overview hub (default room): base capacity at a glance, a hint to click a 3D
+   *  facility, and a grid of facility rooms that each open their dedicated screen.
+   *  This is the non-3D equivalent of clicking a facility in the cutaway. */
+  private renderOverview(campaign: CampaignState): HTMLElement {
+    const wrap = el("div", "hub-overview");
+    const summary = summarizeBaseFacilities(constructedFacilities(campaign));
+    const stats = el("div", "op-chips");
+    stats.append(
+      span(`Power ${summary.powerUsed}/${summary.powerCapacity}`),
+      span(`Staff ${summary.staffAssigned}`),
+      span(`Rooms ${summary.facilities}`),
+      span(`Hangar ${summary.hangarSlots} slots`),
+    );
+    const hint = el("div", "empty-state");
+    hint.textContent = "Click a facility in the base, or pick a room below.";
+    const label = el("div", "section-label");
+    label.textContent = "Facilities";
+    const nav = el("div", "room-nav");
+    for (const id of ROOM_NAV) {
+      const meta = ROOM_META[id];
+      const card = el("button", "room-card");
+      const icon = el("span", "room-icon");
+      icon.textContent = meta.icon;
+      const name = el("span", "room-name");
+      name.textContent = meta.label;
+      const blurb = el("span", "room-blurb");
+      blurb.textContent = meta.blurb;
+      card.append(icon, name, blurb);
+      card.addEventListener("click", () => {
+        this.activeRoom = id;
+        this.refreshHud();
+      });
+      nav.appendChild(card);
+    }
+    wrap.append(stats, hint, label, nav);
+    return wrap;
+  }
+
+  /** Hangar room: interceptor status (integrity + sorties/repair) followed by the
+   *  council equipment market. The market keeps its `.market-card` container with
+   *  Buy buttons so smoke/screen readers can always locate it here. */
+  private renderHangarRoom(campaign: CampaignState): HTMLElement {
+    const wrap = el("div");
+    const status = el("section", "tab-card");
+    const strong = el("strong");
+    strong.textContent = "Interceptor";
+    const integrity = Math.max(0, 100 - campaign.interceptor.damage);
+    const repairedAt = campaign.interceptor.repairedAtHour;
+    const repairing = repairedAt !== undefined && repairedAt > campaign.clock.elapsedHours;
+    const copy = el("p", "card-copy");
+    copy.textContent = repairing
+      ? `Integrity ${integrity}% — repairs underway (${repairedAt! - campaign.clock.elapsedHours}h remaining).`
+      : `Integrity ${integrity}% — ${campaign.interceptor.sorties} sorties flown. Ready to intercept.`;
+    status.append(strong, copy);
+    wrap.append(status, this.buildMarketPanel());
+    return wrap;
+  }
+
+  /** Barracks room: compact roster table — deploy toggle, name, rank, status
+   *  chip, weapon select — one row per operative. Click a row to expand inline
+   *  stats. The header row carries the deploy count + recruit action. */
+  private renderBarracksRoom(campaign: CampaignState): HTMLElement {
     const wrap = el("div");
     const deployment = deploymentSoldiers(campaign);
     const deployedIds = new Set(deployment.map((soldier) => soldier.id));
     const head = el("div", "panel-head");
     const title = el("span", "panel-title");
-    title.textContent = `Operatives · ${deployment.length}/${DEPLOYMENT_SIZE} deployed`;
+    title.textContent = `${deployment.length}/${DEPLOYMENT_SIZE} deployed`;
     const recruit = el("button");
     recruit.textContent = `Recruit (${RECRUIT_COST}c)`;
     recruit.disabled = campaign.strategic.status !== "active" || !canRecruitSoldier(campaign);
@@ -2217,17 +2402,14 @@ export class BaseView {
     return chipEl;
   }
 
-  /** Build tab: base power/staff/room chips, clickable installed-facility rows
-   *  that cross-highlight the 3D cutaway, then active construction + buildable
-   *  facilities (cost + Build). */
-  private renderBuildTab(campaign: CampaignState): HTMLElement {
+  /** Construction room: base power/staff/room capacity chips, clickable
+   *  installed-facility rows (each opens that facility's own room and highlights
+   *  the 3D cutaway), then active construction + buildable facilities. */
+  private renderConstructionRoom(campaign: CampaignState): HTMLElement {
     const wrap = el("div");
-    const head = el("div", "panel-head");
-    const title = el("span", "panel-title");
-    title.textContent = "Base facilities";
-    head.append(title);
-
     const summary = summarizeBaseFacilities(constructedFacilities(campaign));
+    const capLabel = el("div", "section-label");
+    capLabel.textContent = "Base capacity";
     const chips = el("div", "op-chips");
     chips.append(
       span(`Power ${summary.powerUsed}/${summary.powerCapacity}`),
@@ -2246,30 +2428,31 @@ export class BaseView {
       const name = el("span", "fr-name");
       name.textContent = facility.label;
       const state = el("span", "fr-state");
-      state.textContent = "Online";
+      state.textContent = "Open";
       row.append(name, state);
       row.addEventListener("click", () => this.selectFacility(facility.id));
       installed.appendChild(row);
     }
 
-    wrap.append(head, chips, label, installed, this.renderConstructionList(campaign));
+    wrap.append(capLabel, chips, label, installed, this.renderConstructionList(campaign));
     return wrap;
   }
 
+  /** Selecting an installed facility (from the Construction room list) opens that
+   *  facility's dedicated room and lifts its emissive so the 3D cutaway mirrors
+   *  the selection. Mirrors the on-canvas facility click. */
   private selectFacility(facilityId: string): void {
-    this.selectedFacilityId = this.selectedFacilityId === facilityId ? null : facilityId;
+    const facility = findBaseFacility(facilityId);
+    this.selectedFacilityId = facilityId;
+    this.activeRoom = facility ? roomForFacilityKind(facility.kind) : "overview";
     this.applyFacilityHighlight();
     this.refreshHud();
   }
 
-  /** Research tab: completed work as chips, the active project with a progress
+  /** Research room: completed work as chips, the active project with a progress
    *  bar + remaining hours, then available projects (cost + Start). */
-  private renderResearchTab(campaign: CampaignState): HTMLElement {
+  private renderResearchRoom(campaign: CampaignState): HTMLElement {
     const wrap = el("div");
-    const head = el("div", "panel-head");
-    const title = el("span", "panel-title");
-    title.textContent = "Research";
-    wrap.append(head);
 
     if (campaign.completedResearch.length > 0) {
       const chipRow = el("div", "chip-row");
@@ -2348,14 +2531,10 @@ export class BaseView {
     return card;
   }
 
-  /** Engineering tab: active manufacturing with a progress bar, then buildable
+  /** Engineering room: active manufacturing with a progress bar, then buildable
    *  items (cost + Start). */
-  private renderEngineeringTab(campaign: CampaignState): HTMLElement {
+  private renderEngineeringRoom(campaign: CampaignState): HTMLElement {
     const wrap = el("div");
-    const head = el("div", "panel-head");
-    const title = el("span", "panel-title");
-    title.textContent = "Engineering";
-    wrap.append(head);
 
     const activeMfg = campaign.activeManufacturing;
     if (activeMfg) {
@@ -2530,20 +2709,23 @@ export class BaseView {
     }
   };
 
-  /** Click a facility floor: select it, jump to the Build tab (which highlights
-   *  its row), and lift its emissive so the 3D cutaway mirrors the selection. */
+  /** Click a facility floor in the 3D base: open that facility's dedicated room
+   *  (the lab, workshop, barracks, or hangar), keep it selected so the cutaway
+   *  stays highlighted, and re-render the detail panel. Facilities without their
+   *  own screen fall back to the overview hub. */
   private onCanvasClick = (event: MouseEvent): void => {
     if (this.disposed || this.facilityMeshes.length === 0) return;
     const hit = this.facilityMeshAt(event);
     if (!hit) return;
     this.selectedFacilityId = hit.facilityId;
-    this.activeTab = "build";
+    const facility = findBaseFacility(hit.facilityId);
+    this.activeRoom = facility ? roomForFacilityKind(facility.kind) : "overview";
     this.applyFacilityHighlight();
     this.refreshHud();
   };
 
   /** Boost the emissive of the selected/hovered facility floor so the 3D cutaway
-   *  stays in sync with the Build-tab selection. */
+   *  stays in sync with the open room. */
   private applyFacilityHighlight(): void {
     const active = this.selectedFacilityId ?? this.hoveredFacilityId;
     for (const entry of this.facilityMeshes) {
