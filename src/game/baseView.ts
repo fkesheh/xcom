@@ -92,6 +92,7 @@ import {
   type FacilityRole,
 } from "./basePalette";
 import { buildFacilityModel } from "./baseFacilities";
+import { buildFacilityInterior } from "./baseFacilityInteriors";
 import { CrewSystem } from "./basePeople";
 
 interface BaseViewOptions {
@@ -1183,6 +1184,30 @@ export class BaseView {
   private corridorStripMat: MeshBasicMaterial | null = null;
   /** Resting camera position; the frame loop adds a subtle idle drift on top. */
   private readonly camHome = new Vector3(-0.3, 6.4, 7.5);
+  /** Dedicated interior mount at the scene root (no hub yaw/scale) so the dive-in
+   *  diorama frames cleanly. Empty in hub mode; holds one {@link interiorRoot}. */
+  private readonly interiorGroup = new Group();
+  /** The currently-mounted facility interior diorama (null in hub mode). Built
+   *  by buildFacilityInterors on enter, disposed on exit to avoid leaks. */
+  private interiorRoot: Group | null = null;
+  /** Resting 3/4 interior hero framing — close, slightly elevated, looking into
+   *  the open-front diorama. The frame loop adds a subtle drift on top. */
+  private readonly interiorCamPos = new Vector3(3.0, 2.2, 4.2);
+  private readonly interiorCamTarget = new Vector3(0, 0.85, -0.2);
+  /** Hub look-at target (origin). Reused as the dive-out tween destination. */
+  private readonly hubCamTarget = new Vector3(0, 0, 0);
+  /** The point the camera currently looks at — updated every frame so a dive
+   *  tween can start from wherever the camera was actually facing. */
+  private readonly currentLookAt = new Vector3(0, 0, 0);
+  /** In-progress camera tween (dive in / back to base). Allocation-free: the
+   *  frame loop lerps between the persistent from/to vectors each tick. */
+  private readonly camFromPos = new Vector3();
+  private readonly camToPos = new Vector3();
+  private readonly camFromTarget = new Vector3();
+  private readonly camToTarget = new Vector3();
+  private camStartMs = 0;
+  private camDurationMs = 0;
+  private camAnimating = false;
   private raf = 0;
   private disposed = false;
   private noticeEl: HTMLDivElement | null = null;
@@ -1252,6 +1277,9 @@ export class BaseView {
     this.crewSystemLeft = null;
     this.crewSystemRight?.dispose();
     this.crewSystemRight = null;
+    // Free the mounted interior diorama explicitly (geometry + materials) so a
+    // teardown mid-dive never leaks; the scene walk below handles the hub.
+    this.clearInterior();
     disposeObject(this.scene);
     this.renderer.dispose();
     this.root.remove();
@@ -1409,6 +1437,9 @@ export class BaseView {
     this.baseGroup.rotation.y = BASE_VIEW_YAW;
     this.baseGroup.scale.setScalar(1.15);
     this.scene.add(this.baseGroup);
+    // Interior mount lives at the scene root (not under baseGroup) so the dive-in
+    // diorama avoids the hub's yaw/scale and frames cleanly on its own terms.
+    this.scene.add(this.interiorGroup);
 
     this.buildTerrainSlab();
     this.buildCutawayShell();
@@ -2153,7 +2184,10 @@ export class BaseView {
   private renderRoom(campaign: CampaignState): HTMLElement {
     const meta = ROOM_META[this.activeRoom];
     const room = el("div", "facility-room");
-    room.append(this.renderRoomHeader(meta, this.activeRoom !== "overview"));
+    // The back affordance shows for any non-overview room AND whenever a facility
+    // interior is mounted — overview-mapped facilities (power/radar/stores/...)
+    // still need a way back out of their dive.
+    room.append(this.renderRoomHeader(meta, this.activeRoom !== "overview" || this.interiorRoot !== null));
     const body = el("div", "room-body");
     switch (this.activeRoom) {
       case "research":
@@ -2188,10 +2222,9 @@ export class BaseView {
     if (showBack) {
       const back = el("button", "room-back");
       back.textContent = "← Back to Base";
-      back.addEventListener("click", () => {
-        this.activeRoom = "overview";
-        this.refreshHud();
-      });
+      // exitToHub reverses a 3D interior dive (if any) AND returns to overview,
+      // so the same control works for both the dive and a plain room change.
+      back.addEventListener("click", () => this.exitToHub());
       header.appendChild(back);
     }
     const icon = el("span", "room-icon");
@@ -2408,12 +2441,13 @@ export class BaseView {
   }
 
   /** Selecting an installed facility (from the Construction room list) opens that
-   *  facility's dedicated room and lifts its emissive so the 3D cutaway mirrors
-   *  the selection. Mirrors the on-canvas facility click. */
+   *  facility's dedicated room, lifts its emissive, and dives the camera into its
+   *  3D interior — mirroring the on-canvas facility click end to end. */
   private selectFacility(facilityId: string): void {
     const facility = findBaseFacility(facilityId);
     this.selectedFacilityId = facilityId;
     this.activeRoom = facility ? roomForFacilityKind(facility.kind) : "overview";
+    if (facility) this.enterFacilityInterior(roleForFacilityKind(facility.kind));
     this.applyFacilityHighlight();
     this.refreshHud();
   }
@@ -2650,7 +2684,7 @@ export class BaseView {
   /** Hover: show a floating tooltip + boost the facility's emissive + cursor
    *  pointer. Clearing hover restores the defaults. */
   private onPointerMove = (event: PointerEvent): void => {
-    if (this.disposed || this.facilityMeshes.length === 0) return;
+    if (this.disposed || this.facilityMeshes.length === 0 || this.interiorRoot) return;
     const hit = this.facilityMeshAt(event);
     const id = hit?.facilityId ?? null;
     if (id !== this.hoveredFacilityId) {
@@ -2680,18 +2714,87 @@ export class BaseView {
 
   /** Click a facility floor in the 3D base: open that facility's dedicated room
    *  (the lab, workshop, barracks, or hangar), keep it selected so the cutaway
-   *  stays highlighted, and re-render the detail panel. Facilities without their
-   *  own screen fall back to the overview hub. */
+   *  stays highlighted, dive the camera INTO its 3D interior, and re-render the
+   *  detail panel. Facilities without their own screen fall back to the overview
+   *  hub. Ignored while an interior is already open (use Back to Base first). */
   private onCanvasClick = (event: MouseEvent): void => {
-    if (this.disposed || this.facilityMeshes.length === 0) return;
+    if (this.disposed || this.facilityMeshes.length === 0 || this.interiorRoot) return;
     const hit = this.facilityMeshAt(event);
     if (!hit) return;
     this.selectedFacilityId = hit.facilityId;
     const facility = findBaseFacility(hit.facilityId);
     this.activeRoom = facility ? roomForFacilityKind(facility.kind) : "overview";
+    if (facility) this.enterFacilityInterior(roleForFacilityKind(facility.kind));
     this.applyFacilityHighlight();
     this.refreshHud();
   };
+
+  /** Dive the camera INTO a facility's 3D interior: mount its diorama (built by
+   *  baseFacilityInteriors), hide the hub exterior, and tween the camera to a
+   *  close 3/4 hero framing. The facility's existing DOM room controls stay
+   *  overlaid (refreshHud re-renders the sidebar) so the player can still act. */
+  private enterFacilityInterior(role: FacilityRole): void {
+    if (this.disposed) return;
+    // Tear down any prior interior first (defensive — never two at once).
+    this.clearInterior();
+    const diorama = buildFacilityInterior(role);
+    diorama.traverse((child) => {
+      if (child instanceof Mesh) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+      }
+    });
+    this.interiorGroup.add(diorama);
+    this.interiorRoot = diorama;
+    this.baseGroup.visible = false;
+    // Clear any lingering hover affordance (tooltip + pointer cursor) from the
+    // hub facility the player just clicked — the dive replaces that interaction.
+    this.hoveredFacilityId = null;
+    if (this.tooltipEl) this.tooltipEl.classList.remove("visible");
+    this.renderer.domElement.style.cursor = "default";
+    this.beginCameraTween(this.interiorCamPos, this.interiorCamTarget, 760);
+  }
+
+  /** Dispose the mounted interior diorama (geometry + materials) and detach it,
+   *  so diving into another facility or returning to the hub never leaks GPU
+   *  memory. disposeObject dedupes shared resources. */
+  private clearInterior(): void {
+    if (!this.interiorRoot) return;
+    disposeObject(this.interiorRoot);
+    this.interiorGroup.remove(this.interiorRoot);
+    this.interiorRoot = null;
+  }
+
+  /** Reverse the dive: unmount the interior, reveal the hub exterior, and tween
+   *  the camera back to the resting hub framing. No-op when no interior is open. */
+  private exitFacilityInterior(): void {
+    if (!this.interiorRoot) return;
+    this.clearInterior();
+    this.baseGroup.visible = true;
+    this.beginCameraTween(this.camHome, this.hubCamTarget, 760);
+  }
+
+  /** "Back to Base": leave the focused facility (interior + DOM room) and return
+   *  to the overview hub. Wired to the room header's back affordance so the
+   *  existing control also reverses the 3D dive. */
+  private exitToHub(): void {
+    this.activeRoom = "overview";
+    this.exitFacilityInterior();
+    this.refreshHud();
+  }
+
+  /** Kick off an eased camera move (position + look-at target) over `durationMs`.
+   *  The frame loop drives the interpolation; from-state is snapshotted from the
+   *  camera's current position/look-at so dives chain correctly. */
+  private beginCameraTween(toPos: Vector3, toTarget: Vector3, durationMs: number): void {
+    this.camFromPos.copy(this.camera.position);
+    this.camToPos.copy(toPos);
+    this.camFromTarget.copy(this.currentLookAt);
+    this.camToTarget.copy(toTarget);
+    this.camStartMs = performance.now();
+    this.camDurationMs = durationMs;
+    this.camAnimating = true;
+  }
 
   /** Boost the emissive of the selected/hovered facility pad and its accent
    *  point light so the 3D cutaway stays in sync with the open room and the
@@ -2728,12 +2831,32 @@ export class BaseView {
     const dt = this.prevTimeMs === 0 ? 16 : Math.min(50, now - this.prevTimeMs);
     this.prevTimeMs = now;
     this.baseGroup.rotation.y = BASE_VIEW_YAW + Math.sin(elapsed * 0.16) * 0.028;
-    // Very subtle idle camera drift for life — reuses camHome (no per-frame
-    // allocation) and lookAt is allocation-free.
-    this.camera.position.x = this.camHome.x + Math.sin(elapsed * 0.12) * 0.14;
-    this.camera.position.y = this.camHome.y + Math.sin(elapsed * 0.09 + 1.1) * 0.1;
-    this.camera.position.z = this.camHome.z + Math.cos(elapsed * 0.1) * 0.12;
-    this.camera.lookAt(0, 0, 0);
+    // Camera direction is one of: an in-progress dive/back tween (priority),
+    // a resting interior hero frame (when a diorama is mounted), or the hub
+    // idle drift. All branches write position + currentLookAt in place — no
+    // per-frame allocation — then a single lookAt() applies it.
+    if (this.camAnimating) {
+      const t01 = Math.min(1, (now - this.camStartMs) / this.camDurationMs);
+      // ease-in-out cubic: smooth dive that settles gently on the hero frame.
+      const e = t01 < 0.5 ? 4 * t01 * t01 * t01 : 1 - Math.pow(-2 * t01 + 2, 3) / 2;
+      this.camera.position.lerpVectors(this.camFromPos, this.camToPos, e);
+      this.currentLookAt.lerpVectors(this.camFromTarget, this.camToTarget, e);
+      if (t01 >= 1) this.camAnimating = false;
+    } else if (this.interiorRoot) {
+      // Subtle idle drift around the interior hero frame — reuses the resting
+      // position/target (allocation-free) so the diorama feels alive up close.
+      this.camera.position.x = this.interiorCamPos.x + Math.sin(elapsed * 0.18) * 0.05;
+      this.camera.position.y = this.interiorCamPos.y + Math.sin(elapsed * 0.13 + 0.7) * 0.03;
+      this.camera.position.z = this.interiorCamPos.z + Math.cos(elapsed * 0.15) * 0.05;
+      this.currentLookAt.copy(this.interiorCamTarget);
+    } else {
+      // Hub idle drift — reuses camHome (no per-frame allocation).
+      this.camera.position.x = this.camHome.x + Math.sin(elapsed * 0.12) * 0.14;
+      this.camera.position.y = this.camHome.y + Math.sin(elapsed * 0.09 + 1.1) * 0.1;
+      this.camera.position.z = this.camHome.z + Math.cos(elapsed * 0.1) * 0.12;
+      this.currentLookAt.set(0, 0, 0);
+    }
+    this.camera.lookAt(this.currentLookAt);
     const pulse = 0.82 + Math.sin(elapsed * 3) * 0.18;
     for (const item of this.pulseMaterials) item.material.opacity = item.opacity * pulse;
     // Reactor cores visibly pulse — mutates the pre-collected materials (no
