@@ -92,6 +92,7 @@ import {
   type FacilityRole,
 } from "./basePalette";
 import { buildFacilityModel } from "./baseFacilities";
+import { CrewSystem } from "./basePeople";
 
 interface BaseViewOptions {
   campaign: CampaignState;
@@ -130,21 +131,61 @@ interface BaseRotator {
   baseRotation: number;
 }
 
-interface BaseWalker {
-  actor: Group;
-  path: Vector3[];
-  segmentLengths: number[];
-  totalLength: number;
-  speed: number;
-  offset: number;
-}
-
+/** Corridor cells (the empty grid cells between bays). Bay positions are sealed
+ *  in src/campaign/base.ts, and the unbuildable facilities render as expansion
+ *  pads (lab-2 / medbay-2 / workshop-2 / power-2 fill the entire y=4 row;
+ *  radar-2 fills [7,0]-[7,1]), so the empty cells collapse into three
+ *  4-connected components that cannot be bridged without editing campaign data:
+ *    spine      x=4, y=0..3  (radar -> command/workshop -> stores -> access/power)
+ *    left hall  x=0..1, y=2  (hangar south face <-> living north face)
+ *    right hall x=7, y=2..3  (stores east face <-> power east face)
+ *  The old single-cell pads [2,0] and [2,3] connected to NOTHING (every 4-neighbor
+ *  a bay or pad), so they are dropped — they read as concrete strips floating in
+ *  rock. Each bay still opens onto a corridor via its partition-curb doorway gap,
+ *  and crew patrol every component (see CREW_LOOP_CELLS / _LEFT) so the base
+ *  reads as one lived-in facility rather than isolated boxes. */
 const BASE_CORRIDORS: readonly BaseCorridor[] = [
-  { id: "north-link", x: 2, y: 0, w: 1, h: 1 },
-  { id: "east-spine-1", x: 4, y: 1, w: 1, h: 1 },
-  { id: "east-spine-2", x: 4, y: 2, w: 1, h: 1 },
-  { id: "quarters-link", x: 2, y: 3, w: 1, h: 1 },
-  { id: "generator-link", x: 4, y: 3, w: 1, h: 1 },
+  { id: "spine-radar", x: 4, y: 0, w: 1, h: 1 },
+  { id: "spine-command-workshop", x: 4, y: 1, w: 1, h: 1 },
+  { id: "spine-command-stores", x: 4, y: 2, w: 1, h: 1 },
+  { id: "spine-access-power", x: 4, y: 3, w: 1, h: 1 },
+  { id: "left-hangar-living-a", x: 0, y: 2, w: 1, h: 1 },
+  { id: "left-hangar-living-b", x: 1, y: 2, w: 1, h: 1 },
+  { id: "right-stores", x: 7, y: 2, w: 1, h: 1 },
+  { id: "right-power", x: 7, y: 3, w: 1, h: 1 },
+];
+
+/** Spine patrol (cell coords) — a closed out-and-back along the x=4 hall, the
+ *  largest corridor component. Every consecutive pair AND the closing
+ *  last->first are orthogonally adjacent, and each cell resolves to a corridor
+ *  cellCenter, so crew never leave the hallway or cut across a bay niche. (The
+ *  old loop strung together non-adjacent cells and clipped through the radar
+ *  dish, the access lift, and the command bay, floating above their recessed
+ *  floors.) Cell centers resolve to baseGroup-local space at build time. */
+const CREW_LOOP_CELLS: ReadonlyArray<readonly [number, number]> = [
+  [4, 0],
+  [4, 1],
+  [4, 2],
+  [4, 3],
+  [4, 2],
+  [4, 1],
+];
+
+/** Left-hall patrol — the hangar<->living connector, a separate corridor
+ *  component walled off from the spine by hangar/command/living. Same
+ *  orthogonal-adjacency rule; populated by its own CrewSystem (addCrew) so that
+ *  hall reads as lived-in too rather than dead space. */
+const CREW_LOOP_CELLS_LEFT: ReadonlyArray<readonly [number, number]> = [
+  [0, 2],
+  [1, 2],
+];
+
+/** Right-hall patrol — the stores<->power connector along x=7, the third
+ *  corridor component. Its own CrewSystem so every visible hallway reads as
+ *  populated at hero distance. Same orthogonal-adjacency rule (no bay clipping). */
+const CREW_LOOP_CELLS_RIGHT: ReadonlyArray<readonly [number, number]> = [
+  [7, 2],
+  [7, 3],
 ];
 
 const CSS = `
@@ -923,16 +964,6 @@ function missionTypeMeta(operation: OperationPlan): MissionTypeMeta {
   }
 }
 
-function makeMaterial(color: number, emissive = 0, emissiveIntensity = 0): MeshStandardMaterial {
-  return new MeshStandardMaterial({
-    color,
-    emissive,
-    emissiveIntensity,
-    roughness: 0.58,
-    metalness: 0.28,
-  });
-}
-
 function makeLabel(text: string, color: number): Sprite {
   const canvas = document.createElement("canvas");
   canvas.width = 512;
@@ -1120,7 +1151,19 @@ export class BaseView {
   private readonly baseGroup = new Group();
   private readonly pulseMaterials: Array<{ material: MeshBasicMaterial; opacity: number }> = [];
   private readonly rotators: BaseRotator[] = [];
-  private readonly walkers: BaseWalker[] = [];
+  /** Animated crew (personnel) walking the corridor loop — drives life. Owned
+   *  by the dedicated CrewSystem module; ticked in frame(), disposed on teardown. */
+  private crewSystem: CrewSystem | null = null;
+  /** Second crew system patrolling the disconnected left hall (hangar<->living)
+   *  so every corridor component reads as populated. Same lifecycle as the spine
+   *  crew: ticked in frame(), disposed on teardown. */
+  private crewSystemLeft: CrewSystem | null = null;
+  /** Third crew system patrolling the right hall (stores<->power) so every
+   *  visible corridor reads as populated at hero distance. Same lifecycle. */
+  private crewSystemRight: CrewSystem | null = null;
+  /** Previous frame timestamp (ms) for computing a frame delta without per-frame
+   *  allocation. 0 sentinel => first frame uses a nominal 16ms step. */
+  private prevTimeMs = 0;
   /** Per-bay accent point lights so each constructed facility glows from within.
    *  `base` is the resting intensity; hover/select boosts it for feedback. */
   private readonly bayLights: Array<{ light: PointLight; facilityId: string; base: number }> = [];
@@ -1132,6 +1175,12 @@ export class BaseView {
   private sharedConcrete: MeshStandardMaterial | null = null;
   private sharedSteel: MeshStandardMaterial | null = null;
   private sharedRock: MeshStandardMaterial | null = null;
+  /** Lighter concrete for corridor floor strips (derived from the palette by
+   *  lifting the bay-concrete toward the steel edge tone) — reads as hallways. */
+  private corridorFloor: MeshStandardMaterial | null = null;
+  /** One shared emissive strip-light material (palette floor-line teal) reused
+   *  along every corridor edge + center travel line. */
+  private corridorStripMat: MeshBasicMaterial | null = null;
   /** Resting camera position; the frame loop adds a subtle idle drift on top. */
   private readonly camHome = new Vector3(-0.3, 6.4, 7.5);
   private raf = 0;
@@ -1195,6 +1244,14 @@ export class BaseView {
     dom.removeEventListener("pointermove", this.onPointerMove);
     dom.removeEventListener("click", this.onCanvasClick);
     window.removeEventListener("resize", this.resize);
+    // CrewSystem owns its pooled meshes/materials; tear it down before the scene
+    // walk so its internal dispose() is the single owner of those resources.
+    this.crewSystem?.dispose();
+    this.crewSystem = null;
+    this.crewSystemLeft?.dispose();
+    this.crewSystemLeft = null;
+    this.crewSystemRight?.dispose();
+    this.crewSystemRight = null;
     disposeObject(this.scene);
     this.renderer.dispose();
     this.root.remove();
@@ -1290,6 +1347,19 @@ export class BaseView {
     this.sharedConcrete = concreteMaterial();
     this.sharedSteel = steelMaterial();
     this.sharedRock = rockMaterial();
+    // Corridor surfaces — palette-derived only (no ad-hoc hex). The hallway
+    // floor is the bay concrete lifted toward the steel-edge tone so it reads
+    // as a distinct, slightly lighter paved strip; the strip-lights glow in the
+    // shared teal floor-line accent.
+    this.corridorFloor = concreteMaterial();
+    this.corridorFloor.color.lerp(new Color(BASE_PALETTE.steelEdge), 0.16);
+    this.corridorStripMat = new MeshBasicMaterial({
+      color: BASE_PALETTE.floorLine,
+      transparent: true,
+      opacity: 0.55,
+      blending: AdditiveBlending,
+      depthWrite: false,
+    });
 
     // Rock-colored LINEAR fog with a near plane: the base (centered ~10 units
     // from the camera) stays crisp while the back rock walls + void fade to
@@ -1342,11 +1412,11 @@ export class BaseView {
 
     this.buildTerrainSlab();
     this.buildCutawayShell();
-    for (const corridor of BASE_CORRIDORS) this.buildCorridor(corridor);
+    this.buildCorridorGrid();
     for (const facility of availableBaseFacilities(this.opts.campaign)) this.buildExpansionPad(facility);
     for (const facility of constructedFacilities(this.opts.campaign)) this.buildFacility(facility);
     this.addOverheadSystems();
-    this.addInteriorTraffic();
+    this.addCrew();
     this.addPerimeterShafts();
   }
 
@@ -1497,12 +1567,6 @@ export class BaseView {
     return this.cellCenter(facility.x, facility.y, facility.w, facility.h);
   }
 
-  private pathPoint(x: number, y: number): Vector3 {
-    const point = this.cellCenter(x, y, 1, 1);
-    point.y = 0.08;
-    return point;
-  }
-
   private glowMaterial(color: number, opacity = 0.72): MeshBasicMaterial {
     const material = new MeshBasicMaterial({
       color,
@@ -1522,20 +1586,10 @@ export class BaseView {
     this.rotators.push({ object, axis, speed, baseRotation });
   }
 
-  private makeCrewFigure(color: number, scale = 1): Group {
-    const person = new Group();
-    const bodyMat = makeMaterial(BASE_PALETTE.steel, color, 0.24);
-    const visorMat = this.glowMaterial(BASE_PALETTE.accent.command, 0.68);
-    const body = new Mesh(new CylinderGeometry(0.045 * scale, 0.06 * scale, 0.2 * scale, 8), bodyMat);
-    body.position.y = 0.22 * scale;
-    const head = new Mesh(new SphereGeometry(0.055 * scale, 12, 8), visorMat);
-    head.position.y = 0.36 * scale;
-    const visor = new Mesh(new BoxGeometry(0.05 * scale, 0.024 * scale, 0.03 * scale), visorMat);
-    visor.position.set(0, 0.36 * scale, 0.055 * scale);
-    const pack = new Mesh(new BoxGeometry(0.065 * scale, 0.09 * scale, 0.025 * scale), bodyMat);
-    pack.position.set(0, 0.24 * scale, -0.055 * scale);
-    person.add(body, head, visor, pack);
-    return person;
+  /** Lay every corridor in the connected network so the bays read as one
+   *  facility. Shared floor/strip materials are created once in buildScene. */
+  private buildCorridorGrid(): void {
+    for (const corridor of BASE_CORRIDORS) this.buildCorridor(corridor);
   }
 
   private buildCorridor(corridor: BaseCorridor): void {
@@ -1547,33 +1601,29 @@ export class BaseView {
     const width = corridor.w * CELL - 0.28;
     const depth = corridor.h * CELL - 0.28;
     const long = Math.max(width, depth);
+    const short = Math.min(width, depth);
     const longAxisIsX = width >= depth;
 
-    // Concrete trench floor connecting the bays.
-    const floor = new Mesh(new BoxGeometry(width, 0.08, depth), this.sharedConcrete!);
+    // Lighter concrete trench floor (palette-derived) — a paved hallway strip a
+    // touch brighter than the sunken bay floors, connecting the rooms.
+    const floor = new Mesh(new BoxGeometry(width, 0.08, depth), this.corridorFloor!);
     floor.position.y = 0.035;
     floor.receiveShadow = true;
     group.add(floor);
 
     const edge = new LineSegments(
       new EdgesGeometry(floor.geometry),
-      new MeshBasicMaterial({
-        color: BASE_PALETTE.floorLine,
-        transparent: true,
-        opacity: 0.45,
-        blending: AdditiveBlending,
-        depthWrite: false,
-      }),
+      this.corridorStripMat!,
     );
     edge.position.copy(floor.position);
     group.add(edge);
 
-    // Low steel curbs along the long sides — reads as a floored corridor, not
-    // a gap. Cast small contact shadows onto the concrete.
+    // Low steel curbs along the long sides only — frames the hall as built
+    // while leaving the short ends fully open as DOORWAY gaps onto each bay.
     const curbH = 0.16;
     const curbLong = long * 0.42;
     const curbDeep = 0.07;
-    const offset = (longAxisIsX ? depth : width) / 2 - 0.05;
+    const offset = short / 2 - 0.05;
     for (const sign of [-1, 1]) {
       const curb = new Mesh(
         longAxisIsX
@@ -1589,15 +1639,30 @@ export class BaseView {
       group.add(curb);
     }
 
-    // Teal floor strip — the corridor's work-light runner.
-    const strip = new Mesh(
+    // Low emissive STRIP-LIGHTS along both long edges (the hallway work-lights)
+    // plus a faint center travel line. Shared palette-teal glow material.
+    const stripLen = long * 0.78;
+    const stripOff = short / 2 - 0.06;
+    for (const sign of [-1, 1]) {
+      const strip = new Mesh(
+        longAxisIsX
+          ? new BoxGeometry(stripLen, 0.02, 0.05)
+          : new BoxGeometry(0.05, 0.02, stripLen),
+        this.corridorStripMat!,
+      );
+      strip.position.y = 0.11;
+      if (longAxisIsX) strip.position.z = sign * stripOff;
+      else strip.position.x = sign * stripOff;
+      group.add(strip);
+    }
+    const travel = new Mesh(
       longAxisIsX
-        ? new BoxGeometry(long * 0.7, 0.018, 0.04)
-        : new BoxGeometry(0.04, 0.018, long * 0.7),
-      this.glowMaterial(BASE_PALETTE.floorLine, 0.5),
+        ? new BoxGeometry(long * 0.86, 0.008, 0.022)
+        : new BoxGeometry(0.022, 0.008, long * 0.86),
+      this.corridorStripMat!,
     );
-    strip.position.y = 0.1;
-    group.add(strip);
+    travel.position.y = 0.078;
+    group.add(travel);
   }
 
   private buildFacility(facility: BaseFacility): void {
@@ -1664,7 +1729,13 @@ export class BaseView {
       }
     });
     model.position.y = floorY;
-    model.scale.setScalar(1.3);
+    // Scale the (≈1-unit) diorama to fill its bay on the SHORT axis with a
+    // margin, clamped so bigger modules read at gameplay distance (~1.5x in the
+    // roomy 2x2 bays) while narrow 1x1 bays never let equipment collide with
+    // the partition walls. Bay-adaptive => robust to the facility geometry.
+    const baySpan = Math.min(width, depth);
+    const modelScale = Math.min(1.5, Math.max(1.0, (baySpan - 0.16) * 0.92));
+    model.scale.setScalar(modelScale);
     group.add(model);
 
     // Per-bay accent point light — rooms glow from within (the hero detail).
@@ -1766,66 +1837,47 @@ export class BaseView {
     }
   }
 
-  private addInteriorTraffic(): void {
-    this.addWalker(
-      [
-        this.pathPoint(1, 1),
-        this.pathPoint(2, 1),
-        this.pathPoint(3, 2),
-        this.pathPoint(4, 2),
-        this.pathPoint(5, 2),
-        this.pathPoint(5, 3),
-        this.pathPoint(4, 3),
-        this.pathPoint(3, 3),
-        this.pathPoint(2, 3),
-      ],
-      BASE_PALETTE.accent.lab,
-      0.46,
-      0,
-    );
-    this.addWalker(
-      [
-        this.pathPoint(3, 0),
-        this.pathPoint(3, 1),
-        this.pathPoint(4, 1),
-        this.pathPoint(4, 2),
-        this.pathPoint(4, 3),
-        this.pathPoint(5, 3),
-      ],
-      BASE_PALETTE.accent.workshop,
-      0.36,
-      2.4,
-    );
-    this.addWalker(
-      [
-        this.pathPoint(5, 0),
-        this.pathPoint(4, 1),
-        this.pathPoint(3, 2),
-        this.pathPoint(2, 3),
-        this.pathPoint(1, 3),
-      ],
-      BASE_PALETTE.accent.hangar,
-      0.3,
-      4.2,
-    );
+  /** Spawn the animated crew — a handful of personnel walking the corridor
+   *  loop between rooms (plus idle figures) so the base reads as alive. The
+   *  dedicated CrewSystem owns its pooled meshes, deterministic motion (seeded
+   *  LCG), and disposal; we just place its group on the base so it transforms
+   *  with the carved facility and tick it each frame. */
+  private addCrew(): void {
+    this.crewSystem = new CrewSystem({
+      waypoints: this.crewLoopToWorld(CREW_LOOP_CELLS),
+      count: 9,
+      seed: 1337,
+    });
+    this.baseGroup.add(this.crewSystem.group);
+
+    // The left hall is a separate corridor component walled off from the spine;
+    // give it its own small crew so it reads as a lived-in connector, not dead
+    // space. Patrols only orthogonally-adjacent corridor cells (no bay clipping).
+    this.crewSystemLeft = new CrewSystem({
+      waypoints: this.crewLoopToWorld(CREW_LOOP_CELLS_LEFT),
+      count: 3,
+      seed: 4242,
+    });
+    this.baseGroup.add(this.crewSystemLeft.group);
+
+    // The right hall (stores<->power) is the third corridor component; populate
+    // it too so every visible foreground hallway has moving personnel.
+    this.crewSystemRight = new CrewSystem({
+      waypoints: this.crewLoopToWorld(CREW_LOOP_CELLS_RIGHT),
+      count: 3,
+      seed: 9900,
+    });
+    this.baseGroup.add(this.crewSystemRight.group);
   }
 
-  private addWalker(path: Vector3[], color: number, speed: number, offset: number): void {
-    if (path.length < 2) return;
-    const actor = this.makeCrewFigure(color, 1.08);
-    actor.position.copy(path[0]!);
-    this.baseGroup.add(actor);
-
-    const segmentLengths: number[] = [];
-    let totalLength = 0;
-    for (let i = 0; i < path.length; i++) {
-      const current = path[i]!;
-      const next = path[(i + 1) % path.length]!;
-      const length = current.distanceTo(next);
-      segmentLengths.push(length);
-      totalLength += length;
-    }
-    this.walkers.push({ actor, path, segmentLengths, totalLength, speed, offset });
+  /** Resolve a cell-coord patrol loop to baseGroup-local waypoints pinned to the
+   *  corridor floor (top ~0.075; the figure origin is at the feet). */
+  private crewLoopToWorld(cells: ReadonlyArray<readonly [number, number]>): Vector3[] {
+    return cells.map(([cx, cy]) => {
+      const p = this.cellCenter(cx, cy, 1, 1);
+      p.y = 0.08;
+      return p;
+    });
   }
 
   private updateRotators(elapsed: number): void {
@@ -1834,27 +1886,6 @@ export class BaseView {
       if (item.axis === "x") item.object.rotation.x = value;
       else if (item.axis === "y") item.object.rotation.y = value;
       else item.object.rotation.z = value;
-    }
-  }
-
-  private updateWalkers(elapsed: number): void {
-    for (const walker of this.walkers) {
-      if (walker.totalLength <= 0) continue;
-      let distance = (elapsed * walker.speed + walker.offset) % walker.totalLength;
-      for (let i = 0; i < walker.path.length; i++) {
-        const length = walker.segmentLengths[i]!;
-        if (distance > length) {
-          distance -= length;
-          continue;
-        }
-        const from = walker.path[i]!;
-        const to = walker.path[(i + 1) % walker.path.length]!;
-        const alpha = length > 0 ? distance / length : 0;
-        walker.actor.position.lerpVectors(from, to, alpha);
-        walker.actor.position.y = 0.08 + Math.sin(elapsed * 9 + walker.offset) * 0.018;
-        walker.actor.rotation.y = Math.atan2(to.x - from.x, to.z - from.z);
-        break;
-      }
     }
   }
 
@@ -2690,7 +2721,12 @@ export class BaseView {
   private frame = (): void => {
     if (this.disposed) return;
     this.raf = requestAnimationFrame(this.frame);
-    const elapsed = performance.now() * 0.001;
+    const now = performance.now();
+    const elapsed = now * 0.001;
+    // Frame delta (ms) for time-based animation (crew). Capped so a stalled
+    // tab / first frame can't catapult actors; no per-frame allocation.
+    const dt = this.prevTimeMs === 0 ? 16 : Math.min(50, now - this.prevTimeMs);
+    this.prevTimeMs = now;
     this.baseGroup.rotation.y = BASE_VIEW_YAW + Math.sin(elapsed * 0.16) * 0.028;
     // Very subtle idle camera drift for life — reuses camHome (no per-frame
     // allocation) and lookAt is allocation-free.
@@ -2705,7 +2741,9 @@ export class BaseView {
     const reactorPulse = 1.4 + Math.sin(elapsed * 2.2) * 0.7;
     for (const mat of this.reactorCores) mat.emissiveIntensity = reactorPulse;
     this.updateRotators(elapsed);
-    this.updateWalkers(elapsed);
+    this.crewSystem?.tick(dt);
+    this.crewSystemLeft?.tick(dt);
+    this.crewSystemRight?.tick(dt);
     this.renderer.render(this.scene, this.camera);
   };
 }

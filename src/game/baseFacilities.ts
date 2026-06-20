@@ -9,9 +9,11 @@
  * textures), and three.js re-uploads any shared/disposed GPU resource on the
  * next render, so disposal of one group can never corrupt another.
  *
- * Models are STATIC — the baseView frame loop owns all animation. Each Group is
- * ~15-30 parts, scaled to fill one bay (~1 unit footprint), with its origin at
- * the floor center (y = 0 is the floor surface).
+ * Models are STATIC — the baseView frame loop owns all animation (the reactor
+ * core flags itself via userData.reactorPulse for the view to pulse). Each Group
+ * is ~15-30 parts, uniformly enlarged to ~1.5x so silhouettes read at gameplay
+ * distance (baseView sizes the bays to fit), with its origin at the floor center
+ * (y = 0 is the floor surface).
  */
 import {
   BoxGeometry,
@@ -72,7 +74,11 @@ interface AccentSet {
 }
 
 function makeAccent(role: FacilityRole): AccentSet {
-  return { glow: accentMaterial(role, 1.1), beacon: accentMaterial(role, 2.2) };
+  // Art-upgrade: stronger emissive accents so each facility's signature glow
+  // reads at gameplay distance (glow = panels/strips, beacon = bright points).
+  // Tuned just above the original (1.55/3.0) but below the ACES bleach point so
+  // the signature COLOR survives tone mapping instead of washing to white.
+  return { glow: accentMaterial(role, 1.8), beacon: accentMaterial(role, 3.2) };
 }
 
 /** One shared accent pair per role. */
@@ -85,6 +91,14 @@ const ACCENT: Record<FacilityRole, AccentSet> = {
   radar: makeAccent("radar"),
   reactor: makeAccent("reactor"),
 };
+
+/**
+ * Uniform art-upgrade scale: every facility model is enlarged so its silhouette
+ * reads at gameplay distance. Applied once on the finished Group so all relative
+ * proportions are preserved and no extra geometry/material is allocated.
+ * baseView sizes the bays to fit these larger modules + the corridor grid.
+ */
+const MODEL_SCALE = 1.5;
 
 type Vec3 = readonly [number, number, number];
 
@@ -157,6 +171,10 @@ export function buildFacilityModel(role: FacilityRole): Group {
       buildFallback(group, role);
       break;
   }
+  // Enlarge the finished diorama uniformly so it reads at distance. Group-level
+  // scaling is allocation-free and transparent to raycasting (world matrices
+  // absorb it), so baseView's hover/click behavior is unchanged.
+  group.scale.setScalar(MODEL_SCALE);
   return group;
 }
 
@@ -190,23 +208,24 @@ function buildCommand(group: Group): void {
 function buildLab(group: Group): void {
   const accent = ACCENT.lab;
   addPad(group);
-  // Two tall server racks with status lights.
+  // Two tall server racks with status lights — enlarged so they read as racks.
   for (const sx of [-1, 1]) {
-    add(group, GEO.box, MAT.steel, [sx * 0.3, 0.4, -0.28], [0.26, 0.76, 0.18]);
-    add(group, GEO.box, MAT.steel, [sx * 0.3, 0.78, -0.28], [0.28, 0.08, 0.2]);
-    for (let row = 0; row < 3; row++) {
+    add(group, GEO.box, MAT.steel, [sx * 0.32, 0.46, -0.28], [0.3, 0.9, 0.2]);
+    add(group, GEO.box, MAT.steel, [sx * 0.32, 0.92, -0.28], [0.32, 0.08, 0.22]);
+    for (let row = 0; row < 4; row++) {
       for (let col = -1; col <= 1; col++) {
-        add(group, GEO.dot, accent.glow, [sx * 0.3 + col * 0.07, 0.22 + row * 0.16, -0.185]);
+        add(group, GEO.dot, accent.glow, [sx * 0.32 + col * 0.08, 0.2 + row * 0.18, -0.175]);
       }
     }
   }
-  // Tall glowing research vat — the lab's signature cyan column.
-  add(group, GEO.core, MAT.steel, [0, 0.42, 0.12], [0.4, 0.82, 0.4]);
-  add(group, GEO.core, accent.beacon, [0, 0.44, 0.12], [0.26, 0.74, 0.26]);
-  add(group, GEO.disk, MAT.steel, [0, 0.84, 0.12], [0.82, 1, 0.82], [0.41, 1, 0.41]);
-  add(group, GEO.disk, accent.glow, [0, 0.86, 0.12], [0.5, 1, 0.5]);
+  // Tall glowing research vat — the lab's signature cyan column, enlarged.
+  add(group, GEO.core, MAT.steel, [0, 0.48, 0.14], [0.46, 0.96, 0.46]);
+  add(group, GEO.core, accent.beacon, [0, 0.5, 0.14], [0.32, 0.86, 0.32]);
+  add(group, GEO.disk, MAT.steel, [0, 0.96, 0.14], [0.92, 1, 0.92], [0.46, 1, 0.46]);
+  add(group, GEO.disk, accent.glow, [0, 0.98, 0.14], [0.58, 1, 0.58]);
+  add(group, GEO.bead, accent.beacon, [0, 1.02, 0.14]);
   // Ceiling strip light.
-  add(group, GEO.slab, accent.glow, [0, 0.86, -0.05], [0.5, 1, 0.08]);
+  add(group, GEO.slab, accent.glow, [0, 0.96, -0.05], [0.6, 1, 0.08]);
   addBeacon(group, "lab", 0.4, 0.5, 0.36);
 }
 
@@ -214,21 +233,23 @@ function buildLab(group: Group): void {
 function buildWorkshop(group: Group): void {
   const accent = ACCENT.workshop;
   addPad(group);
-  // Overhead fabrication gantry.
+  // Overhead fabrication gantry — enlarged so the frame reads as machinery.
   for (const sx of [-1, 1]) {
-    add(group, GEO.post, MAT.steel, [sx * 0.38, 0.4, -0.1], [1, 0.78, 1]);
+    add(group, GEO.post, MAT.steel, [sx * 0.4, 0.46, -0.1], [1.2, 0.9, 1.2]);
   }
-  add(group, GEO.box, MAT.steel, [0, 0.78, -0.1], [0.8, 0.08, 0.1]); // crossbeam
-  add(group, GEO.box, MAT.steel, [0.12, 0.5, -0.1], [0.08, 0.5, 0.08]); // arm
-  add(group, GEO.box, MAT.steel, [0.12, 0.27, -0.1], [0.22, 0.06, 0.16]); // weld head
-  // Forge with amber glow.
-  add(group, GEO.box, MAT.steel, [-0.26, 0.2, 0.18], [0.24, 0.32, 0.24]);
-  add(group, GEO.cone, accent.beacon, [-0.26, 0.36, 0.18], [0.2, 0.22, 0.2]);
-  add(group, GEO.box, accent.glow, [-0.26, 0.12, 0.18], [0.16, 0.06, 0.16]);
+  add(group, GEO.box, MAT.steel, [0, 0.9, -0.1], [0.9, 0.1, 0.12]); // crossbeam
+  add(group, GEO.box, MAT.steel, [0.14, 0.58, -0.1], [0.1, 0.58, 0.1]); // arm
+  add(group, GEO.box, accent.glow, [0.14, 0.32, -0.1], [0.26, 0.08, 0.18]); // weld head glow
+  add(group, GEO.box, MAT.steel, [0.14, 0.29, -0.1], [0.24, 0.06, 0.16]); // weld head
+  // Forge with amber glow — the workshop's signature, enlarged + brighter.
+  add(group, GEO.box, MAT.steel, [-0.28, 0.24, 0.2], [0.3, 0.4, 0.3]);
+  add(group, GEO.cone, accent.beacon, [-0.28, 0.44, 0.2], [0.28, 0.32, 0.28]);
+  add(group, GEO.box, accent.glow, [-0.28, 0.14, 0.2], [0.22, 0.08, 0.22]);
+  add(group, GEO.bead, accent.beacon, [-0.28, 0.5, 0.2]);
   // Tool rack against the back.
-  add(group, GEO.box, MAT.steel, [0.28, 0.34, -0.32], [0.12, 0.6, 0.06]);
-  for (let i = 0; i < 3; i++) {
-    add(group, GEO.post, accent.glow, [0.28, 0.2 + i * 0.16, -0.28], [1, 0.08, 1]);
+  add(group, GEO.box, MAT.steel, [0.3, 0.4, -0.32], [0.14, 0.72, 0.07]);
+  for (let i = 0; i < 4; i++) {
+    add(group, GEO.post, accent.glow, [0.3, 0.18 + i * 0.16, -0.28], [1.1, 0.08, 1.1]);
   }
   addBeacon(group, "workshop", -0.4, 0.5, -0.36);
 }
@@ -238,50 +259,57 @@ function buildBarracks(group: Group): void {
   const accent = ACCENT.barracks;
   addPad(group);
   // Two bunk beds along the sides (four corner posts each, two mattresses).
+  // Enlarged + brighter mattress glow so the stacked beds read at a glance.
   for (const sx of [-1, 1]) {
     for (const ox of [-1, 1]) {
       for (const oz of [-1, 1]) {
-        add(group, GEO.post, MAT.steel, [sx * 0.34 + ox * 0.15, 0.3, oz * 0.2], [1, 0.58, 1]);
+        add(group, GEO.post, MAT.steel, [sx * 0.34 + ox * 0.17, 0.34, oz * 0.22], [1.1, 0.66, 1.1]);
       }
     }
-    for (const by of [0.18, 0.42]) {
-      add(group, GEO.slab, MAT.steel, [sx * 0.34, by, 0], [0.34, 1, 0.46]);
-      add(group, GEO.slab, accent.beacon, [sx * 0.34, by + 0.03, 0], [0.3, 1, 0.42]);
+    for (const by of [0.2, 0.48]) {
+      add(group, GEO.slab, MAT.steel, [sx * 0.34, by, 0], [0.38, 1, 0.5]);
+      add(group, GEO.slab, accent.beacon, [sx * 0.34, by + 0.035, 0], [0.34, 1, 0.46]);
+      add(group, GEO.box, accent.glow, [sx * 0.34, by + 0.06, 0.18], [0.3, 0.04, 0.12]); // pillow
     }
   }
   // Footlockers at the foot of each bed.
   for (const sx of [-1, 1]) {
-    add(group, GEO.box, MAT.steel, [sx * 0.34, 0.08, 0.3], [0.26, 0.12, 0.12]);
+    add(group, GEO.box, MAT.steel, [sx * 0.34, 0.1, 0.34], [0.3, 0.16, 0.14]);
   }
   // Warm ceiling lamp.
-  add(group, GEO.post, MAT.steel, [0, 0.78, -0.2], [1, 0.16, 1]);
-  add(group, GEO.disk, accent.beacon, [0, 0.86, -0.2], [0.5, 1, 0.5]);
+  add(group, GEO.post, MAT.steel, [0, 0.82, -0.2], [1, 0.18, 1]);
+  add(group, GEO.disk, accent.beacon, [0, 0.9, -0.2], [0.6, 1, 0.6]);
   addBeacon(group, "barracks", 0, 0.5, 0.36);
 }
 
 /** Hangar (green): the X-COM ship on a pad, launch ramp, overhead gantry. */
 function buildHangar(group: Group): void {
   const accent = ACCENT.hangar;
-  add(group, GEO.disk, MAT.concrete, [0, 0.02, 0.04], [1.7, 1, 1.7]); // landing pad
-  addHalo(group, accent, 0.42, 0.05);
+  add(group, GEO.disk, MAT.concrete, [0, 0.02, 0.04], [1.84, 1, 1.84]); // landing pad
+  addHalo(group, accent, 0.46, 0.05);
   // Pad edge lights.
   for (let i = 0; i < 4; i++) {
     const a = (i / 4) * Math.PI * 2;
-    add(group, GEO.dot, accent.glow, [Math.cos(a) * 0.42, 0.06, 0.04 + Math.sin(a) * 0.42]);
+    add(group, GEO.dot, accent.glow, [Math.cos(a) * 0.46, 0.06, 0.04 + Math.sin(a) * 0.46]);
   }
   // The interceptor — long fuselage, broad swept wings, tall tail, twin glowing
-  // engines. Sized to read as a ship at distance (the 2x2 bay has the room).
-  add(group, GEO.core, MAT.steel, [0, 0.3, 0.0], [0.4, 0.3, 1.5]); // fuselage
-  add(group, GEO.dome, accent.glow, [0, 0.36, 0.62], [0.44, 0.44, 0.44], [-Math.PI / 2, 0, 0]); // cockpit canopy
-  add(group, GEO.box, MAT.steel, [0, 0.5, -0.42], [0.16, 0.4, 0.18]); // vertical tail
-  add(group, GEO.box, MAT.steel, [0, 0.42, -0.22], [0.7, 0.05, 0.22]); // horizontal stabilizer
-  add(group, GEO.box, MAT.steel, [0.34, 0.29, 0.04], [0.74, 0.07, 0.3], [0, -0.5, 0.2]); // starboard wing
-  add(group, GEO.box, MAT.steel, [-0.34, 0.29, 0.04], [0.74, 0.07, 0.3], [0, 0.5, 0.2]); // port wing
-  add(group, GEO.box, accent.beacon, [0.34, 0.295, -0.08], [0.12, 0.04, 0.22]); // starboard wingtip strobe
-  add(group, GEO.box, accent.beacon, [-0.34, 0.295, -0.08], [0.12, 0.04, 0.22]); // port wingtip strobe
+  // engines. Enlarged + accented so the silhouette reads as a ship at distance.
+  add(group, GEO.core, MAT.steel, [0, 0.32, 0.0], [0.52, 0.36, 1.78]); // fuselage
+  add(group, GEO.box, accent.glow, [0, 0.52, 0.0], [0.07, 0.03, 1.5]); // dorsal spine stripe
+  add(group, GEO.dome, accent.beacon, [0, 0.4, 0.72], [0.5, 0.42, 0.5], [-Math.PI / 2, 0, 0]); // cockpit canopy
+  add(group, GEO.box, MAT.steel, [0, 0.54, -0.46], [0.2, 0.5, 0.2]); // vertical tail
+  add(group, GEO.box, accent.glow, [0, 0.6, -0.46], [0.04, 0.34, 0.16]); // tail fin stripe
+  add(group, GEO.box, MAT.steel, [0, 0.44, -0.24], [0.82, 0.06, 0.26]); // horizontal stabilizer
+  // Broad swept wings with bright green leading edges — the ship's signature.
+  add(group, GEO.box, MAT.steel, [0.4, 0.31, 0.04], [0.9, 0.08, 0.36], [0, -0.5, 0.22]); // starboard wing
+  add(group, GEO.box, MAT.steel, [-0.4, 0.31, 0.04], [0.9, 0.08, 0.36], [0, 0.5, 0.22]); // port wing
+  add(group, GEO.box, accent.glow, [0.4, 0.335, 0.2], [0.9, 0.025, 0.05], [0, -0.5, 0.22]); // starboard leading edge
+  add(group, GEO.box, accent.glow, [-0.4, 0.335, 0.2], [0.9, 0.025, 0.05], [0, 0.5, 0.22]); // port leading edge
+  add(group, GEO.box, accent.beacon, [0.42, 0.315, -0.12], [0.14, 0.05, 0.26]); // starboard wingtip strobe
+  add(group, GEO.box, accent.beacon, [-0.42, 0.315, -0.12], [0.14, 0.05, 0.26]); // port wingtip strobe
   // Twin glowing engines — the ship's bright green signature at the tail.
-  add(group, GEO.core, accent.beacon, [0.11, 0.3, -0.72], [0.2, 0.2, 0.16]);
-  add(group, GEO.core, accent.beacon, [-0.11, 0.3, -0.72], [0.2, 0.2, 0.16]);
+  add(group, GEO.core, accent.beacon, [0.13, 0.32, -0.84], [0.26, 0.26, 0.2]);
+  add(group, GEO.core, accent.beacon, [-0.13, 0.32, -0.84], [0.26, 0.26, 0.2]);
   // Launch ramp / bay doors at the back.
   add(group, GEO.box, MAT.steel, [0, 0.12, -0.4], [0.7, 0.06, 0.12], [0.35, 0, 0]);
   for (const sx of [-1, 1]) {
@@ -300,20 +328,20 @@ function buildRadar(group: Group): void {
   const accent = ACCENT.radar;
   addPad(group);
   // Tilted parabolic dish on a stout base — the radar's signature (1x1 bay).
-  add(group, GEO.pillar, MAT.steel, [0, 0.18, -0.05], [1.1, 0.24, 1.1]);
-  add(group, GEO.dome, MAT.steel, [0, 0.34, -0.05], [0.86, 0.42, 0.86], [-1.0, 0.4, 0]); // dish shell
-  add(group, GEO.dome, accent.glow, [0, 0.34, -0.05], [0.7, 0.34, 0.7], [-1.0, 0.4, 0]); // dish face glow
-  add(group, GEO.bead, accent.beacon, [0, 0.42, 0.02]); // receiver horn
+  add(group, GEO.pillar, MAT.steel, [0, 0.2, -0.05], [1.2, 0.28, 1.2]);
+  add(group, GEO.dome, MAT.steel, [0, 0.38, -0.05], [0.98, 0.48, 0.98], [-1.0, 0.4, 0]); // dish shell
+  add(group, GEO.dome, accent.glow, [0, 0.38, -0.05], [0.8, 0.4, 0.8], [-1.0, 0.4, 0]); // dish face glow
+  add(group, GEO.bead, accent.beacon, [0, 0.48, 0.04], [1.4, 1.4, 1.4]); // receiver horn
   // Antenna mast with crossbars.
-  add(group, GEO.post, MAT.steel, [-0.32, 0.5, 0.3], [1, 0.94, 1]);
-  for (const my of [0.4, 0.62]) {
+  add(group, GEO.post, MAT.steel, [-0.32, 0.56, 0.3], [1, 1.06, 1]);
+  for (const my of [0.44, 0.68]) {
     add(group, GEO.post, MAT.steel, [-0.32, my, 0.3], [1, 0.04, 1], [0, 0, Math.PI / 2]);
     add(group, GEO.dot, accent.glow, [-0.32, my, 0.3]);
   }
-  add(group, GEO.bead, accent.beacon, [-0.32, 0.98, 0.3]);
+  add(group, GEO.bead, accent.beacon, [-0.32, 1.1, 0.3]);
   // Base equipment cabinet.
-  add(group, GEO.box, MAT.steel, [0.2, 0.18, 0.26], [0.26, 0.3, 0.22]);
-  add(group, GEO.box, accent.glow, [0.2, 0.28, 0.15], [0.18, 0.08, 0.02]);
+  add(group, GEO.box, MAT.steel, [0.22, 0.2, 0.26], [0.3, 0.34, 0.24]);
+  add(group, GEO.box, accent.glow, [0.22, 0.32, 0.14], [0.2, 0.09, 0.02]);
   addBeacon(group, "radar", 0.38, 0.5, -0.34);
 }
 
@@ -321,31 +349,31 @@ function buildRadar(group: Group): void {
 function buildReactor(group: Group): void {
   const accent = ACCENT.reactor;
   addPad(group);
-  addHalo(group, accent, 0.4);
-  // Cylindrical core housing.
-  add(group, GEO.core, MAT.steel, [0, 0.42, 0], [0.62, 0.82, 0.62]);
+  addHalo(group, accent, 0.44);
+  // Cylindrical core housing — enlarged so the reactor reads as the power heart.
+  add(group, GEO.core, MAT.steel, [0, 0.48, 0], [0.72, 0.96, 0.72]);
   // Large glowing inner core — pulses. Dedicated material (not the shared
   // accent) so only the core animates; tagged for the baseView frame loop.
-  const coreGlow = accentMaterial("reactor", 1.4);
-  const core = add(group, GEO.core, coreGlow, [0, 0.44, 0], [0.42, 0.74, 0.42]);
+  const coreGlow = accentMaterial("reactor", 2.1);
+  const core = add(group, GEO.core, coreGlow, [0, 0.5, 0], [0.52, 0.86, 0.52]);
   core.userData.reactorPulse = true;
   // Vented cap.
-  add(group, GEO.disk, MAT.steel, [0, 0.84, 0], [1.28, 1, 1.28], [0.64, 1, 0.64]);
+  add(group, GEO.disk, MAT.steel, [0, 0.96, 0], [1.44, 1, 1.44], [0.72, 1, 0.72]);
   for (let i = 0; i < 4; i++) {
     const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
-    add(group, GEO.box, MAT.steel, [Math.cos(a) * 0.26, 0.9, Math.sin(a) * 0.26], [0.08, 0.08, 0.08]);
+    add(group, GEO.box, MAT.steel, [Math.cos(a) * 0.3, 1.02, Math.sin(a) * 0.3], [0.09, 0.09, 0.09]);
   }
   // Conduit pipes running out to junction boxes.
   for (const sx of [-1, 1]) {
-    add(group, GEO.post, MAT.steel, [sx * 0.4, 0.36, 0], [1, 0.12, 1], [0, 0, Math.PI / 2]);
-    add(group, GEO.box, MAT.steel, [sx * 0.47, 0.36, 0], [0.14, 0.24, 0.24]);
-    add(group, GEO.dot, accent.glow, [sx * 0.47, 0.46, 0]);
+    add(group, GEO.post, MAT.steel, [sx * 0.42, 0.4, 0], [1, 0.14, 1], [0, 0, Math.PI / 2]);
+    add(group, GEO.box, MAT.steel, [sx * 0.5, 0.4, 0], [0.16, 0.28, 0.28]);
+    add(group, GEO.dot, accent.glow, [sx * 0.5, 0.52, 0]);
   }
   // Base plinth struts.
   for (const sx of [-1, 1]) {
-    add(group, GEO.box, MAT.steel, [sx * 0.22, 0.06, 0], [0.1, 0.12, 0.34]);
+    add(group, GEO.box, MAT.steel, [sx * 0.24, 0.06, 0], [0.12, 0.12, 0.38]);
   }
-  addBeacon(group, "reactor", 0, 1.02, -0.36);
+  addBeacon(group, "reactor", 0, 1.14, -0.36);
 }
 
 /** Unknown/default role: a compact command-style beacon on a steel plinth. */
