@@ -327,6 +327,7 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
     players: deployment.length,
     enemies: operation.enemyCount,
     themeId: operation.themeId,
+    hourOfDay: campaign.clock.hour,
     playerWeaponIds: deploymentWeaponIds(campaign),
     playerNames: deployment.map((soldier) => soldier.name),
     playerSoldierIds: deployment.map((soldier) => soldier.id),

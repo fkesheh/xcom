@@ -119,8 +119,10 @@ function enemyCountForMission(
 ): number {
   switch (missionType) {
     case "landedUfo":
-      // Intact UFO carries a larger crew.
-      return crashSiteEnemyCount + 2;
+      // Intact craft fields its full, unwounded crew. A shot-down wreck keeps only
+      // ~60-70% of that crew alive (the rest died in the crash), so the landed assault
+      // fields roughly 1.5x the crash-site survivor count.
+      return crashSiteEnemyCount + Math.ceil(crashSiteEnemyCount / 2);
     case "terror":
       // City raids are heavily attended.
       return crashSiteEnemyCount + 3;
@@ -129,6 +131,8 @@ function enemyCountForMission(
       return crashSiteEnemyCount + Math.max(1, Math.floor(campaign.strategic.threat / 20));
     case "crashSite":
     default:
+      // Shot-down wreck: the impact killed or wounded much of the crew, leaving a
+      // reduced, battered force (the baseline count already reflects those losses).
       return crashSiteEnemyCount;
   }
 }
@@ -181,7 +185,7 @@ function briefingFor(ctx: BriefingContext): string {
           : `A UFO has landed intact in ${ctx.region}. `) +
         `Assault teams are ready for Operation ${ctx.codename}. ` +
         body +
-        "Assault the landed craft and secure its cargo."
+        "The intact craft fields its full, unwounded crew. Assault the landed craft and secure its cargo."
       );
     case "terror":
       return (
@@ -207,6 +211,7 @@ function briefingFor(ctx: BriefingContext): string {
         `Expect ${ctx.enemyCount} contacts in ${ctx.themeId} terrain. ` +
         `Estimated field time is ${ctx.durationHours}h. ` +
         facilityIntelClause(ctx.facilityIntel) +
+        "Wreckage survey: the impact killed or wounded much of the crew, leaving a reduced, battered force. " +
         "Recover the power source, extract it to the dropship, or clear the site."
       );
   }

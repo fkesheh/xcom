@@ -2,10 +2,12 @@ import {
   AdditiveBlending,
   AmbientLight,
   BackSide,
+  BoxGeometry,
   BufferGeometry,
   CanvasTexture,
   Color,
   ConeGeometry,
+  CylinderGeometry,
   DirectionalLight,
   DoubleSide,
   Float32BufferAttribute,
@@ -82,6 +84,10 @@ const MAP_HEIGHT = 1024;
 const ENCOUNTER_START_RANGE = 3;
 /** Sampling resolution of the base->UFO great-circle trajectory line. */
 const TRAJECTORY_SEGMENTS = 24;
+/** Duration of the interceptor's base->UFO launch flight, in milliseconds. */
+const INTERCEPTOR_FLIGHT_MS = 1300;
+/** Arc fraction the launch flight covers; the remaining slice is range-driven closing. */
+const INTERCEPTOR_FLIGHT_END = 0.75;
 
 interface SpeedOption {
   speed: number;
@@ -1002,6 +1008,12 @@ export class GeoscapeView {
   private speedButtons: HTMLButtonElement[] = [];
   /** Cached base->UFO great-circle route for the current engagement target. */
   private interceptorRoute: { baseN: Vector3; ufoN: Vector3; contactId: string } | null = null;
+  /** Directional sun light; orbited each frame by updateTerminator for the day/night cycle. */
+  private readonly sunLight = new DirectionalLight(0xffffff, 2.6);
+  /** Timestamp (ms) the current interception launch flight began; drives the base->UFO fly-out. */
+  private interceptorFlightStartMs = 0;
+  /** Last-refresh engagement state; a false->true transition kicks off the launch flight. */
+  private wasEngaging = false;
   private toastTimer: number | undefined;
 
   // Dynamic DOM containers populated by refresh() (static shell lives in buildHud()).
@@ -1021,6 +1033,7 @@ export class GeoscapeView {
   constructor(private readonly opts: GeoscapeOptions) {
     injectStyle();
     this.campaign = opts.campaign;
+    this.wasEngaging = this.isEngaging();
     this.selectedBase = opts.campaign?.base ?? null;
     this.root = el("div");
     this.root.id = "geoscape";
@@ -1038,8 +1051,9 @@ export class GeoscapeView {
     this.controls.enablePan = false;
     this.controls.minDistance = 3.05;
     this.controls.maxDistance = 5.4;
-    this.controls.autoRotate = true;
-    this.controls.autoRotateSpeed = 0.45;
+    // Stationary globe: no automatic spin so the player can read positions at a
+    // glance. User drag/orbit via OrbitControls is unaffected.
+    this.controls.autoRotate = false;
 
     // Trajectory line is allocated once; its positions are rewritten per engagement.
     this.trajectoryLine = this.makeTrajectoryLine();
@@ -1107,10 +1121,11 @@ export class GeoscapeView {
   }
 
   private buildScene(): Mesh {
-    this.scene.add(new AmbientLight(0x6ecde8, 0.85));
-    const sun = new DirectionalLight(0xffffff, 2.6);
-    sun.position.set(4, 2, 5);
-    this.scene.add(sun);
+    // Dim ambient so the night hemisphere reads dark; the day/night terminator
+    // comes from sunLight, whose position is advanced each frame by updateTerminator.
+    this.scene.add(new AmbientLight(0x6ecde8, 0.18));
+    this.sunLight.position.set(4, 1.8, 5);
+    this.scene.add(this.sunLight);
 
     const stars = this.makeStars();
     this.scene.add(stars);
@@ -1177,33 +1192,63 @@ export class GeoscapeView {
   }
 
   /**
-   * Cyan interceptor craft (distinct from the amber base cone and the UFO's
-   * mission-colored marker). Color is always paired with the "INTERCEPTOR" label
-   * in the encounter overlay, so the craft is identifiable without color alone.
+   * Cyan interceptor craft built as a recognizable plane silhouette — fuselage
+   * with a tapered nose, two swept main wings, a vertical tail fin, and a dark
+   * canopy — distinct from the amber base cone and the UFO's mission-colored
+   * marker. The marker's +Y is forward (oriented toward the UFO in
+   * animateInterceptor), so the nose points along the travel tangent. Color is
+   * always paired with the "INTERCEPTOR" label in the encounter overlay, so the
+   * craft is identifiable without color alone.
    */
   private buildInterceptorMarker(): void {
-    const dart = new Mesh(
-      new ConeGeometry(0.05, 0.14, 14),
+    const body = new MeshStandardMaterial({
+      color: 0x22d3ee,
+      emissive: new Color(0x06b6d4),
+      emissiveIntensity: 1.4,
+      roughness: 0.3,
+      metalness: 0.45,
+    });
+    // Fuselage along +Y (forward axis), tapering toward the tail.
+    const fuselage = new Mesh(new CylinderGeometry(0.011, 0.019, 0.15, 8), body);
+    // Nose cone pointing forward.
+    const nose = new Mesh(new ConeGeometry(0.011, 0.04, 8), body);
+    nose.position.y = 0.095;
+    // Swept main wings extending in ±X, swept back via Z rotation.
+    const wingGeo = new BoxGeometry(0.062, 0.034, 0.006);
+    const wingR = new Mesh(wingGeo, body);
+    wingR.position.set(0.04, -0.012, 0);
+    wingR.rotation.z = -0.4;
+    const wingL = new Mesh(wingGeo, body);
+    wingL.position.set(-0.04, -0.012, 0);
+    wingL.rotation.z = 0.4;
+    // Vertical tail fin at the rear, extending +Z (away from the globe surface).
+    const tail = new Mesh(new BoxGeometry(0.006, 0.03, 0.02), body);
+    tail.position.set(0, -0.055, 0.011);
+    // Cockpit canopy — a dark glowing sliver near the nose.
+    const canopy = new Mesh(
+      new SphereGeometry(0.008, 8, 6),
       new MeshStandardMaterial({
-        color: 0x22d3ee,
-        emissive: new Color(0x06b6d4),
-        emissiveIntensity: 1.7,
-        roughness: 0.3,
-        metalness: 0.4,
+        color: 0x0e7490,
+        emissive: new Color(0x0891b2),
+        emissiveIntensity: 0.9,
+        roughness: 0.2,
+        metalness: 0.6,
       }),
     );
+    canopy.position.set(0, 0.045, 0.004);
+    canopy.scale.set(1, 1.5, 0.75);
     const ring = new Mesh(
       new RingGeometry(0.07, 0.1, 20),
       new MeshBasicMaterial({
         color: 0x67e8f9,
         transparent: true,
-        opacity: 0.55,
+        opacity: 0.5,
         side: DoubleSide,
         blending: AdditiveBlending,
       }),
     );
     ring.rotation.x = -Math.PI / 2;
-    this.interceptorMarker.add(dart, ring);
+    this.interceptorMarker.add(fuselage, nose, wingR, wingL, tail, canopy, ring);
   }
 
   private makeStars(): Points {
@@ -1231,6 +1276,7 @@ export class GeoscapeView {
     );
   }
 
+  /** City points: read as relay beacons on the day side and warm city lights on the dark night side. */
   private makeSignalNodes(): Points {
     const positions: number[] = [];
     for (const [lat, lon] of WORLD_CITY_POINTS) {
@@ -1242,10 +1288,10 @@ export class GeoscapeView {
     return new Points(
       geometry,
       new PointsMaterial({
-        color: 0xb8ffcf,
-        size: 0.012,
+        color: 0xfcd34d,
+        size: 0.014,
         transparent: true,
-        opacity: 0.72,
+        opacity: 0.85,
         sizeAttenuation: true,
       }),
     );
@@ -1607,6 +1653,10 @@ export class GeoscapeView {
   private refreshInterceptor(): void {
     const c = this.campaign;
     const engaging = this.isEngaging();
+    // A fresh engagement kicks off the launch flight (reset its clock); the frame
+    // loop then flies the craft from base toward the UFO before range closing begins.
+    if (engaging && !this.wasEngaging) this.interceptorFlightStartMs = performance.now();
+    this.wasEngaging = engaging;
     if (!engaging || !c?.ufoContact || !c.base) {
       this.interceptorMarker.visible = false;
       this.trajectoryLine.visible = false;
@@ -1638,13 +1688,35 @@ export class GeoscapeView {
     attr.needsUpdate = true;
   }
 
-  /** Drive the interceptor along base->UFO as the encounter range closes; pulse + orient it. */
+  /**
+   * Advance the directional sun around the globe's polar axis from the campaign
+   * clock, so one hemisphere is lit (day) and the opposite is dark (night). The
+   * terminator sweeps as the clock advances. Phase is offset so campaign noon
+   * (hour 12) lights the camera-facing side; the pre-campaign base screen sits
+   * at full day for readability.
+   */
+  private updateTerminator(): void {
+    const hour = this.campaign ? this.campaign.clock.hour : 12;
+    const azimuth = ((hour - 12) / 24) * Math.PI * 2 + Math.PI / 2;
+    const radius = 6;
+    this.sunLight.position.set(
+      Math.cos(azimuth) * radius,
+      radius * 0.32,
+      Math.sin(azimuth) * radius,
+    );
+  }
+
+  /** Drive the interceptor along base->UFO: launch flight, then range-driven closing; pulse + orient it. */
   private animateInterceptor(now: number): void {
     const route = this.interceptorRoute;
     const encounter = this.campaign?.interception;
     if (!this.interceptorMarker.visible || !route || !encounter) return;
-    // range goes ENCOUNTER_START_RANGE -> 0 as the craft closes; map to 0 -> 1 along the arc.
-    const progress = Math.max(0, Math.min(1, 1 - encounter.range / ENCOUNTER_START_RANGE));
+    // Launch flight (base -> engagement range) over ~1.3s, then hand off to the
+    // range-driven closing slice so the player sees the craft fly out to the UFO.
+    const flightT = Math.min(1, Math.max(0, (now - this.interceptorFlightStartMs) / INTERCEPTOR_FLIGHT_MS));
+    const rangeArc =
+      INTERCEPTOR_FLIGHT_END + (1 - encounter.range / ENCOUNTER_START_RANGE) * (1 - INTERCEPTOR_FLIGHT_END);
+    const progress = flightT < 1 ? flightT * INTERCEPTOR_FLIGHT_END : Math.min(1, rangeArc);
     slerpUnit(route.baseN, route.ufoN, progress, this.scratchA); // unit direction at the craft
     this.scratchA.normalize().multiplyScalar(EARTH_RADIUS + 0.14);
     this.interceptorMarker.position.copy(this.scratchA);
@@ -2063,6 +2135,7 @@ export class GeoscapeView {
     // onAdvanceTime may synchronously dispose+remount this view (current controller);
     // bail before touching the disposed renderer/controls in that case.
     if (this.disposed) return;
+    this.updateTerminator();
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
   };

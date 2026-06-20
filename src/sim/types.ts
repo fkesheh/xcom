@@ -285,6 +285,12 @@ export interface BattleState {
   status: BattleStatus;
   /** Terrain theme the map was generated from (e.g. "farmland"). Optional. */
   themeId?: TerrainId;
+  /**
+   * Wall-clock hour (0..23) the battle began, from the campaign clock. The
+   * renderer derives day/dusk/night lighting and the sim may narrow night
+   * vision. Pure data; the sim does not change behavior unless a rule reads it.
+   */
+  hourOfDay?: number;
   /** Optional tactical objective for missions that can be won without wiping every hostile. */
   objective?: BattleObjective;
   /** Tiles ever seen by the player faction (fog-of-war "explored" memory). */

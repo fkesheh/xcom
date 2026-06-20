@@ -8,6 +8,7 @@ import type {
   InterceptionResult,
   InterceptorState,
   MissionType,
+  ProjectReport,
   StrategicState,
   UfoContact,
 } from "./types";
@@ -24,6 +25,7 @@ import {
   hasBaseFacility,
   highestRegionalPanic,
   livingSoldiers,
+  PROJECT_REPORT_LIMIT,
   recoverWoundedSoldiers,
   restockMarket,
 } from "./storage";
@@ -486,6 +488,87 @@ function penalizeIgnoredContact(campaign: CampaignState, strategic: StrategicSta
   };
 }
 
+/**
+ * Extra regional panic an un-addressed UFO's mission heaps on top of the baseline
+ * ignore penalty, per mission type. Terror/base/landed assaults are severe; a crashSite
+ * contact (a tracked UFO that slipped away after recon) adds none because the baseline
+ * penalty already covers it — keeping crashSite the "smaller" case and preserving the
+ * legacy ignore penalty for tracked crashSite contacts exactly.
+ */
+function contactTerrorBonus(missionType: MissionType): { local: number; spillover: number } {
+  switch (missionType) {
+    case "terror":
+      return { local: 18, spillover: 5 };
+    case "baseDefense":
+      return { local: 16, spillover: 4 };
+    case "landedUfo":
+      return { local: 12, spillover: 3 };
+    case "crashSite":
+    default:
+      return { local: 0, spillover: 0 };
+  }
+}
+
+function contactTerrorHeadline(missionType: MissionType): string {
+  switch (missionType) {
+    case "terror":
+      return "Alien terror strike";
+    case "baseDefense":
+      return "Alien assault unchecked";
+    case "landedUfo":
+      return "Landed UFO departed";
+    case "crashSite":
+    default:
+      return "Alien recon unchecked";
+  }
+}
+
+/**
+ * Resolves the consequence of a UFO contact that expired while still an active threat
+ * (tracked or landed — never shot down). Its mission is carried out: regional panic rises
+ * by the baseline ignore penalty plus a mission-type bonus (difficulty-scaled), and a
+ * project report is logged. Only the incremental bonus panic is applied here — the
+ * baseline was already applied by penalizeIgnoredContact. The report kind reuses an
+ * existing ProjectReportKind value (the kind union is frozen); the title/summary carry
+ * the alien-activity meaning for the feed.
+ */
+function applyContactTerror(campaign: CampaignState, contact: UfoContact): CampaignState {
+  const missionType = contactMissionType(contact);
+  const bonus = contactTerrorBonus(missionType);
+  const panicMult = difficultyConfig(campaign).panicMult;
+  const baselineLocal = hasBaseFacility(campaign, "radar-2") ? 14 : 22;
+  const bonusLocal = Math.round(bonus.local * panicMult);
+  const totalLocal = baselineLocal + bonusLocal;
+
+  let next = campaign;
+  if (bonus.local > 0 || bonus.spillover > 0) {
+    next = {
+      ...next,
+      regionalPanic: adjustRegionalPanic(
+        next.regionalPanic,
+        contact.region,
+        bonus.local,
+        bonus.spillover,
+        panicMult,
+      ),
+    };
+  }
+
+  const headline = contactTerrorHeadline(missionType);
+  const report: ProjectReport = {
+    kind: "construction",
+    id: `alien-activity-${contact.id}-${campaign.clock.elapsedHours}`,
+    title: headline,
+    summary: `${headline} — ${contact.region} (+${totalLocal} panic).`,
+    completedAtHour: campaign.clock.elapsedHours,
+  };
+  next = {
+    ...next,
+    projectReports: [report, ...next.projectReports].slice(0, PROJECT_REPORT_LIMIT),
+  };
+  return { ...next, strategic: statusAfterStrategicChange(next, next.strategic) };
+}
+
 function addCredits(resources: CampaignResources, credits: number): CampaignResources {
   return {
     ...resources,
@@ -614,8 +697,17 @@ export function advanceGeoscape(
   contact = nextCampaign.ufoContact;
 
   if (contact && contact.expiresAtHour <= clock.elapsedHours) {
+    const expiredContact = contact;
     nextCampaign = penalizeIgnoredContact({ ...nextCampaign, clock, strategic, ufoContact: contact }, strategic);
     strategic = nextCampaign.strategic;
+    // A UFO that slips away while still an active threat (tracked/landed — never shot down)
+    // carries out its mission: terror, harvesting, or recon raise regional panic, scaled by
+    // mission type and difficulty. A crashed (already shot-down) contact only pays the
+    // baseline ignore penalty above — its crew is already wrecked.
+    if (expiredContact.status !== "crashed") {
+      nextCampaign = applyContactTerror(nextCampaign, expiredContact);
+      strategic = nextCampaign.strategic;
+    }
     contact = undefined;
     clock = { ...clock, lastContactHour: clock.elapsedHours };
   }

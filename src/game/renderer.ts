@@ -122,6 +122,98 @@ const FOG_VOID = new Color(COLORS.groundVoid);
 const SCRATCH_COLOR = new Color();
 const BLACK = new Color(0, 0, 0);
 
+// ---------------------------------------------------------------------------
+// Time-of-day lighting (presentation-only). Derived from state.hourOfDay so a
+// night mission (launched after dark) renders dim, cool and tight-sighted,
+// while day missions keep the bright key-lit look. The sim is untouched — this
+// only tunes light intensities/colours, fog reach and exposure.
+// ---------------------------------------------------------------------------
+
+type TimeOfDay = "day" | "dusk" | "night";
+
+interface TimeOfDayLighting {
+  sunIntensity: number;
+  sunColor: number;
+  hemiIntensity: number;
+  hemiSky: number;
+  hemiGround: number;
+  ambientIntensity: number;
+  ambientColor: number;
+  envIntensity: number;
+  background: number;
+  exposure: number;
+  bloomStrength: number;
+  /** Fog near/far as a multiple of the map's larger dimension. */
+  fogNearMult: number;
+  fogFarMult: number;
+}
+
+/**
+ * Hour buckets: 6..18 = day, 18..20 / 5..6 = dusk, else night. An unset hour
+ * (skirmish launched outside the campaign clock) reads as day so quick battles
+ * stay bright.
+ */
+function classifyHourOfDay(hour: number | undefined): TimeOfDay {
+  if (hour === undefined) return "day";
+  if (hour >= 18 && hour < 20) return "dusk";
+  if (hour >= 5 && hour < 6) return "dusk";
+  if (hour >= 6 && hour < 18) return "day";
+  return "night";
+}
+
+const TIME_OF_DAY: Record<TimeOfDay, TimeOfDayLighting> = {
+  // DAY = the authored bright look (sun + warm fill, wide sight via far fog).
+  day: {
+    sunIntensity: 1.15,
+    sunColor: 0xfff2dc,
+    hemiIntensity: 0.55,
+    hemiSky: 0xbcd2ff,
+    hemiGround: 0x33312c,
+    ambientIntensity: 0.15,
+    ambientColor: 0xffffff,
+    envIntensity: 0.35,
+    background: COLORS.background,
+    exposure: 0.82,
+    bloomStrength: 0.35,
+    fogNearMult: 1.4,
+    fogFarMult: 3.4,
+  },
+  // DUSK = low warm sun, cooler fill, moderately pulled-in fog.
+  dusk: {
+    sunIntensity: 0.6,
+    sunColor: 0xff9a55,
+    hemiIntensity: 0.4,
+    hemiSky: 0x3a4a7a,
+    hemiGround: 0x2a2622,
+    ambientIntensity: 0.1,
+    ambientColor: 0xb8a8c0,
+    envIntensity: 0.25,
+    background: 0x141018,
+    exposure: 0.74,
+    bloomStrength: 0.42,
+    fogNearMult: 1.15,
+    fogFarMult: 2.85,
+  },
+  // NIGHT = dim cool moonlight, blue ambient, tight fog so the squad reads but
+  // the field fades to dark. Emissive accents (UFO lights, tracers, visors) and
+  // the stronger bloom make it feel dangerous without going pitch-black.
+  night: {
+    sunIntensity: 0.15,
+    sunColor: 0x5a78b8,
+    hemiIntensity: 0.24,
+    hemiSky: 0x1a2240,
+    hemiGround: 0x121418,
+    ambientIntensity: 0.07,
+    ambientColor: 0x6a7ab0,
+    envIntensity: 0.16,
+    background: 0x05070f,
+    exposure: 0.62,
+    bloomStrength: 0.55,
+    fogNearMult: 0.85,
+    fogFarMult: 2.0,
+  },
+};
+
 const TWEEN_MS = 150;
 const MOVE_TWEEN_MS = 220;
 
@@ -325,6 +417,10 @@ export class Renderer {
 
   /** The shadow-casting "sun"; reframed onto the map in {@link buildGrid}. */
   private readonly sun: DirectionalLight;
+  /** Sky/ground hemisphere fill; retuned per time-of-day. */
+  private readonly hemi: HemisphereLight;
+  /** Flat ambient lift so shadowed detail survives; retuned per time-of-day. */
+  private readonly ambient: AmbientLight;
 
   private readonly raycaster = new Raycaster();
   private readonly pointer = new Vector2();
@@ -379,6 +475,11 @@ export class Renderer {
     this.camera = new PerspectiveCamera(50, 1, 0.1, 500);
 
     this.sun = new DirectionalLight(0xfff2dc, 1.15);
+    // Sky/ground gradient fill + flat ambient; intensities/colours are retuned
+    // per time-of-day in applyTimeOfDay.
+    this.hemi = new HemisphereLight(0xbcd2ff, 0x33312c, 0.55);
+    this.hemi.position.set(0, 40, 0);
+    this.ambient = new AmbientLight(0xffffff, 0.15);
     this.scene.add(this.tileGroup, this.unitGroup, this.fxGroup, this.previewGroup);
     this.addLights();
 
@@ -426,20 +527,53 @@ export class Renderer {
   }
 
   private addLights(): void {
-    // Sky/ground gradient fill + a touch of flat ambient so cast shadows keep
-    // some detail rather than going black; the IBL environment adds the rest.
-    const hemi = new HemisphereLight(0xbcd2ff, 0x33312c, 0.55);
-    hemi.position.set(0, 40, 0);
-    const ambient = new AmbientLight(0xffffff, 0.15);
-
     // Key light = the sun. Shadow camera bounds are fitted to the map once its
-    // size is known (buildGrid -> frameSunShadow).
+    // size is known (buildGrid -> frameSunShadow). The hemisphere + ambient
+    // fills are created in the constructor and retuned per time-of-day in
+    // applyTimeOfDay; the IBL environment adds the rest of the fill.
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
     this.sun.shadow.bias = -0.0001;
     this.sun.shadow.normalBias = 0.03; // characters self-shadow: avoid acne
 
-    this.scene.add(hemi, ambient, this.sun, this.sun.target);
+    this.scene.add(this.hemi, this.ambient, this.sun, this.sun.target);
+  }
+
+  /**
+   * Retune scene lighting, fog reach, tone-mapping exposure and bloom to the
+   * battle's time-of-day (derived from state.hourOfDay). DAY keeps the authored
+   * bright look; DUSK dims + warms; NIGHT drops to dim cool moonlight with tight
+   * fog so distant terrain fades to dark (the "narrowed vision" cue) while the
+   * squad stays lit. Idempotent — hourOfDay is fixed for a battle, but this runs
+   * every sync cheaply. The sim is never touched.
+   */
+  private applyTimeOfDay(state: BattleState): void {
+    const cfg = TIME_OF_DAY[classifyHourOfDay(state.hourOfDay)];
+
+    this.sun.intensity = cfg.sunIntensity;
+    this.sun.color.setHex(cfg.sunColor);
+
+    this.hemi.intensity = cfg.hemiIntensity;
+    this.hemi.color.setHex(cfg.hemiSky);
+    this.hemi.groundColor.setHex(cfg.hemiGround);
+
+    this.ambient.intensity = cfg.ambientIntensity;
+    this.ambient.color.setHex(cfg.ambientColor);
+
+    this.scene.environmentIntensity = cfg.envIntensity;
+    this.renderer.toneMappingExposure = cfg.exposure;
+    this.bloomPass.strength = cfg.bloomStrength;
+
+    if (this.scene.background instanceof Color) {
+      this.scene.background.setHex(cfg.background);
+    }
+
+    const size = this.grid ? Math.max(this.grid.width, this.grid.height) : 30;
+    if (this.scene.fog instanceof Fog) {
+      this.scene.fog.color.setHex(cfg.background);
+      this.scene.fog.near = size * cfg.fogNearMult;
+      this.scene.fog.far = size * cfg.fogFarMult;
+    }
   }
 
   /** Fit the sun + its orthographic shadow camera tightly around the board. */
@@ -1031,6 +1165,10 @@ export class Renderer {
   syncFromState(state: BattleState): void {
     if (!this.floorMesh) this.buildGrid(state);
     this.grid = state.grid;
+    // Retune lighting/fog/exposure to the launch hour (day/dusk/night). Runs
+    // after buildGrid so the Fog exists on the first sync, and idempotently on
+    // every sync thereafter.
+    this.applyTimeOfDay(state);
 
     const visibleCells = this.computeVisibleCells(state);
     const cellCount = state.grid.width * state.grid.height;

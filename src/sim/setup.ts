@@ -38,6 +38,8 @@ export interface SkirmishOptions {
   playerItems?: string[][];
   /** Force a terrain theme ("farmland" | "urban" | "desert"); seeded when omitted. */
   themeId?: string;
+  /** Hour of day (0..23) from the campaign clock; drives battlescape day/dusk/night lighting. */
+  hourOfDay?: number;
 }
 
 /** Build a carried item instance: grenades are single-use, medkits hold 3 charges. */
@@ -200,6 +202,7 @@ export function createSkirmish(opts: SkirmishOptions): BattleState {
     rng,
     status: "playing",
     themeId,
+    hourOfDay: opts.hourOfDay,
     objective: (() => {
       const target = findPowerSource(grid);
       return target
