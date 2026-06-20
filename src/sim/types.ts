@@ -114,7 +114,7 @@ export interface Grid {
 // Units, stats, weapons, items
 // ---------------------------------------------------------------------------
 
-export type Faction = "player" | "enemy";
+export type Faction = "player" | "enemy" | "civilian";
 
 /** How much TU a unit holds back for reaction fire during its own turn. */
 export type ReserveMode = "none" | "snap" | "aimed" | "auto";
@@ -263,13 +263,15 @@ export interface Unit {
 export type BattleStatus = "playing" | "player_win" | "enemy_win";
 
 export interface BattleObjective {
-  kind: "recover";
+  kind: "recover" | "rescue";
   label: string;
   target: Vec2;
   recovered: boolean;
   extracted: boolean;
   extractionZone: Vec2[];
   recoveredBy?: UnitId;
+  /** "rescue" objectives: civilians placed on the map to protect. */
+  civiliansTotal?: number;
 }
 
 export interface BattleState {

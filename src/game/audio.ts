@@ -11,6 +11,8 @@
  * wrapped so an audio failure never throws into the game loop.
  */
 
+import type { Faction } from "../sim/types";
+
 /** Weapon flavour for {@link Sfx.shoot} (maps from a unit's weaponId). */
 export type ShootKind = "rifle" | "pistol" | "plasma";
 
@@ -183,7 +185,7 @@ export class Sfx {
   }
 
   /** Turn change: player = bright rising chime; enemy = dark descending one. */
-  turn(faction: "player" | "enemy"): void {
+  turn(faction: Faction): void {
     this.play((ctx, out) => {
       if (faction === "player") {
         this.tone(ctx, out, { type: "triangle", f0: 660, dur: 0.12, peak: 0.4 });
