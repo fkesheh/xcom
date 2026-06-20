@@ -101,7 +101,11 @@ export function checkVictory(state: BattleState): GameEvent | null {
   const enemiesAlive = state.units.some((u) => u.faction === "enemy" && u.alive);
   const playersAlive = state.units.some((u) => u.faction === "player" && u.alive);
   if (!enemiesAlive) {
-    if (state.objective) {
+    // Wiping the hostiles wins any mission. For "recover" we also satisfy the
+    // objective (legacy behaviour); a "rescue" objective is won purely by
+    // clearing the aliens — civilian survival is a score concern, not a trigger,
+    // so its recover/extract flags stay untouched.
+    if (state.objective && state.objective.kind === "recover") {
       state.objective.recovered = true;
       state.objective.extracted = true;
     }

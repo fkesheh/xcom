@@ -20,9 +20,9 @@ import { MORALE } from "./types";
 import { Rng } from "./rng";
 import { dir8Towards } from "./los";
 import { refillTU, revealFor } from "./battle";
-import { tileTypeAt } from "./grid";
+import { blocksMove, inBounds, tileTypeAt } from "./grid";
 import { generateMap } from "./mapgen";
-import { ENEMY_NAMES, ITEMS, PLAYER_NAMES, TEMPLATES, WEAPONS } from "./content";
+import { CIVILIAN_NAMES, ENEMY_NAMES, ITEMS, PLAYER_NAMES, TEMPLATES, WEAPONS } from "./content";
 
 export interface SkirmishOptions {
   seed: number;
@@ -40,6 +40,15 @@ export interface SkirmishOptions {
   themeId?: string;
   /** Hour of day (0..23) from the campaign clock; drives battlescape day/dusk/night lighting. */
   hourOfDay?: number;
+  /**
+   * Tactical objective kind. "recover" (default) builds the UFO power-source
+   * objective; "rescue" (terror-site) places civilians to protect and a rescue
+   * objective whose win trigger is eliminating the hostiles. Omitted keeps the
+   * legacy recover-or-none behaviour unchanged.
+   */
+  objectiveKind?: "recover" | "rescue";
+  /** "rescue" objectives: civilians to scatter through the strike zone. */
+  civilianCount?: number;
 }
 
 /** Build a carried item instance: grenades are single-use, medkits hold 3 charges. */
@@ -114,6 +123,42 @@ function findPowerSource(grid: BattleState["grid"]): Vec2 | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * Pick up to `count` walkable tiles scattered through the strike zone around the
+ * map centre (the "city"), skipping any tile already in `occupied`. Drawn from
+ * the shared rng so terror-site placement is deterministic for a given seed.
+ * Mutates `occupied` with every chosen tile so callers can chain spawn passes.
+ */
+function findCityTiles(
+  grid: BattleState["grid"],
+  occupied: Set<number>,
+  rng: Rng,
+  count: number,
+): Vec2[] {
+  const cx = Math.floor(grid.width / 2);
+  const cy = Math.floor(grid.height / 2);
+  const radius = Math.max(6, Math.floor(Math.min(grid.width, grid.height) / 3));
+  const candidates: Vec2[] = [];
+  for (let y = cy - radius; y <= cy + radius; y++) {
+    for (let x = cx - radius; x <= cx + radius; x++) {
+      if (!inBounds(grid, x, y)) continue;
+      if (blocksMove(grid, x, y)) continue;
+      if (occupied.has(y * grid.width + x)) continue;
+      candidates.push({ x, y });
+    }
+  }
+  const shuffled = rng.shuffle(candidates);
+  const out: Vec2[] = [];
+  for (const tile of shuffled) {
+    if (out.length >= count) break;
+    const idx = tile.y * grid.width + tile.x;
+    if (occupied.has(idx)) continue;
+    occupied.add(idx);
+    out.push(tile);
+  }
+  return out;
 }
 
 /**
@@ -192,6 +237,25 @@ export function createSkirmish(opts: SkirmishOptions): BattleState {
     nextId++;
   }
 
+  // Terror-site (rescue): scatter unarmed civilians through the city centre to
+  // protect. They are neutral — they never take a turn and never act — they only
+  // exist to be rescued (scored at mission end) or hunted by the aliens.
+  let civiliansSpawned = 0;
+  if (opts.objectiveKind === "rescue") {
+    const occupied = new Set<number>();
+    for (const u of units) occupied.add(u.pos.y * grid.width + u.pos.x);
+    const cityCenter: Vec2 = { x: Math.floor(width / 2), y: Math.floor(height / 2) };
+    const cityTiles = findCityTiles(grid, occupied, rng, opts.civilianCount ?? 8);
+    const civilianNames = [...CIVILIAN_NAMES];
+    const civilianTpl = requireTemplate("civilian");
+    for (const tile of cityTiles) {
+      const name = civilianNames.shift() ?? `Civilian-${nextId}`;
+      units.push(spawnUnit(nextId, civilianTpl, name, tile, dir8Towards(tile, cityCenter)));
+      nextId++;
+    }
+    civiliansSpawned = cityTiles.length;
+  }
+
   const state: BattleState = {
     grid,
     units,
@@ -203,19 +267,30 @@ export function createSkirmish(opts: SkirmishOptions): BattleState {
     status: "playing",
     themeId,
     hourOfDay: opts.hourOfDay,
-    objective: (() => {
-      const target = findPowerSource(grid);
-      return target
+    objective:
+      opts.objectiveKind === "rescue"
         ? {
-            kind: "recover",
-            label: "Recover UFO power source",
-            target,
+            kind: "rescue",
+            label: "Protect the civilians",
+            target: { x: Math.floor(width / 2), y: Math.floor(height / 2) },
             recovered: false,
             extracted: false,
-            extractionZone: playerSpawns.map((tile) => ({ x: tile.x, y: tile.y })),
+            extractionZone: [],
+            civiliansTotal: civiliansSpawned,
           }
-        : undefined;
-    })(),
+        : (() => {
+            const target = findPowerSource(grid);
+            return target
+              ? {
+                  kind: "recover" as const,
+                  label: "Recover UFO power source",
+                  target,
+                  recovered: false,
+                  extracted: false,
+                  extractionZone: playerSpawns.map((tile) => ({ x: tile.x, y: tile.y })),
+                }
+              : undefined;
+          })(),
     explored: new Set<number>(),
     log,
   };

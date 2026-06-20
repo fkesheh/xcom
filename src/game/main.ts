@@ -320,6 +320,20 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
   baseView?.dispose();
   baseView = null;
   const SEED = operation.missionSeed;
+  // Map the campaign mission type onto the sim's objective + civilian spawn so
+  // each mission type is actually playable: a terror site builds a rescue
+  // objective with civilians to protect, a crashed/landed UFO builds the classic
+  // "recover the power source" objective, and a base defense has no objective.
+  const missionType = operation.missionType;
+  const missionObjective =
+    missionType === "terror"
+      ? {
+          objectiveKind: "rescue" as const,
+          civilianCount: operation.missionContext?.civilianCount ?? 8,
+        }
+      : missionType === "crashSite" || missionType === "landedUfo"
+        ? { objectiveKind: "recover" as const }
+        : {};
   let state: BattleState = createSkirmish({
     seed: SEED,
     width: operation.width,
@@ -332,6 +346,7 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
     playerNames: deployment.map((soldier) => soldier.name),
     playerSoldierIds: deployment.map((soldier) => soldier.id),
     playerStatBonuses: deployment.map((soldier) => campaignSoldierStatBonus(campaign, soldier)),
+    ...missionObjective,
   });
 
   const renderer = new Renderer();
@@ -898,11 +913,31 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
           },
         ]),
     );
+    // Terror missions: tally the civilian outcome from the live battle state so
+    // the campaign records who was saved and who was lost. Living civilians at
+    // mission end count as rescued; the rest are casualties. Non-terror missions
+    // leave these undefined (no civilians on the map).
+    const isTerror = operation.missionType === "terror";
+    const civilians = isTerror
+      ? state.units.filter((unit) => unit.faction === "civilian")
+      : [];
+    const civiliansRescued = civilians.filter((unit) => unit.alive).length;
     completedCampaign = recordMissionResult(
       latest,
       result,
       operation,
-      { deployedSoldierIds: deployed, survivingSoldierIds: survivors, survivorHealth },
+      {
+        deployedSoldierIds: deployed,
+        survivingSoldierIds: survivors,
+        survivorHealth,
+        ...(isTerror
+          ? {
+              civilianCount: civilians.length,
+              civiliansRescued,
+              civilianCasualties: Math.max(0, civilians.length - civiliansRescued),
+            }
+          : {}),
+      },
     );
     currentCampaign = completedCampaign;
     saveCampaign(completedCampaign);

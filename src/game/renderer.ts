@@ -406,6 +406,116 @@ function buildLowWall(_variant: number): Group {
   return group;
 }
 
+// ---------------------------------------------------------------------------
+// Civilian figure (terror-site noncombatants)
+// ---------------------------------------------------------------------------
+//
+// Built here rather than in characters.ts so civilians read as unarmed, plain-
+// clothes bystanders — clearly distinct from the armed blue troopers and the red
+// alien enemies, so the player can tell at a glance who to protect. Constructed
+// only from primitives this module already imports; every geometry/material is
+// owned by the figure, so the shared disposeCharacter() walker releases them.
+// Distinctiveness is SHAPE-led (no weapon, no helmet, no glowing visor, soft
+// plain-clothes tones), never colour alone.
+
+/** Muted, clearly-non-combatant shirt tones (deterministic pick per civilian). */
+const CIVILIAN_SHIRTS: readonly number[] = [0xc9b06a, 0x9a8f6e, 0x7d8a96, 0xa67b5b];
+const CIVILIAN_TROUSERS = 0x3a3d42;
+const CIVILIAN_SHOES = 0x24262b;
+const CIVILIAN_SKIN = 0xd9b48f;
+const CIVILIAN_HAIR = 0x4a3a2a;
+
+function civilianShirtFor(id: number): number {
+  return CIVILIAN_SHIRTS[Math.abs(id) % CIVILIAN_SHIRTS.length]!;
+}
+
+/** Rough, non-metallic plain-cloth material — no armour specular, no emissive glow. */
+function civilianMaterial(color: number): MeshStandardMaterial {
+  return new MeshStandardMaterial({ color, roughness: 0.9, metalness: 0.0, flatShading: true });
+}
+
+/**
+ * Build an unarmed civilian humanoid: feet at y = 0, ~1.45 tall, local +Z
+ * forward (consistent with the armed figures). Legs are named leftLeg/rightLeg
+ * so the shared walk-pose reset composes cleanly; civilians never act, but this
+ * keeps them consistent with the pose machinery. Carries `userData.unitId` on
+ * every descendant so the renderer's recursive raycast can pick them.
+ */
+function buildCivilianFigure(unit: Unit): Group {
+  const root = new Group();
+  const shirt = civilianMaterial(civilianShirtFor(unit.id));
+  const trousers = civilianMaterial(CIVILIAN_TROUSERS);
+  const shoes = civilianMaterial(CIVILIAN_SHOES);
+  const skin = civilianMaterial(CIVILIAN_SKIN);
+  const hair = civilianMaterial(CIVILIAN_HAIR);
+
+  const add = (geo: BufferGeometry, mat: MeshStandardMaterial, x: number, y: number, z: number): Mesh => {
+    const mesh = new Mesh(geo, mat);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.position.set(x, y, z);
+    root.add(mesh);
+    return mesh;
+  };
+
+  // Legs (trousers) with shoes — named for walk-pose consistency with troopers.
+  for (const side of [-1, 1] as const) {
+    const leg = new Group();
+    leg.name = side < 0 ? "leftLeg" : "rightLeg";
+    leg.position.set(0.12 * side, 0.84, 0);
+    root.add(leg);
+    const limb = new Mesh(new BoxGeometry(0.14, 0.56, 0.16), trousers);
+    limb.castShadow = true;
+    limb.receiveShadow = true;
+    limb.position.y = -0.28;
+    leg.add(limb);
+    const shoe = new Mesh(new BoxGeometry(0.16, 0.08, 0.26), shoes);
+    shoe.castShadow = true;
+    shoe.receiveShadow = true;
+    shoe.position.set(0, -0.62, 0.04);
+    leg.add(shoe);
+  }
+
+  // Pelvis + torso (shirt): plain boxy civilian clothes — no chest plate, no pauldrons.
+  add(new BoxGeometry(0.34, 0.2, 0.24), trousers, 0, 0.88, 0);
+  const torso = add(new BoxGeometry(0.36, 0.4, 0.2), shirt, 0, 1.14, 0);
+  torso.scale.set(1, 1, 0.85);
+
+  // Arms (shirt sleeves) hanging EMPTY at the sides — no weapon, no rifle.
+  for (const side of [-1, 1] as const) {
+    const arm = new Mesh(new BoxGeometry(0.1, 0.4, 0.12), shirt);
+    arm.castShadow = true;
+    arm.receiveShadow = true;
+    arm.position.set(0.23 * side, 1.12, 0);
+    arm.rotation.z = 0.08 * side;
+    root.add(arm);
+    const hand = new Mesh(new SphereGeometry(0.05, 10, 8), skin);
+    hand.castShadow = true;
+    hand.receiveShadow = true;
+    hand.position.set(0.25 * side, 0.92, 0.02);
+    root.add(hand);
+  }
+
+  // Neck + head (skin) + hair cap. No helmet, no glowing visor.
+  add(new BoxGeometry(0.1, 0.08, 0.1), skin, 0, 1.36, 0);
+  const head = add(new SphereGeometry(0.11, 14, 12), skin, 0, 1.44, 0);
+  head.scale.set(1, 1.05, 1);
+  const hairCap = add(
+    new SphereGeometry(0.122, 14, 10, 0, Math.PI * 2, 0, Math.PI * 0.55),
+    hair,
+    0,
+    1.46,
+    -0.01,
+  );
+  hairCap.scale.set(1, 1, 1.05);
+
+  root.userData.unitId = unit.id;
+  root.traverse((obj) => {
+    obj.userData.unitId = unit.id;
+  });
+  return root;
+}
+
 export class Renderer {
   private readonly renderer: WebGLRenderer;
   private readonly scene: Scene;
@@ -1075,7 +1185,9 @@ export class Renderer {
 
     // Procedural figure: feet at y = 0, local +Z forward (its own forward cue,
     // so the old facing wedge is gone). Rotated by faceView to the unit's Dir8.
-    const character = createCharacterMesh(unit);
+    // Civilians get a distinct unarmed, plain-clothes figure so the player can
+    // tell who to protect; every other faction uses the shared armed figures.
+    const character = unit.faction === "civilian" ? buildCivilianFigure(unit) : createCharacterMesh(unit);
     root.add(character);
 
     // Floating HP bar (background + fill), billboarded each frame, sat above

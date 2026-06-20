@@ -637,8 +637,16 @@ export function runEnemyTurn(state: BattleState, exec: AiExecutor): GameEvent[] 
       const unit = state.units.find((u) => u.id === id);
       if (!unit || !unit.alive || unit.tu <= 0) break;
 
+      // Aliens hunt civilians as readily as soldiers: a terror-site strike zone
+      // puts neutral civilians in the line of fire, so the shot-target pool is
+      // every visible player AND civilian. chooseShot scores by expected damage
+      // with a kill bonus and a nudge toward weaker targets, so low-HP civilians
+      // naturally draw fire. Movement still keys off players only.
       const visible = state.units.filter(
-        (t) => t.faction === "player" && t.alive && canSee(state.grid, unit, t.pos),
+        (t) =>
+          (t.faction === "player" || t.faction === "civilian") &&
+          t.alive &&
+          canSee(state.grid, unit, t.pos),
       );
 
       // Grenade: lob one when a throw catches >=2 players, ends safe, and TU allows.

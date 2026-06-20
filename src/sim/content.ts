@@ -121,6 +121,24 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
     sightRange: 18,
     visionHalfAngleDeg: 45,
   },
+  civilian: {
+    id: "civilian",
+    name: "Civilian",
+    faction: "civilian",
+    stats: {
+      timeUnits: 40,
+      health: 8,
+      reactions: 20,
+      firingAccuracy: 10,
+      strength: 20,
+      bravery: 30,
+    },
+    // Armed in data only so spawnUnit can resolve a magazine; civilians NEVER
+    // take a turn, so the pistol is never fired.
+    weaponId: "pistol",
+    sightRange: 10,
+    visionHalfAngleDeg: 45,
+  },
 };
 
 /** Call-sign style name pool for friendly units. */
@@ -151,4 +169,24 @@ export const ENEMY_NAMES: string[] = [
   "Ulor",
   "Vris",
   "Morth",
+];
+
+/** Name pool for civilians caught in a terror-site strike zone. */
+export const CIVILIAN_NAMES: string[] = [
+  "Anya",
+  "Tariq",
+  "Mira",
+  "Jonas",
+  "Sora",
+  "Felipe",
+  "Inga",
+  "Dev",
+  "Lena",
+  "Olek",
+  "Priya",
+  "Marco",
+  "Yuki",
+  "Hana",
+  "Bilal",
+  "Nadia",
 ];
