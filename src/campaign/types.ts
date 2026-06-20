@@ -83,6 +83,11 @@ export interface UfoContact {
   missionSeed: number;
   strength: number;
   interceptorDamage?: number;
+  /** Tracked UFOs fly: heading (deg) + speed (deg/hour) advance lat/lon as time flows. */
+  heading?: number;
+  speed?: number;
+  /** A UFO shot down over the ocean is lost (no assault mission). */
+  overOcean?: boolean;
 }
 
 export type InterceptionResult = "crashed" | "escaped";

@@ -1586,6 +1586,10 @@ function normalizeUfoContact(value: unknown, clock: CampaignClock): UfoContact |
     missionType: normalizeUfoContactMissionType(maybe.missionType),
     interceptorDamage:
       typeof maybe.interceptorDamage === "number" ? Math.max(0, Math.floor(maybe.interceptorDamage)) : undefined,
+    // Tracked-UFO flight vector + ocean flag are optional; default to undefined on load.
+    heading: typeof maybe.heading === "number" ? maybe.heading : undefined,
+    speed: typeof maybe.speed === "number" ? maybe.speed : undefined,
+    overOcean: typeof maybe.overOcean === "boolean" ? maybe.overOcean : undefined,
   };
 }
 

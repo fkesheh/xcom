@@ -95,6 +95,13 @@ const DEPLOYMENT_SEGMENTS = 32;
 /** Particles per interception impact burst (precomputed; no per-frame allocation). */
 const BURST_PARTICLES = 14;
 
+/** Max sampled points of the UFO flight trail (one per refresh while airborne). */
+const UFO_TRAIL_MAX = 48;
+/** Minimum degrees between two trail samples (avoids a dense blob when the UFO creeps). */
+const UFO_TRAIL_MIN_DEG = 0.4;
+/** Per-frame lerp factor for the chase-camera follow (higher = tighter, snappier). */
+const CHASE_CAMERA_LERP = 0.06;
+
 /** Interception combat-FX durations, in milliseconds. */
 const FX_TRACER_MS = 200;
 const FX_MUZZLE_MS = 130;
@@ -117,11 +124,17 @@ const SPEED_OPTIONS: readonly SpeedOption[] = [
   { speed: 30, icon: "⏭", label: "30×" },
 ];
 
-/** Per-speed tick cadence: how many game hours advance, and how often, so time visibly flows. */
+/**
+ * Per-speed tick cadence at MINUTE granularity so the clock visibly flows HH:MM.
+ * Each tick advances a few game-minutes (hours expressed as a fraction of 60);
+ * the campaign clock derives HH:MM from the fractional part of elapsedHours.
+ * Tuned so 1x reads near real-time, 5x streams minutes, and 30x sweeps tens of
+ * minutes per tick without spamming onAdvanceTime.
+ */
 const SPEED_TICKS: Record<number, { hours: number; ms: number }> = {
-  1: { hours: 1, ms: 700 },
-  5: { hours: 3, ms: 400 },
-  30: { hours: 6, ms: 160 },
+  1: { hours: 1 / 60, ms: 700 }, // ~1 game-minute per tick
+  5: { hours: 5 / 60, ms: 500 }, // ~5 game-minutes per tick
+  30: { hours: 20 / 60, ms: 400 }, // ~20 game-minutes per tick
 };
 
 /** Auto-pause toast kind; pairs an icon with the color so the alert is never color-alone. */
@@ -287,6 +300,11 @@ const CSS = `
   border-color: rgba(103,232,249,.16);
   background: rgba(2,12,20,.42);
 }
+#geoscape .geo-contact.lost {
+  border-color: rgba(100,116,139,.5);
+  background: rgba(15,23,42,.4);
+}
+#geoscape .geo-contact.lost strong { color: #94a3b8; }
 #geoscape .geo-contact strong {
   display: block;
   color: #fb7185;
@@ -416,6 +434,11 @@ const CSS = `
   color: #fed7aa;
 }
 #geoscape .geo-mission-badge .geo-mission-icon { font-size: 12px; }
+#geoscape .geo-mission-badge.lost {
+  border-color: rgba(100,116,139,.6);
+  background: rgba(15,23,42,.55);
+  color: #cbd5e1;
+}
 #geoscape .geo-empty {
   display: flex;
   flex-direction: column;
@@ -1043,6 +1066,8 @@ export class GeoscapeView {
   private readonly ufoMarker = new Group();
   private readonly interceptorMarker = new Group();
   private readonly trajectoryLine: Line;
+  /** Faint great-circle trail of the UFO's recent positions while it flies. */
+  private readonly ufoTrailLine: Line;
   private selectedBase: BaseLocation | null;
   private selectedDifficulty: DifficultyLevel = "veteran";
   private encounterLog: HTMLElement | null = null;
@@ -1054,6 +1079,10 @@ export class GeoscapeView {
   private campaign: CampaignState | null;
   /** Mission type the UFO marker was last built for (rebuilt only on change). */
   private ufoMissionType: MissionType | undefined;
+  /** Contact id the current trail belongs to; reset whenever the UFO changes. */
+  private ufoTrailContactId: string | null = null;
+  /** Recent airborne UFO positions (lat/lon, oldest first); capped at UFO_TRAIL_MAX. */
+  private ufoTrail: { lat: number; lon: number }[] = [];
   /** Time-flow speed (0 = paused). Persisted across remounts via resumedTimeSpeed. */
   private timeSpeed = resumedTimeSpeed;
   private timeAccumulatorMs = 0;
@@ -1149,6 +1178,8 @@ export class GeoscapeView {
 
     // Trajectory line is allocated once; its positions are rewritten per engagement.
     this.trajectoryLine = this.makeTrajectoryLine();
+    // UFO flight trail allocated once; positions + per-vertex fade are rewritten per refresh.
+    this.ufoTrailLine = this.makeUfoTrailLine();
     this.earthMesh = this.buildScene();
     this.buildCombatFx();
     this.buildDeploymentFx();
@@ -1274,7 +1305,8 @@ export class GeoscapeView {
     this.buildInterceptorMarker();
     this.interceptorMarker.visible = false;
     this.trajectoryLine.visible = false;
-    this.earthGroup.add(this.trajectoryLine, this.interceptorMarker);
+    this.ufoTrailLine.visible = false;
+    this.earthGroup.add(this.trajectoryLine, this.interceptorMarker, this.ufoTrailLine);
 
     return ocean;
   }
@@ -1288,6 +1320,34 @@ export class GeoscapeView {
       geometry,
       new LineBasicMaterial({ color: 0x67e8f9, transparent: true, opacity: 0.55 }),
     );
+  }
+
+  /**
+   * Pre-allocated UFO flight trail: a polyline of recent airborne positions.
+   * Per-vertex colors fade the tail into darkness so it reads as a contrail
+   * rather than a debug line; additive blending lets dark vertices fade out
+   * without a separate alpha channel. Both position + color buffers are
+   * rewritten, and the draw range trimmed, on every refresh.
+   */
+  private makeUfoTrailLine(): Line {
+    const positions = new Float32Array(UFO_TRAIL_MAX * 3);
+    const colors = new Float32Array(UFO_TRAIL_MAX * 3);
+    const geometry = new BufferGeometry();
+    geometry.setAttribute("position", new Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("color", new Float32BufferAttribute(colors, 3));
+    geometry.setDrawRange(0, 0);
+    const line = new Line(
+      geometry,
+      new LineBasicMaterial({
+        color: 0xffffff,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.7,
+        blending: AdditiveBlending,
+      }),
+    );
+    line.frustumCulled = false;
+    return line;
   }
 
   /**
@@ -1740,9 +1800,65 @@ export class GeoscapeView {
     if (contact) {
       this.refreshUfoMarkerType(contact.missionType);
       this.placeUfoMarker(contact);
+      this.refreshUfoTrail(contact);
     } else {
       this.ufoMarker.visible = false;
+      this.clearUfoTrail();
     }
+  }
+
+  /**
+   * Sample the UFO's flight into the trail while it is airborne (tracked or
+   * engaging). The contact now moves as time flows, so this is what makes the
+   * UFO visibly fly across the globe. A new contact id resets the trail; a
+   * crashed/landed contact freezes it (the path it took to come down stays up).
+   */
+  private refreshUfoTrail(contact: UfoContact): void {
+    if (this.ufoTrailContactId !== contact.id) {
+      this.ufoTrailContactId = contact.id;
+      this.ufoTrail = [{ lat: contact.lat, lon: contact.lon }];
+    } else if (contact.status === "tracked" || contact.status === "engaging") {
+      const last = this.ufoTrail[this.ufoTrail.length - 1];
+      if (!last || Math.hypot(contact.lat - last.lat, contact.lon - last.lon) >= UFO_TRAIL_MIN_DEG) {
+        this.ufoTrail.push({ lat: contact.lat, lon: contact.lon });
+        if (this.ufoTrail.length > UFO_TRAIL_MAX) this.ufoTrail.shift();
+      }
+    }
+    this.refillUfoTrailLine();
+  }
+
+  private clearUfoTrail(): void {
+    this.ufoTrailContactId = null;
+    this.ufoTrail = [];
+    this.ufoTrailLine.geometry.setDrawRange(0, 0);
+    this.ufoTrailLine.visible = false;
+  }
+
+  /** Rewrite the trail line buffers from the sampled positions with a tail→head fade. */
+  private refillUfoTrailLine(): void {
+    const count = this.ufoTrail.length;
+    const geo = this.ufoTrailLine.geometry;
+    const posAttr = geo.getAttribute("position") as Float32BufferAttribute;
+    const colAttr = geo.getAttribute("color") as Float32BufferAttribute;
+    const pos = posAttr.array as Float32Array;
+    const col = colAttr.array as Float32Array;
+    for (let i = 0; i < count; i++) {
+      const p = this.ufoTrail[i]!;
+      this.scratchA.copy(latLonToVector(p.lat, p.lon, EARTH_RADIUS + 0.03));
+      pos[i * 3] = this.scratchA.x;
+      pos[i * 3 + 1] = this.scratchA.y;
+      pos[i * 3 + 2] = this.scratchA.z;
+      // Amber (1.0, 0.55, 0.25) scaled so the oldest point is dark and the newest glows.
+      const fade = count > 1 ? i / (count - 1) : 1;
+      const intensity = 0.12 + 0.88 * fade;
+      col[i * 3] = intensity;
+      col[i * 3 + 1] = intensity * 0.55;
+      col[i * 3 + 2] = intensity * 0.25;
+    }
+    posAttr.needsUpdate = true;
+    colAttr.needsUpdate = true;
+    geo.setDrawRange(0, count);
+    this.ufoTrailLine.visible = count >= 2;
   }
 
   private refreshUfoMarkerType(missionType: MissionType | undefined): void {
@@ -1760,7 +1876,13 @@ export class GeoscapeView {
     this.buildUfoMarker(missionType);
   }
 
-  /** Show/hide the interceptor craft + trajectory and cache the route when a target changes. */
+  /**
+   * Show/hide the interceptor craft + trajectory and recompute the route every
+   * refresh. The UFO flies while tracked/engaging, so its lat/lon (and thus the
+   * engagement tangent + base->UFO arc) move tick by tick — re-reading the
+   * contact each refresh is what makes the interceptor visibly chase it. A fresh
+   * engagement still kicks off the launch flight via interceptorFlightStartMs.
+   */
   private refreshInterceptor(): void {
     const c = this.campaign;
     const engaging = this.isEngaging();
@@ -1775,12 +1897,10 @@ export class GeoscapeView {
       return;
     }
     const contact = c.ufoContact;
-    if (!this.interceptorRoute || this.interceptorRoute.contactId !== contact.id) {
-      const baseN = latLonToVector(c.base.lat, c.base.lon, 1).normalize();
-      const ufoN = latLonToVector(contact.lat, contact.lon, 1).normalize();
-      this.interceptorRoute = { baseN, ufoN, contactId: contact.id };
-      this.fillTrajectory(baseN, ufoN);
-    }
+    const baseN = latLonToVector(c.base.lat, c.base.lon, 1).normalize();
+    const ufoN = latLonToVector(contact.lat, contact.lon, 1).normalize();
+    this.interceptorRoute = { baseN, ufoN, contactId: contact.id };
+    this.fillTrajectory(baseN, ufoN);
     this.interceptorMarker.visible = true;
     this.trajectoryLine.visible = true;
   }
@@ -1815,6 +1935,24 @@ export class GeoscapeView {
       radius * 0.32,
       Math.sin(azimuth) * radius,
     );
+  }
+
+  /**
+   * While an interception is live, smoothly recenter the orbit target on the
+   * interceptor and pan the camera by the same delta. Preserving the
+   * (camera - target) offset keeps the player's zoom and orbit angle intact, so
+   * the follow never fights user input; it only pans the rig after the craft.
+   * The target anchors on the surface point under the craft so the globe, not
+   * the model, stays framed. On disengage the rig simply stops following and
+   * free-orbit resumes from wherever it landed.
+   */
+  private updateChaseCamera(): void {
+    if (!this.isEngaging() || !this.interceptorMarker.visible) return;
+    this.interceptorMarker.getWorldPosition(this.scratchA);
+    this.scratchB.copy(this.scratchA).setLength(EARTH_RADIUS);
+    this.scratchC.copy(this.scratchB).sub(this.controls.target).multiplyScalar(CHASE_CAMERA_LERP);
+    this.controls.target.add(this.scratchC);
+    this.camera.position.add(this.scratchC);
   }
 
   /** Drive the interceptor along base->UFO: launch flight, then range-driven closing; pulse + orient it. */
@@ -2291,7 +2429,12 @@ export class GeoscapeView {
   /** Concise contact card: id, status instruction, region, time-left. Drops the prose. */
   private contactCard(): HTMLElement {
     const contact = this.campaign?.ufoContact;
-    const card = el("section", `geo-contact ${contact ? "" : "idle"}`.trim());
+    // A UFO downed over the ocean is unrecoverable: it gets a distinct "lost at
+    // sea" state (slate card + waves badge) vs the land "Crash site — launch
+    // assault". Color is always paired with the "≈ Lost at sea" icon+label.
+    const lostAtSea = !!contact && contact.status === "crashed" && !!contact.overOcean;
+    const stateClass = !contact ? "idle" : lostAtSea ? "lost" : "";
+    const card = el("section", `geo-contact ${stateClass}`.trim());
     if (!contact) {
       const empty = el("div", "geo-empty");
       const icon = el("div", "geo-empty-icon");
@@ -2315,23 +2458,30 @@ export class GeoscapeView {
       `${fmtCoord(contact.lat, "N", "S")} / ${fmtCoord(contact.lon, "E", "W")} · ${remaining}h left`;
     // The badge TEXT is status-derived so an airborne (tracked/engaging) UFO
     // reads "Airborne UFO", never "Crash site" — matching the status line.
-    // missionTypeInfo still drives the marker icon/color/urgent styling.
-    const badgeInfo: MissionTypeInfo = { ...info, label: this.contactBadgeLabel(contact) };
-    card.append(this.missionBadge(badgeInfo), title, status, meta);
+    // missionTypeInfo still drives the marker icon/color/urgent styling; a
+    // lost-at-sea crash overrides the badge so the card never invites an
+    // assault that the campaign layer will refuse.
+    const badgeInfo: MissionTypeInfo = lostAtSea
+      ? { icon: "≈", label: this.contactBadgeLabel(contact), urgent: false, color: 0x64748b }
+      : { ...info, label: this.contactBadgeLabel(contact) };
+    const badge = this.missionBadge(badgeInfo);
+    if (lostAtSea) badge.classList.add("lost");
+    card.append(badge, title, status, meta);
     return card;
   }
 
   /**
    * Instructional status label. A tracked (airborne) UFO is NEVER "Crash site" —
    * it reads as airborne with an intercept prompt. Only a crashed contact reads
-   * as a crash site (launch assault).
+   * as a crash site (launch assault), unless it came down over the ocean, in
+   * which case it is lost and unrecoverable.
    */
   private contactStatusLabel(contact: UfoContact): string {
     switch (contact.status) {
       case "engaging":
         return "Engaging — stand by";
       case "crashed":
-        return "Crash site — launch assault";
+        return contact.overOcean ? "Lost at sea — unrecoverable" : "Crash site — launch assault";
       case "landed":
         if (contact.missionType === "terror") return "Terror site — launch assault";
         if (contact.missionType === "baseDefense") return "Base assault — launch defense";
@@ -2345,13 +2495,13 @@ export class GeoscapeView {
   /**
    * Status-aware badge label for the contact card. Mirrors contactStatusLabel so
    * the badge and the status line never contradict each other: an airborne
-   * (tracked/engaging) UFO reads "Airborne UFO", and "Crash site" appears only
-   * once the contact is actually down.
+   * (tracked/engaging) UFO reads "Airborne UFO", "Crash site" appears only once
+   * the contact is actually down on land, and an ocean crash reads "Lost at sea".
    */
   private contactBadgeLabel(contact: UfoContact): string {
     switch (contact.status) {
       case "crashed":
-        return "Crash site";
+        return contact.overOcean ? "Lost at sea" : "Crash site";
       case "landed":
         if (contact.missionType === "terror") return "Terror site";
         if (contact.missionType === "baseDefense") return "Base defense";
@@ -2675,6 +2825,7 @@ export class GeoscapeView {
     // disposes this view mid-frame; bail before rendering a torn-down scene.
     if (this.disposed) return;
     this.updateTerminator();
+    this.updateChaseCamera();
     this.controls.update();
     // Camera shake: offset around the controls-derived base, then restore so the
     // next controls.update() is unaffected (no drift into OrbitControls state).

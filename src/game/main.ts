@@ -343,11 +343,13 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
   const contactStatus = campaign.ufoContact?.status;
   // Launch for both "crashed" (classic shoot-down) and "landed" (terror, landed
   // UFO, base defense) contacts — generateOperation already branches on
-  // missionType to produce the right enemies, theme, and context.
+  // missionType to produce the right enemies, theme, and context. A crash over
+  // ocean is lost at sea — no assault site to deploy to, so refuse to launch.
   if (
     campaign.strategic.status !== "active" ||
     deployment.length === 0 ||
-    (contactStatus !== "crashed" && contactStatus !== "landed")
+    (contactStatus !== "crashed" && contactStatus !== "landed") ||
+    (contactStatus === "crashed" && campaign.ufoContact?.overOcean === true)
   ) {
     return;
   }

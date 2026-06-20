@@ -13,6 +13,7 @@ import type {
   UfoContact,
 } from "./types";
 import { summarizeBaseFacilities } from "./base";
+import { isLand } from "./landMask";
 import {
   activeSoldiers,
   adjustRegionalPanic,
@@ -46,6 +47,12 @@ const MISSION_TYPE_ROLL_SALT = 0x9e3779ba;
 /** Hit/damage scaling salts for interactive encounter rounds. */
 const ENCOUNTER_INTERCEPTOR_SALT = 0x1b1b1b1b;
 const ENCOUNTER_UFO_SALT = 0x2d2d2d2d;
+/** Salts for a tracked UFO's deterministic flight vector (heading deg + speed deg/hour). */
+const UFO_HEADING_SALT = 0x5f3759df;
+const UFO_SPEED_SALT = 0x2b7e1516;
+/** Tracked UFOs drift in [min, min + range] degrees/hour — slow enough to stay regional. */
+const UFO_TRACKING_SPEED_MIN = 0.25;
+const UFO_TRACKING_SPEED_RANGE = 0.6;
 
 export interface InterceptionForecast {
   contactId: string;
@@ -84,10 +91,12 @@ function contactInterval(campaign: CampaignState): number {
 }
 
 function clockAt(clock: CampaignClock, elapsedHours: number): CampaignClock {
-  const elapsed = Math.max(0, Math.floor(elapsedHours));
+  // Fractional hours are preserved so the geoscape can tick minute-by-minute;
+  // the integer hour (0-23) is floored, minutes derive from the fractional part.
+  const elapsed = Math.max(0, elapsedHours);
   return {
     day: 1 + Math.floor(elapsed / 24),
-    hour: elapsed % 24,
+    hour: Math.floor(elapsed) % 24,
     elapsedHours: elapsed,
     lastContactHour: Math.max(0, Math.floor(clock.lastContactHour)),
     lastFundingHour: Math.max(0, Math.floor(clock.lastFundingHour)),
@@ -121,6 +130,54 @@ function ufoStrengthForMission(missionType: MissionType, seed: number): number {
   }
 }
 
+/**
+ * Deterministic great-circle destination for a tracked UFO's flight. Given a start
+ * (lat, lon in degrees), a heading (degrees clockwise from north), and a distance
+ * (degrees of arc = speed * hours), returns the new lat/lon. Pure trigonometry.
+ */
+function greatCircleDestination(
+  lat: number,
+  lon: number,
+  headingDeg: number,
+  distanceDeg: number,
+): { lat: number; lon: number } {
+  const toRad = Math.PI / 180;
+  const toDeg = 180 / Math.PI;
+  const phi1 = lat * toRad;
+  const lambda1 = lon * toRad;
+  const theta = headingDeg * toRad;
+  const delta = distanceDeg * toRad;
+  const sinPhi1 = Math.sin(phi1);
+  const cosPhi1 = Math.cos(phi1);
+  const sinDelta = Math.sin(delta);
+  const cosDelta = Math.cos(delta);
+  const phi2 = Math.asin(sinPhi1 * cosDelta + cosPhi1 * sinDelta * Math.cos(theta));
+  const lambda2 =
+    lambda1 + Math.atan2(Math.sin(theta) * sinDelta * cosPhi1, cosDelta - sinPhi1 * Math.sin(phi2));
+  return { lat: phi2 * toDeg, lon: lambda2 * toDeg };
+}
+
+/**
+ * Advances a tracked UFO along its deterministic heading/speed for the elapsed
+ * hours. Longitude wraps the antimeridian; latitude is clamped to the plausible
+ * detection band. The strategic region stays anchored to the detection site (the
+ * council region where panic is attributed); only the displayed position drifts.
+ */
+function moveTrackedContact(contact: UfoContact, hours: number): UfoContact {
+  if (contact.status !== "tracked") return contact;
+  const heading = contact.heading;
+  const speed = contact.speed;
+  if (heading === undefined || speed === undefined || hours <= 0) return contact;
+  const next = greatCircleDestination(contact.lat, contact.lon, heading, speed * hours);
+  const lon = next.lon > 180 ? next.lon - 360 : next.lon < -180 ? next.lon + 360 : next.lon;
+  const lat = Math.max(-56, Math.min(68, next.lat));
+  return {
+    ...contact,
+    lat: Math.round(lat * 10) / 10,
+    lon: Math.round(lon * 10) / 10,
+  };
+}
+
 export function createUfoContact(
   campaign: CampaignState,
   detectedAtHour: number,
@@ -134,6 +191,10 @@ export function createUfoContact(
   // Ground assaults (landed UFO, terror, base defense) spawn already on the ground;
   // only crash-site contacts begin tracked for an air-to-air shoot-down.
   const groundAssault = missionType !== "crashSite";
+  // Tracked UFOs fly: a deterministic heading (deg) + speed (deg/hour) advance
+  // their lat/lon as the geoscape clock ticks. Ground-assault contacts hold position.
+  const heading = rollFraction(hash(seed ^ UFO_HEADING_SALT)) * 360;
+  const speed = UFO_TRACKING_SPEED_MIN + rollFraction(hash(seed ^ UFO_SPEED_SALT)) * UFO_TRACKING_SPEED_RANGE;
   return {
     id: `UFO-${String(campaign.missionsAttempted + 1).padStart(2, "0")}-${seed.toString(16).slice(0, 4).toUpperCase()}`,
     status: groundAssault ? "landed" : "tracked",
@@ -145,6 +206,7 @@ export function createUfoContact(
     expiresAtHour: detectedAtHour + UFO_CONTACT_LIFETIME_HOURS,
     missionSeed: hash(seed ^ 0x85ebca6b),
     strength: ufoStrengthForMission(missionType, seed),
+    ...(groundAssault ? {} : { heading, speed }),
   };
 }
 
@@ -199,6 +261,7 @@ function makeInterceptionReport(
   result: InterceptionReport["result"],
   damage: number,
   completedAtHour: number,
+  overOcean: boolean,
 ): InterceptionReport {
   return {
     contactId: contact.id,
@@ -207,9 +270,12 @@ function makeInterceptionReport(
     strength: contact.strength,
     interceptorDamage: damage,
     completedAtHour,
-    summary: result === "crashed"
-      ? `${contact.id} forced down over ${contact.region}. Interceptor took ${damage}% damage.`
-      : `${contact.id} escaped over ${contact.region}. Interceptor took ${damage}% damage during failed pursuit.`,
+    summary:
+      result === "crashed"
+        ? overOcean
+          ? `${contact.id} shot down over the ocean and lost at sea. Interceptor took ${damage}% damage.`
+          : `${contact.id} forced down over ${contact.region}. Interceptor took ${damage}% damage.`
+        : `${contact.id} escaped over ${contact.region}. Interceptor took ${damage}% damage during failed pursuit.`,
   };
 }
 
@@ -256,7 +322,9 @@ function applyInterceptionOutcome(
     sorties: campaign.interceptor.sorties + 1,
     repairedAtHour: campaign.clock.elapsedHours + interceptorRepairHours(campaign, totalDamage),
   };
-  const report = makeInterceptionReport(contact, result, reportDamage, campaign.clock.elapsedHours);
+  // A UFO forced down over open ocean is lost — no assault mission can reach the wreck.
+  const overOcean = result === "crashed" && !isLand(contact.lat, contact.lon);
+  const report = makeInterceptionReport(contact, result, reportDamage, campaign.clock.elapsedHours, overOcean);
   if (result === "escaped") {
     const regionalPanic = adjustRegionalPanic(campaign.regionalPanic, contact.region, 12, 1);
     const strategic = statusAfterStrategicChange({ ...campaign, regionalPanic }, {
@@ -289,8 +357,12 @@ function applyInterceptionOutcome(
       ...contact,
       status: "crashed",
       interceptedAtHour: campaign.clock.elapsedHours,
-      expiresAtHour: campaign.clock.elapsedHours + CRASH_SITE_LIFETIME_HOURS,
+      // Lost at sea: the wreck cannot be assaulted, so it expires immediately.
+      expiresAtHour: overOcean
+        ? campaign.clock.elapsedHours
+        : campaign.clock.elapsedHours + CRASH_SITE_LIFETIME_HOURS,
       interceptorDamage: reportDamage,
+      overOcean,
     },
     interception: undefined,
   };
@@ -687,7 +759,11 @@ export function advanceGeoscape(
   hours = GEOSCAPE_SCAN_HOURS,
 ): CampaignState {
   if (campaign.strategic.status !== "active") return campaign;
-  const advanced = clockAt(campaign.clock, campaign.clock.elapsedHours + Math.max(0, Math.floor(hours)));
+  // Fractional hours flow through so the clock can tick minute-by-minute; funding,
+  // expiry, and spawn checks all use crossing (>=/<=) on elapsedHours, so fractional
+  // values fire events at exactly their thresholds.
+  const dt = Math.max(0, hours);
+  const advanced = clockAt(campaign.clock, campaign.clock.elapsedHours + dt);
   let clock: CampaignClock = { ...advanced };
   let strategic = campaign.strategic;
   let contact = campaign.ufoContact;
@@ -695,6 +771,10 @@ export function advanceGeoscape(
   clock = nextCampaign.clock;
   strategic = nextCampaign.strategic;
   contact = nextCampaign.ufoContact;
+  // Tracked UFOs fly across the globe as time flows (drifting even with fractional dt).
+  if (contact && contact.status === "tracked") {
+    contact = moveTrackedContact(contact, dt);
+  }
 
   if (contact && contact.expiresAtHour <= clock.elapsedHours) {
     const expiredContact = contact;
@@ -728,5 +808,7 @@ export function advanceGeoscape(
 }
 
 export function formatCampaignClock(clock: CampaignClock): string {
-  return `Day ${clock.day} ${String(clock.hour).padStart(2, "0")}:00`;
+  // Minutes derive from the fractional part of elapsedHours (the clock has no minute field).
+  const minutes = Math.floor((clock.elapsedHours - Math.floor(clock.elapsedHours)) * 60);
+  return `Day ${clock.day} ${String(clock.hour).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
 }
