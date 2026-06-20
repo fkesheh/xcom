@@ -344,6 +344,9 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
   let busy = false;
   let lastFootstepMs = 0; // throttles move() so fast paths don't machine-gun
 
+  /** id of the unit whose directional cover indicators are shown (dedupe; null = cleared). */
+  let coverFocusId: number | null = null;
+
   /** Active item-targeting mode (throw a grenade / heal an ally), or null. */
   let itemTargeting: { kind: "throw" | "heal"; itemId: string } | null = null;
 
@@ -366,6 +369,10 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
     onThrowItem: (itemId) => beginTargeting("throw", itemId),
     onUseItem: (itemId) => beginTargeting("heal", itemId),
     onPrimeItem: (itemId) => primeSelected(itemId),
+    onSetStance: (stance) => {
+      const sel = selectedUnit();
+      if (sel && !busy) void dispatch({ type: "setStance", unitId: sel.id, stance });
+    },
     onOpenSoldierDetail: () => refreshHud(),
     onNewCampaign: () => startNewCampaign(),
   });
@@ -447,9 +454,23 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
     };
   }
 
+  /**
+   * Refresh the directional cover indicators for a player unit. Deduped by unit
+   * id so pointermove hover doesn't rebuild the small marker group every frame;
+   * pass force=true after a dispatch resync, since the selected unit may have
+   * moved to a tile with different adjacent cover even though its id is unchanged.
+   */
+  function refreshCoverFor(unit: Unit | null, force = false): void {
+    const id = unit && unit.faction === "player" ? unit.id : null;
+    if (!force && id === coverFocusId) return;
+    coverFocusId = id;
+    renderer.showCoverIndicators(unit);
+  }
+
   function select(id: number | null): void {
     selectedId = id;
     renderer.setSelected(id);
+    refreshCoverFor(selectedUnit());
     if (id !== null) {
       sfx.select();
       const u = unitById(state, id);
@@ -790,6 +811,11 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
         pushLog(`${name} faces ${dir}`);
         break;
       }
+      case "stanceChanged": {
+        const name = unitById(state, ev.unitId)?.name ?? "Unit";
+        pushLog(`${name} ${ev.stance === "kneel" ? "kneels" : "stands up"}`);
+        break;
+      }
       case "reloaded": {
         const name = unitById(state, ev.unitId)?.name ?? "Unit";
         pushLog(`${name} reloads (${ev.ammo} rounds ready)`);
@@ -968,6 +994,9 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
 
     renderer.syncFromState(state);
     if (selectedId !== null) renderer.setSelected(selectedId);
+    // Re-show cover for the (possibly moved) selection; force since the unit's
+    // tile may have changed even though its id has not.
+    refreshCoverFor(selectedUnit(), true);
 
     // Auto-select a fresh unit at the start of the player's turn if none is held.
     if (selectedId === null && state.status === "playing" && state.activeFaction === "player") {
@@ -1035,6 +1064,15 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
 
     const sel = selectedUnit();
     const hoveredUnitId = renderer.raycastUnit(clientX, clientY);
+    const hoveredUnit = hoveredUnitId !== null ? unitById(state, hoveredUnitId) : undefined;
+    // Cover indicators follow the selection, but while the cursor is over a
+    // friendly figure they preview that operative's cover instead. Deduped by
+    // unit id, so this is cheap across pointermove events.
+    refreshCoverFor(
+      hoveredUnit && hoveredUnit.alive && hoveredUnit.faction === "player"
+        ? hoveredUnit
+        : sel,
+    );
 
     if (sel && hoveredUnitId !== null) {
       const target = unitById(state, hoveredUnitId);
@@ -1244,6 +1282,17 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
       case "m":
       case "M": {
         toggleAudio();
+        break;
+      }
+      case "k":
+      case "K": {
+        // Toggle the selected operative's stance (stand <-> kneel) via the same
+        // dispatch path as the HUD button.
+        const sel = selectedUnit();
+        if (sel && !busy) {
+          const next = (sel.stance ?? "stand") === "stand" ? "kneel" : "stand";
+          void dispatch({ type: "setStance", unitId: sel.id, stance: next });
+        }
         break;
       }
       default:

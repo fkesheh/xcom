@@ -5,7 +5,7 @@
  * stay in src/sim and the controller remains responsible for dispatching them.
  */
 
-import { MORALE } from "../sim/types";
+import { MORALE, STANCE } from "../sim/types";
 import type {
   BattleState,
   Item,
@@ -16,8 +16,11 @@ import type {
   ShotPreview,
   Unit,
   UnitId,
+  UnitStance,
   Weapon,
 } from "../sim/types";
+import { coverDefenseFor } from "../sim/combat";
+import { visibleEnemyIds } from "../sim/index";
 
 export interface HudHover {
   kind: "target" | "move" | "blocked";
@@ -82,6 +85,8 @@ export interface HudCallbacks {
   onThrowItem?: (itemId: string) => void;
   onUseItem?: (itemId: string) => void;
   onPrimeItem?: (itemId: string) => void;
+  /** Toggle the selected operative's body stance (stand <-> kneel). */
+  onSetStance?: (stance: UnitStance) => void;
   onOpenSoldierDetail?: (unitId: number) => void;
   /** Campaign-level restart; falls back to onReturnToBase when not wired. */
   onNewCampaign?: () => void;
@@ -334,6 +339,25 @@ const CSS = `
 #hud .item-line button:disabled .item-verb { color: var(--hud-muted); }
 #hud .items-empty { color: var(--hud-muted); font: 600 9px/1.3 ui-monospace, monospace; padding: 4px 2px; }
 
+/* Stance toggle (actions panel) — mirrors the reload-row layout. */
+#hud .stance-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+#hud .stance-row > span { width: 76px; color: var(--hud-muted); font: 700 8px/1.2 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+#hud .stance-row button { flex: 1; min-height: 32px; padding: 4px 8px; font-size: 9px; text-transform: uppercase; }
+#hud .stance-row .stance-glyph { color: var(--hud-cyan); margin-right: 5px; }
+#hud .stance-row .stance-tu { color: var(--hud-cyan); }
+#hud .stance-row button:disabled .stance-glyph,
+#hud .stance-row button:disabled .stance-tu { color: var(--hud-muted); }
+
+/* Stance + cover readout (unit panel). The cover tone tints the value but a
+   text label (Full / Half / Exposed) always accompanies the colour. */
+#hud .status-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; margin-top: 12px; }
+#hud .status-row .stance-glyph { color: var(--hud-cyan); margin-right: 4px; }
+#hud .cover-tag { font-weight: 750; letter-spacing: 0; }
+#hud .cover-tag.full { color: var(--hud-green); }
+#hud .cover-tag.half { color: var(--hud-amber); }
+#hud .cover-tag.exposed { color: var(--hud-red); }
+#hud .cover-tag.none { color: var(--hud-muted); }
+
 #hud .squad {
   right: max(14px, env(safe-area-inset-right));
   bottom: 75px;
@@ -533,7 +557,8 @@ const CSS = `
   }
   #hud .reserve-row,
   #hud .reload-row,
-  #hud .items-row { display: none; }
+  #hud .items-row,
+  #hud .stance-row { display: none; }
   #hud .modes { margin-top: 7px; }
   #hud .modes button { min-height: 48px; }
   #hud .endturn { right: 20px; bottom: 36px; min-width: 104px; min-height: 46px; font-size: 9px; }
@@ -546,7 +571,8 @@ const CSS = `
 @media (max-height: 660px) {
   #hud .log, #hud .squad { display: none; }
   #hud .unit { padding-top: 10px; padding-bottom: 10px; }
-  #hud .stats { display: none; }
+  #hud .stats,
+  #hud .status-row { display: none; }
   #hud .briefing-card { padding-top: 24px; padding-bottom: 24px; }
   #hud .briefing-grid { margin: 16px 0; }
 }
@@ -669,6 +695,9 @@ export class Hud {
   private readonly reserveButtons = new Map<ReserveMode, HTMLButtonElement>();
   private readonly itemsRow: HTMLDivElement;
   private readonly itemsStack: HTMLDivElement;
+  private readonly stanceButton: HTMLButtonElement;
+  private readonly stanceValue: HTMLElement;
+  private readonly coverValue: HTMLElement;
   private readonly rosterEl: HTMLDivElement;
   private readonly logEl: HTMLElement;
   private readonly endTurn: HTMLButtonElement;
@@ -829,6 +858,23 @@ export class Hud {
     this.visionEl = this.makeStat(stats, "Vision");
     unit.appendChild(stats);
 
+    // Stance + directional-cover readout. Two stat-style cells in a 2-up row;
+    // cover colour always carries a Full/Half/Exposed text label.
+    const statusRow = el("div", "status-row");
+    const stanceCell = el("div", "stat");
+    const stanceCellLabel = el("span");
+    stanceCellLabel.textContent = "Stance";
+    this.stanceValue = el("b");
+    stanceCell.append(stanceCellLabel, this.stanceValue);
+    const coverCell = el("div", "stat");
+    const coverCellLabel = el("span");
+    coverCellLabel.textContent = "Cover";
+    this.coverValue = el("b", "cover-tag none");
+    this.coverValue.textContent = "—";
+    coverCell.append(coverCellLabel, this.coverValue);
+    statusRow.append(stanceCell, coverCell);
+    unit.appendChild(statusRow);
+
     this.detailsButton = el("button", "details-btn");
     this.detailsButton.textContent = "Details";
     this.detailsButton.title = "Open operative dossier (ESC closes)";
@@ -864,6 +910,19 @@ export class Hud {
     this.reloadButton.addEventListener("click", () => this.cb.onReload());
     reloadRow.append(reloadLabel, this.reloadButton);
     actions.appendChild(reloadRow);
+
+    const stanceRow = el("div", "stance-row");
+    const stanceLabel = el("span");
+    stanceLabel.textContent = "Stance";
+    this.stanceButton = el("button");
+    this.stanceButton.addEventListener("click", () => {
+      const sel = this.lastSelected;
+      if (!sel) return;
+      const current: UnitStance = sel.stance ?? "stand";
+      this.cb.onSetStance?.(current === "stand" ? "kneel" : "stand");
+    });
+    stanceRow.append(stanceLabel, this.stanceButton);
+    actions.appendChild(stanceRow);
 
     const reserveRow = el("div", "reserve-row");
     const reserveLabel = el("span");
@@ -1122,6 +1181,7 @@ export class Hud {
     this.updateContext(hover, selected);
     this.updateModeButtons(state, selected, hover, runtime);
     this.updateReloadButton(state, selected, runtime);
+    this.updateStanceButton(state, selected, runtime);
     this.updateReserveButtons(selected, runtime);
     this.updateItemButtons(state, selected, runtime);
     this.renderRoster(players, selected, runtime);
@@ -1157,6 +1217,9 @@ export class Hud {
       this.accuracyEl.textContent = "--";
       this.reactionsEl.textContent = "--";
       this.visionEl.textContent = "--";
+      this.stanceValue.textContent = "--";
+      this.coverValue.textContent = "—";
+      this.coverValue.className = "cover-tag none";
       return;
     }
 
@@ -1203,6 +1266,103 @@ export class Hud {
     this.accuracyEl.textContent = String(selected.stats.firingAccuracy);
     this.reactionsEl.textContent = String(selected.stats.reactions);
     this.visionEl.textContent = `${selected.sightRange} tiles`;
+
+    this.renderStanceReadout(state, selected);
+  }
+
+  /**
+   * Stance indicator + directional-cover status for the unit panel. Cover is
+   * measured against the nearest hostile the squad can see; when none is
+   * visible it reads as "—". Colour is always paired with a text label.
+   */
+  private renderStanceReadout(state: BattleState, selected: Unit): void {
+    const stance: UnitStance = selected.stance ?? "stand";
+    const stanceGlyph = el("span", "stance-glyph");
+    stanceGlyph.textContent = stance === "kneel" ? "▄" : "█";
+    this.stanceValue.replaceChildren(
+      stanceGlyph,
+      document.createTextNode(stance === "kneel" ? "Kneeling" : "Standing"),
+    );
+    this.stanceValue.title = stance === "kneel"
+      ? "Kneeling: +accuracy, smaller profile, costlier moves"
+      : "Standing: full mobility";
+
+    // Directional cover: only the tile sitting between the operative and the
+    // nearest visible shooter protects them (see sim coverDefenseFor).
+    const visEnemies = visibleEnemyIds(state, "player");
+    let nearest: Unit | null = null;
+    let nearestDist = Infinity;
+    for (const candidate of state.units) {
+      if (!candidate.alive || candidate.faction === "player") continue;
+      if (!visEnemies.has(candidate.id)) continue;
+      const dist = Math.max(
+        Math.abs(candidate.pos.x - selected.pos.x),
+        Math.abs(candidate.pos.y - selected.pos.y),
+      );
+      if (dist < nearestDist) {
+        nearestDist = dist;
+        nearest = candidate;
+      }
+    }
+
+    if (!nearest) {
+      this.coverValue.textContent = "—";
+      this.coverValue.className = "cover-tag none";
+      this.coverValue.title = "No visible hostile — cover not engaged";
+      return;
+    }
+
+    const cover = coverDefenseFor(state.grid, selected.pos, nearest.pos);
+    const read = this.coverReadout(cover);
+    this.coverValue.textContent = read.label;
+    this.coverValue.className = `cover-tag ${read.cls}`;
+    this.coverValue.title = `Directional cover vs ${nearest.name}: ${read.label.toLowerCase()}`;
+  }
+
+  /** Maps a directional cover value to its label + colour class. */
+  private coverReadout(cover: 0 | 1 | 2): { label: string; cls: string } {
+    if (cover === 2) return { label: "Full", cls: "full" };
+    if (cover === 1) return { label: "Half", cls: "half" };
+    return { label: "Exposed", cls: "exposed" };
+  }
+
+  private updateStanceButton(
+    state: BattleState,
+    selected: Unit | null,
+    runtime: HudRuntime,
+  ): void {
+    const stance: UnitStance = selected?.stance ?? "stand";
+    const glyph = el("span", "stance-glyph");
+    glyph.textContent = stance === "kneel" ? "▄" : "█";
+    const tu = el("span", "stance-tu");
+    tu.textContent = `${STANCE.TOGGLE_TU} TU`;
+    this.stanceButton.replaceChildren(
+      glyph,
+      document.createTextNode(stance === "kneel" ? "Kneel" : "Stand"),
+      document.createTextNode(" · "),
+      tu,
+    );
+
+    const insufficientTu = !!selected && selected.tu < STANCE.TOGGLE_TU;
+    this.stanceButton.disabled =
+      !selected ||
+      runtime.busy ||
+      state.activeFaction !== "player" ||
+      state.status !== "playing" ||
+      insufficientTu;
+    // Kneeling reads as a braced/active state.
+    this.stanceButton.classList.toggle("active", stance === "kneel");
+    this.stanceButton.title = !selected
+      ? "Select an operative"
+      : state.activeFaction !== "player"
+        ? "Not your turn"
+        : state.status !== "playing"
+          ? "Mission complete"
+          : insufficientTu
+            ? `Not enough TU (need ${STANCE.TOGGLE_TU})`
+            : stance === "stand"
+              ? "Kneel: boosts accuracy and shrinks your profile, but costs 4 TU and makes moves costlier"
+              : "Stand up: restores full mobility (kneeling boosts accuracy)";
   }
 
   private updateContext(hover: HudHover | null, selected: Unit | null): void {

@@ -21,9 +21,11 @@
 import {
   ACESFilmicToneMapping,
   AmbientLight,
+  BoxGeometry,
   BufferGeometry,
   Color,
   DirectionalLight,
+  DoubleSide,
   Float32BufferAttribute,
   Fog,
   Group,
@@ -42,6 +44,9 @@ import {
   Raycaster,
   RingGeometry,
   Scene,
+  Shape,
+  ShapeGeometry,
+  SphereGeometry,
   SRGBColorSpace,
   Vector2,
   Vector3,
@@ -68,6 +73,7 @@ import {
   buildEnvironment,
   disposeMaterials,
   getFloorMaterial,
+  getTerrainMaterial,
 } from "./materials";
 import { createFeature } from "./props";
 import { buildWall, connectsTo, openingOf, wallFamilyOf } from "./walls";
@@ -94,6 +100,10 @@ const COLORS = {
   hover: 0xfacc15,
   aim: 0xff6b5a,
   hpBack: 0x111418,
+  // Cover indicators: tint PAIRED with a distinct glyph (half- vs full-shield),
+  // never colour alone. Amber = partial cover (caution); blue = full cover (safe).
+  coverHalf: 0xf2b13a,
+  coverFull: 0x4cc8f5,
 } as const;
 
 /**
@@ -145,6 +155,7 @@ const GROUND_TONES: Record<string, number> = {
   rubble: 0x6b665d,
   hedge: 0x3f5a2e,
   bush: 0x4a6a34,
+  sandbags: 0x7d6e44,
   // Full cover / blockers.
   wall_building: 0x5c574e,
   wall_interior: 0x5c574e,
@@ -152,6 +163,7 @@ const GROUND_TONES: Record<string, number> = {
   tree: 0x4f5a34,
   ufo_hull: 0x224844,
   dropship_hull: 0x454f59,
+  low_wall: 0x5c574e,
 };
 
 /** Ground tone when a tile has no (or an unknown) render category. */
@@ -241,6 +253,66 @@ interface TileFeature {
 }
 
 const HP_BAR_W = 0.8;
+const HP_BAR_Y = 1.55;
+/** HP bar height when kneeling (tracks the crouched figure's head). */
+const HP_BAR_Y_KNEEL = 1.18;
+/** Character Y-scale when kneeling (crouch ~30% lower, about the feet). */
+const STANCE_KNEEL_SCALE = 0.72;
+
+// ---------------------------------------------------------------------------
+// Cover emplacement geometry (half / full cover that walls.ts + props.ts omit)
+// ---------------------------------------------------------------------------
+
+/**
+ * A stacked-sandbag emplacement: HALF cover (~40% wall height). blocksMove but
+ * NOT blocksSight — you fire over it. Reads as a low tan obstacle distinct from
+ * full walls and open ground. `variant` (the cell index) seeds deterministic
+ * per-tile jitter so the pillows vary without desyncing anything.
+ */
+function buildSandbags(variant: number): Group {
+  const group = new Group();
+  const mat = getTerrainMaterial("crate"); // tan hessian read; cloned per tile for fog
+  const bag = (x: number, y: number, z: number, rot: number): void => {
+    const m = new Mesh(new SphereGeometry(0.23, 12, 10), mat);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    m.scale.set(1.05, 0.62, 0.82);
+    m.position.set(x, y, z);
+    m.rotation.y = rot;
+    group.add(m);
+  };
+  // Deterministic per-tile jitter (no Math.random): tiny yaw per bag.
+  const j = (n: number): number =>
+    ((Math.imul(variant + n, 0x9e37b79f) >>> 0) / 4294967296) * 0.5 - 0.25;
+  // Bottom row of three overlapping pillows + a top bag bridging the gap.
+  bag(-0.26, 0.24, 0.06, j(1));
+  bag(0.02, 0.24, -0.12, j(2));
+  bag(0.26, 0.24, 0.1, j(3));
+  bag(0.0, 0.52, 0.0, j(4));
+  return group;
+}
+
+/**
+ * A chest-high concrete barrier: FULL shoot-over cover (~70% wall height).
+ * blocksMove but NOT blocksSight — a low wall you can fire over but not enter.
+ * Distinct from sight-blocking walls (which fully occlude line of fire).
+ */
+function buildLowWall(_variant: number): Group {
+  const group = new Group();
+  const mat = getTerrainMaterial("wall_interior"); // concrete; cloned per tile for fog
+  const h = 1.3;
+  const body = new Mesh(new BoxGeometry(0.88, h, 0.5), mat);
+  body.castShadow = true;
+  body.receiveShadow = true;
+  body.position.y = h / 2;
+  group.add(body);
+  const cap = new Mesh(new BoxGeometry(0.94, 0.12, 0.56), mat);
+  cap.castShadow = true;
+  cap.receiveShadow = true;
+  cap.position.y = h - 0.06;
+  group.add(cap);
+  return group;
+}
 
 export class Renderer {
   private readonly renderer: WebGLRenderer;
@@ -274,6 +346,7 @@ export class Renderer {
   private selectionRing: Mesh | null = null;
   private selectionHalo: Mesh | null = null;
   private hoverMarker: Mesh | null = null;
+  private coverIndicatorGroup: Group | null = null;
   private objectiveBeacon: Group | null = null;
   private objectiveBeaconTarget: Vec2 | null = null;
   private carrierBeacon: Group | null = null;
@@ -583,9 +656,30 @@ export class Renderer {
     const wall = this.buildWallFeature(category, variant, wx, wz, x, y);
     if (wall) return wall;
 
+    const cover = this.buildCoverFeature(category, variant);
+    if (cover) {
+      cover.object.position.set(wx, 0, wz);
+      return cover;
+    }
+
     const obj = createFeature(category, { variant });
     if (!obj) return null;
     obj.position.set(wx, 0, wz);
+    return { object: obj, parts: cloneFeatureMaterials(obj) };
+  }
+
+  /**
+   * Build the raised feature for a cover emplacement the renderer owns directly
+   * (sandbags = half cover, low_wall = full shoot-over cover). Neither belongs to
+   * a wall family nor is a props.ts prop, so they are built here as self-contained
+   * obstacles — distinct from full walls (taller, sight-blocking) and open ground.
+   * Materials are cloned per tile like props so fog dimming stays local.
+   */
+  private buildCoverFeature(category: string, variant: number): TileFeature | null {
+    let obj: Object3D | null = null;
+    if (category === "sandbags") obj = buildSandbags(variant);
+    else if (category === "low_wall") obj = buildLowWall(variant);
+    if (!obj) return null;
     return { object: obj, parts: cloneFeatureMaterials(obj) };
   }
 
@@ -851,9 +945,9 @@ export class Renderer {
     root.add(character);
 
     // Floating HP bar (background + fill), billboarded each frame, sat above
-    // the head (figures top out around y ≈ 1.4).
+    // the head (figures top out around y ≈ 1.4). applyStance lowers it when kneeling.
     const hpBar = new Group();
-    hpBar.position.y = 1.55;
+    hpBar.position.y = HP_BAR_Y;
     const back = new Mesh(
       new PlaneGeometry(HP_BAR_W + 0.06, 0.18),
       new MeshBasicMaterial({ color: COLORS.hpBack }),
@@ -881,6 +975,20 @@ export class Renderer {
     view.hpFill.scale.x = Math.max(0.0001, frac);
     view.hpFill.position.x = -(1 - frac) * HP_BAR_W * 0.5;
     (view.hpFill.material as MeshBasicMaterial).color.setHex(hpColor(frac));
+  }
+
+  /**
+   * Reflect a unit's body stance on its figure. Kneeling crouches the mesh
+   * (Y-scaled lower about the feet, so the head drops while the feet stay planted)
+   * and lowers the HP bar to sit just above the crouched head. Standing resets
+   * both. Applied every sync so a live stance change reads immediately. Aiming /
+   * walk-pose tweaks live on other transforms (rotation/position), so this scale
+   * composes cleanly with them.
+   */
+  private applyStance(view: UnitView, unit: Unit): void {
+    const kneel = (unit.stance ?? "stand") === "kneel";
+    view.character.scale.set(1, kneel ? STANCE_KNEEL_SCALE : 1, 1);
+    view.hpBar.position.y = kneel ? HP_BAR_Y_KNEEL : HP_BAR_Y;
   }
 
   /** Tiles any living player can currently see, as a set of cell indices. */
@@ -939,6 +1047,7 @@ export class Renderer {
       view.root.position.set(w.x, 0, w.z);
       view.root.scale.setScalar(1);
       this.faceView(view, unit.facing);
+      this.applyStance(view, unit);
       this.updateHp(view, unit);
       const shown = unit.alive && (unit.faction === "player" || visEnemies.has(unit.id));
       view.root.visible = shown;
@@ -979,6 +1088,7 @@ export class Renderer {
     if (id === null) {
       if (this.selectionRing) this.selectionRing.visible = false;
       if (this.selectionHalo) this.selectionHalo.visible = false;
+      this.clearCoverIndicators();
     }
     if (id !== null) {
       const view = this.unitViews.get(id);
@@ -1035,6 +1145,88 @@ export class Renderer {
   clearPreview(): void {
     this.disposeGroupChildren(this.previewGroup);
     this.setHoverTile(null);
+  }
+
+  // -------------------------------------------------------------------------
+  // Directional cover indicators (selected player unit)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Draw small shield markers on the four cardinal edges of the selected player
+   * unit's tile, one per adjacent tile that grants cover, so the player can read
+   * which flanks are protected. Cover 1 (half) shows a short half-shield glyph in
+   * amber; cover 2 (full) shows a taller full-shield glyph in blue. The SHAPE
+   * differs as well as the tint, so the cue is never colour-alone. Pass null (or
+   * a non-player unit) to clear. Cheap: one small group refreshed in place and
+   * disposed properly on clear/teardown.
+   */
+  showCoverIndicators(unit: Unit | null): void {
+    if (!this.coverIndicatorGroup) {
+      this.coverIndicatorGroup = new Group();
+      this.scene.add(this.coverIndicatorGroup);
+    }
+    this.disposeGroupChildren(this.coverIndicatorGroup);
+
+    if (!unit || unit.faction !== "player" || !this.grid) {
+      this.coverIndicatorGroup.visible = false;
+      return;
+    }
+
+    // [edgeOffsetX, edgeOffsetZ, neighbourX, neighbourY, outwardFacingAngleY].
+    // The marker sits on the shared tile edge and faces AWAY from the unit, so it
+    // reads as "cover on this flank". The neighbour's tile cover is what shields
+    // a shot coming from that direction.
+    const sides: ReadonlyArray<readonly [number, number, number, number, number]> = [
+      [0, -0.5, unit.pos.x, unit.pos.y - 1, Math.PI], // N (-Z)
+      [0.5, 0, unit.pos.x + 1, unit.pos.y, Math.PI / 2], // E (+X)
+      [0, 0.5, unit.pos.x, unit.pos.y + 1, 0], // S (+Z)
+      [-0.5, 0, unit.pos.x - 1, unit.pos.y, -Math.PI / 2], // W (-X)
+    ];
+    const w = tileToWorld(unit.pos.x, unit.pos.y, 0);
+    let any = false;
+    for (const [dx, dz, nx, ny, angle] of sides) {
+      if (nx < 0 || ny < 0 || nx >= this.grid.width || ny >= this.grid.height) continue;
+      const cover = tileTypeAt(this.grid, nx, ny)?.cover ?? 0;
+      if (cover <= 0) continue;
+      any = true;
+      const marker = this.buildCoverMarker(cover);
+      marker.position.set(w.x + dx, 0.05, w.z + dz);
+      marker.rotation.y = angle;
+      this.coverIndicatorGroup.add(marker);
+    }
+    this.coverIndicatorGroup.visible = any;
+  }
+
+  /** Remove every cover marker (called on deselect / teardown / re-show). */
+  clearCoverIndicators(): void {
+    if (!this.coverIndicatorGroup) return;
+    this.disposeGroupChildren(this.coverIndicatorGroup);
+    this.coverIndicatorGroup.visible = false;
+  }
+
+  /**
+   * One shield marker for a cover value: a flat glyph standing on the tile edge,
+   * facing outward. Full cover = a taller, pointed-bottom shield (blue); half
+   * cover = a shorter, flat-bottom half-shield (amber). depthTest off + high
+   * renderOrder so the marker stays readable even when the adjacent cover prop
+   * would otherwise occlude it; the basic (unlit) material keeps it bright.
+   */
+  private buildCoverMarker(cover: number): Mesh {
+    const full = cover >= 2;
+    const shape = full ? fullShieldShape() : halfShieldShape();
+    const geo = new ShapeGeometry(shape);
+    geo.translate(0, full ? 0.3 : 0.02, 0); // rest the glyph's base at local y = 0
+    const mat = new MeshBasicMaterial({
+      color: full ? COLORS.coverFull : COLORS.coverHalf,
+      transparent: true,
+      opacity: 0.92,
+      side: DoubleSide,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const mesh = new Mesh(geo, mat);
+    mesh.renderOrder = 999;
+    return mesh;
   }
 
   private disposeGroupChildren(group: Group): void {
@@ -1221,6 +1413,10 @@ export class Renderer {
       this.disposeSceneMarker(this.extractionGroup);
       this.extractionGroup = null;
     }
+    if (this.coverIndicatorGroup) {
+      this.disposeSceneMarker(this.coverIndicatorGroup);
+      this.coverIndicatorGroup = null;
+    }
     this.disposeGrid();
     // Release the shared material/texture/env cache after the per-tile clones
     // (above) are gone, then the composer's render targets.
@@ -1290,4 +1486,33 @@ function dirTowards(world: Vector3, target: Vec2): number {
     }
   }
   return best;
+}
+
+// ---------------------------------------------------------------------------
+// Cover-indicator shield glyphs (flat shapes in the XY plane, normal +Z)
+// ---------------------------------------------------------------------------
+
+/** Full shield outline (rounded shoulders, pointed bottom) — the full-cover glyph. */
+function fullShieldShape(): Shape {
+  const s = new Shape();
+  s.moveTo(0, 0.26);
+  s.quadraticCurveTo(0.2, 0.26, 0.2, 0.1);
+  s.lineTo(0.2, -0.04);
+  s.quadraticCurveTo(0.2, -0.22, 0, -0.3);
+  s.quadraticCurveTo(-0.2, -0.22, -0.2, -0.04);
+  s.lineTo(-0.2, 0.1);
+  s.quadraticCurveTo(-0.2, 0.26, 0, 0.26);
+  return s;
+}
+
+/** Top half of the shield (flat bottom near the equator) — the half-cover glyph. */
+function halfShieldShape(): Shape {
+  const s = new Shape();
+  s.moveTo(0, 0.26);
+  s.quadraticCurveTo(0.2, 0.26, 0.2, 0.1);
+  s.lineTo(0.2, -0.02);
+  s.lineTo(-0.2, -0.02);
+  s.lineTo(-0.2, 0.1);
+  s.quadraticCurveTo(-0.2, 0.26, 0, 0.26);
+  return s;
 }
