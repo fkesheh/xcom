@@ -1,4 +1,5 @@
 import {
+  ACESFilmicToneMapping,
   AdditiveBlending,
   AmbientLight,
   BoxGeometry,
@@ -16,6 +17,7 @@ import {
   MeshBasicMaterial,
   MeshStandardMaterial,
   PerspectiveCamera,
+  PCFSoftShadowMap,
   PointLight,
   Raycaster,
   RingGeometry,
@@ -81,6 +83,15 @@ import type {
   UfoContact,
 } from "../campaign/types";
 import { WEAPONS } from "../sim/content";
+import {
+  accentMaterial,
+  BASE_PALETTE,
+  concreteMaterial,
+  rockMaterial,
+  steelMaterial,
+  type FacilityRole,
+} from "./basePalette";
+import { buildFacilityModel } from "./baseFacilities";
 
 interface BaseViewOptions {
   campaign: CampaignState;
@@ -154,7 +165,7 @@ const CSS = `
   inset: 0;
   z-index: 1;
   pointer-events: none;
-  background: radial-gradient(circle at 46% 54%, transparent 36%, rgba(0,0,0,.68) 100%);
+  background: radial-gradient(circle at 46% 54%, transparent 30%, rgba(0,0,0,.85) 100%);
 }
 #base-view canvas,
 #base-view .base-canvas {
@@ -912,31 +923,6 @@ function missionTypeMeta(operation: OperationPlan): MissionTypeMeta {
   }
 }
 
-function facilityColor(kind: BaseFacility["kind"]): number {
-  switch (kind) {
-    case "hangar":
-      return 0x3b82f6;
-    case "command":
-      return 0x67e8f9;
-    case "lab":
-      return 0xa78bfa;
-    case "workshop":
-      return 0xf59e0b;
-    case "stores":
-      return 0x94a3b8;
-    case "living":
-      return 0x4ade80;
-    case "medbay":
-      return 0x5eead4;
-    case "power":
-      return 0xfbbf24;
-    case "radar":
-      return 0x22d3ee;
-    case "access":
-      return 0xf87171;
-  }
-}
-
 function makeMaterial(color: number, emissive = 0, emissiveIntensity = 0): MeshStandardMaterial {
   return new MeshStandardMaterial({
     color,
@@ -1094,6 +1080,37 @@ function roomForFacilityKind(kind: FacilityKind): RoomId {
   }
 }
 
+/** Resolve a constructed facility's art-directed role (silhouette + accent
+ *  glow) from its kind. Overrides the frozen `roleForKind` helper, whose
+ *  substring matchers misclassify two starter kinds: `command` hits the radar
+ *  branch (`includes("comm")`) and `living` misses barracks (`includes("live")`
+ *  has no "e"). Keyed by the closed FacilityKind union so every kind resolves
+ *  to its intended model + signature accent color. */
+function roleForFacilityKind(kind: FacilityKind): FacilityRole {
+  switch (kind) {
+    case "command":
+      return "command";
+    case "lab":
+      return "lab";
+    case "workshop":
+      return "workshop";
+    case "living":
+      return "barracks";
+    case "hangar":
+      return "hangar";
+    case "radar":
+      return "radar";
+    case "power":
+      return "reactor";
+    case "access":
+    case "medbay":
+    case "stores":
+      return "command";
+    default:
+      return "command";
+  }
+}
+
 export class BaseView {
   private readonly root: HTMLDivElement;
   private readonly canvasWrap: HTMLDivElement;
@@ -1104,6 +1121,19 @@ export class BaseView {
   private readonly pulseMaterials: Array<{ material: MeshBasicMaterial; opacity: number }> = [];
   private readonly rotators: BaseRotator[] = [];
   private readonly walkers: BaseWalker[] = [];
+  /** Per-bay accent point lights so each constructed facility glows from within.
+   *  `base` is the resting intensity; hover/select boosts it for feedback. */
+  private readonly bayLights: Array<{ light: PointLight; facilityId: string; base: number }> = [];
+  /** Reactor inner-core materials, collected once at build time so the frame
+   *  loop can pulse their emissiveIntensity without per-frame traversal. */
+  private readonly reactorCores: MeshStandardMaterial[] = [];
+  /** Shared PBR materials (one instance each) reused across the cavity + bays.
+   *  Created in buildScene; disposed via disposeObject(scene) which dedupes. */
+  private sharedConcrete: MeshStandardMaterial | null = null;
+  private sharedSteel: MeshStandardMaterial | null = null;
+  private sharedRock: MeshStandardMaterial | null = null;
+  /** Resting camera position; the frame loop adds a subtle idle drift on top. */
+  private readonly camHome = new Vector3(-0.3, 6.4, 7.5);
   private raf = 0;
   private disposed = false;
   private noticeEl: HTMLDivElement | null = null;
@@ -1131,8 +1161,14 @@ export class BaseView {
 
     this.renderer.outputColorSpace = SRGBColorSpace;
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    // Real-time shadows are part of the look (excavation work-light reads
+    // through contact shadows). PCFSoftShadowMap keeps edges soft + cinematic.
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = PCFSoftShadowMap;
+    this.renderer.toneMapping = ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.12;
 
-    this.camera.position.set(-0.3, 6.4, 7.5);
+    this.camera.position.copy(this.camHome);
     this.camera.lookAt(0, 0, 0);
 
     this.buildScene();
@@ -1248,17 +1284,56 @@ export class BaseView {
   }
 
   private buildScene(): void {
-    this.scene.fog = new Fog(0x02070d, 8, 18);
-    this.scene.add(new AmbientLight(0x9bdcf4, 0.55));
-    const key = new DirectionalLight(0xe7fbff, 2.1);
-    key.position.set(4.5, 7, 5.5);
+    // One curated PBR material per vocabulary surface, shared across the whole
+    // base (rock cavity / concrete floor / steel structure). All color traces
+    // to BASE_PALETTE — no ad-hoc hex on the architecture.
+    this.sharedConcrete = concreteMaterial();
+    this.sharedSteel = steelMaterial();
+    this.sharedRock = rockMaterial();
+
+    // Rock-colored LINEAR fog with a near plane: the base (centered ~10 units
+    // from the camera) stays crisp while the back rock walls + void fade to
+    // black — moody depth falloff without crushing the hero subject.
+    this.scene.fog = new Fog(BASE_PALETTE.rock, 9, 20);
+
+    // Low cool ambient — just enough to keep contact shadows legible without
+    // lifting the shadow side into mid grey. Tint from the steel anchor.
+    this.scene.add(
+      new AmbientLight(new Color(BASE_PALETTE.steel).lerp(new Color(1, 1, 1), 0.3), 0.25),
+    );
+
+    // Warm key light — the excavation work-light. Strong and tight: a shadow
+    // frustum wrapped close around the base footprint (higher texel density)
+    // plus a small radius yields crisp contact shadows instead of a diffuse
+    // wash. Tint pulled less toward neutral so warm key reads against cool fill.
+    const key = new DirectionalLight(
+      new Color(BASE_PALETTE.accent.reactor).lerp(new Color(1, 1, 1), 0.55),
+      4.0,
+    );
+    key.position.set(5, 7.5, 6);
+    key.target.position.set(0, 0, 0);
+    key.castShadow = true;
+    key.shadow.mapSize.set(2048, 2048);
+    key.shadow.camera.near = 1;
+    key.shadow.camera.far = 30;
+    key.shadow.camera.left = -6;
+    key.shadow.camera.right = 6;
+    key.shadow.camera.top = 5.5;
+    key.shadow.camera.bottom = -5.5;
+    key.shadow.bias = -0.0005;
+    key.shadow.normalBias = 0.025;
+    key.shadow.radius = 2.5;
     this.scene.add(key);
-    const rim = new DirectionalLight(0x3b82f6, 1.2);
-    rim.position.set(-5, 4, -5);
+    this.scene.add(key.target);
+
+    // Cool rim/back light separates the facility silhouettes from the rock and
+    // reinforces the warm-key / cool-fill split. Tint from the teal floor-line.
+    const rim = new DirectionalLight(
+      new Color(BASE_PALETTE.floorLine).lerp(new Color(1, 1, 1), 0.15),
+      1.15,
+    );
+    rim.position.set(-6, 5, -5);
     this.scene.add(rim);
-    const glow = new PointLight(0x67e8f9, 6, 9, 2);
-    glow.position.set(0, 2.2, 0);
-    this.scene.add(glow);
 
     this.baseGroup.position.set(0, -0.12, 0);
     this.baseGroup.rotation.y = BASE_VIEW_YAW;
@@ -1276,95 +1351,137 @@ export class BaseView {
   }
 
   private buildTerrainSlab(): void {
-    const width = STARTER_BASE_GRID.width * CELL + 1.5;
-    const depth = STARTER_BASE_GRID.height * CELL + 1.5;
-    const earth = new Mesh(
-      new BoxGeometry(width + 2.2, 0.72, depth + 2.2),
-      makeMaterial(0x06111a, 0x02070d, 0.16),
-    );
-    earth.position.y = -0.58;
-    this.baseGroup.add(earth);
+    const rock = this.sharedRock!;
+    const concrete = this.sharedConcrete!;
+    const width = STARTER_BASE_GRID.width * CELL;
+    const depth = STARTER_BASE_GRID.height * CELL;
 
-    const slab = new Mesh(
-      new BoxGeometry(width, 0.18, depth),
-      makeMaterial(0x15293a, 0x05131c, 0.36),
-    );
-    slab.position.y = -0.13;
+    // The rock mass the facility is carved into — extends past the floor on
+    // every side so the cavity walls (buildCutawayShell) read as continuous.
+    const rockBed = new Mesh(new BoxGeometry(width + 4.6, 1.4, depth + 4.6), rock);
+    rockBed.position.y = -0.7;
+    rockBed.receiveShadow = true;
+    rockBed.castShadow = true;
+    this.baseGroup.add(rockBed);
+
+    // Concrete floor of the excavated level, sized to the build grid. Receives
+    // the warm key-light contact shadows from every facility silhouette.
+    const slab = new Mesh(new BoxGeometry(width, 0.16, depth), concrete);
+    slab.position.y = -0.06;
+    slab.receiveShadow = true;
     this.baseGroup.add(slab);
 
+    // Subtle teal floor-line border (scale grid) — additive glow line, palette color.
     const edge = new LineSegments(
       new EdgesGeometry(slab.geometry),
-      new MeshBasicMaterial({ color: 0x67e8f9, transparent: true, opacity: 0.28 }),
+      new MeshBasicMaterial({
+        color: BASE_PALETTE.floorLine,
+        transparent: true,
+        opacity: 0.4,
+        blending: AdditiveBlending,
+        depthWrite: false,
+      }),
     );
     edge.position.copy(slab.position);
     this.baseGroup.add(edge);
 
+    // Teal construction grid on the concrete — reads the cell scale at a glance.
     const gridMat = new MeshBasicMaterial({
-      color: 0x67e8f9,
+      color: BASE_PALETTE.floorLine,
       transparent: true,
-      opacity: 0.09,
+      opacity: 0.16,
       blending: AdditiveBlending,
       depthWrite: false,
     });
     for (let x = -STARTER_BASE_GRID.width / 2; x <= STARTER_BASE_GRID.width / 2; x++) {
-      const line = new Mesh(new BoxGeometry(0.01, 0.012, STARTER_BASE_GRID.height * CELL), gridMat);
-      line.position.set(x * CELL, 0.012, 0);
+      const line = new Mesh(new BoxGeometry(0.012, 0.012, depth), gridMat);
+      line.position.set(x * CELL, 0.03, 0);
       this.baseGroup.add(line);
     }
     for (let y = -STARTER_BASE_GRID.height / 2; y <= STARTER_BASE_GRID.height / 2; y++) {
-      const line = new Mesh(new BoxGeometry(STARTER_BASE_GRID.width * CELL, 0.012, 0.01), gridMat);
-      line.position.set(0, 0.014, y * CELL);
+      const line = new Mesh(new BoxGeometry(width, 0.012, 0.012), gridMat);
+      line.position.set(0, 0.032, y * CELL);
       this.baseGroup.add(line);
     }
   }
 
   private buildCutawayShell(): void {
-    const width = STARTER_BASE_GRID.width * CELL + 1.5;
-    const depth = STARTER_BASE_GRID.height * CELL + 1.5;
-    const wallHeight = 1.44;
-    const rockMat = makeMaterial(0x040a11, 0x0b2230, 0.2);
-    const rockLine = new MeshBasicMaterial({
-      color: 0x67e8f9,
+    const rock = this.sharedRock!;
+    const concrete = this.sharedConcrete!;
+    const width = STARTER_BASE_GRID.width * CELL;
+    const depth = STARTER_BASE_GRID.height * CELL;
+    const wallHeight = 3.0;
+    const wallT = 1.0;
+
+    // Back rock wall (far side from camera). Casts shadow so the key light
+    // throws dramatic rock-face shadow across the concrete floor.
+    const backWall = new Mesh(new BoxGeometry(width + 2.6, wallHeight, wallT), rock);
+    backWall.position.set(0, wallHeight / 2 - 0.55, -depth / 2 - wallT / 2);
+    backWall.castShadow = true;
+    backWall.receiveShadow = true;
+    // Left rock wall.
+    const leftWall = new Mesh(new BoxGeometry(wallT, wallHeight, depth + 2.6), rock);
+    leftWall.position.set(-width / 2 - wallT / 2, wallHeight / 2 - 0.55, 0);
+    leftWall.castShadow = true;
+    leftWall.receiveShadow = true;
+    // Partial right return enclosing the back-right corner — the front-right
+    // stays open as the cutaway sightline.
+    const returnLen = depth * 0.6;
+    const rightReturn = new Mesh(new BoxGeometry(wallT, wallHeight, returnLen + 0.6), rock);
+    rightReturn.position.set(width / 2 + wallT / 2, wallHeight / 2 - 0.55, -depth / 2 + returnLen / 2);
+    rightReturn.castShadow = true;
+    rightReturn.receiveShadow = true;
+    this.baseGroup.add(backWall, leftWall, rightReturn);
+
+    // Cave-roof overhang at the enclosed back-left corner — implies the cavern
+    // continues overhead without lid-ing the whole diorama.
+    const overhang = new Mesh(new BoxGeometry(width * 0.62, 0.5, depth * 0.62), rock);
+    overhang.position.set(-width / 4 + 0.2, wallHeight - 0.6, -depth / 4 - 0.2);
+    overhang.castShadow = true;
+    overhang.receiveShadow = true;
+    this.baseGroup.add(overhang);
+
+    // Horizontal rock strata (subtle teal veins) — additive glow lines.
+    const strataMat = new MeshBasicMaterial({
+      color: BASE_PALETTE.floorLine,
       transparent: true,
-      opacity: 0.12,
+      opacity: 0.14,
       blending: AdditiveBlending,
       depthWrite: false,
     });
-
-    const backWall = new Mesh(new BoxGeometry(width + 2.2, wallHeight, 0.26), rockMat);
-    backWall.position.set(0, 0.42, -depth / 2 - 0.82);
-    const leftWall = new Mesh(new BoxGeometry(0.26, wallHeight * 0.92, depth + 1.55), rockMat);
-    leftWall.position.set(-width / 2 - 0.82, 0.36, 0);
-    const rearCap = new Mesh(new BoxGeometry(width + 2.4, 0.12, 0.44), makeMaterial(0x07131d, 0x0b2230, 0.24));
-    rearCap.position.set(0, 1.14, -depth / 2 - 0.82);
-    const sideCap = new Mesh(new BoxGeometry(0.44, 0.12, depth + 1.7), makeMaterial(0x07131d, 0x0b2230, 0.24));
-    sideCap.position.set(-width / 2 - 0.82, 1.06, 0);
-    this.baseGroup.add(backWall, leftWall, rearCap, sideCap);
-
-    for (let i = 0; i < 5; i++) {
-      const y = -0.18 + i * 0.28;
-      const backStrata = new Mesh(new BoxGeometry(width + 1.7, 0.018, 0.018), rockLine);
-      backStrata.position.set(0, y, -depth / 2 - 0.675);
-      const sideStrata = new Mesh(new BoxGeometry(0.018, 0.018, depth + 1.1), rockLine);
-      sideStrata.position.set(-width / 2 - 0.675, y - 0.03, 0);
-      this.baseGroup.add(backStrata, sideStrata);
+    for (let i = 0; i < 6; i++) {
+      const y = -0.2 + i * 0.34;
+      const backVein = new Mesh(new BoxGeometry(width + 1.8, 0.016, 0.016), strataMat);
+      backVein.position.set(0, y, -depth / 2 - wallT + 0.04);
+      const leftVein = new Mesh(new BoxGeometry(0.016, 0.016, depth + 1.8), strataMat);
+      leftVein.position.set(-width / 2 - wallT + 0.04, y, 0);
+      this.baseGroup.add(backVein, leftVein);
     }
 
-    const frontLip = new Mesh(
-      new BoxGeometry(width + 1.2, 0.18, 0.18),
-      makeMaterial(0x081723, 0x123145, 0.28),
-    );
-    frontLip.position.set(0, -0.02, depth / 2 + 0.64);
-    const rightLip = new Mesh(
-      new BoxGeometry(0.18, 0.18, depth + 1.0),
-      makeMaterial(0x081723, 0x123145, 0.28),
-    );
-    rightLip.position.set(width / 2 + 0.64, -0.02, 0);
-    this.baseGroup.add(frontLip, rightLip);
+    // Clean saw-cut lips on the open cutaway edges (front + front-right).
+    const lipMat = concrete;
+    const frontLip = new Mesh(new BoxGeometry(width + 0.4, 0.22, 0.22), lipMat);
+    frontLip.position.set(0, -0.04, depth / 2 + 0.18);
+    frontLip.castShadow = true;
+    frontLip.receiveShadow = true;
+    const rightLip = new Mesh(new BoxGeometry(0.22, 0.22, depth - returnLen + 0.4), lipMat);
+    rightLip.position.set(width / 2 + 0.18, -0.04, depth / 2 - (depth - returnLen) / 2 + 0.1);
+    rightLip.castShadow = true;
+    rightLip.receiveShadow = true;
+    const lipLine = new MeshBasicMaterial({
+      color: BASE_PALETTE.floorLine,
+      transparent: true,
+      opacity: 0.5,
+      blending: AdditiveBlending,
+      depthWrite: false,
+    });
+    const frontLine = new Mesh(new BoxGeometry(width + 0.42, 0.014, 0.03), lipLine);
+    frontLine.position.set(0, 0.08, depth / 2 + 0.28);
+    this.baseGroup.add(frontLip, rightLip, frontLine);
 
-    const label = makeLabel("Sublevel 01 / interior cutaway", 0x67e8f9);
-    label.position.set(-width / 2 + 1.8, 1.18, -depth / 2 - 0.62);
-    label.scale.set(1.6, 0.34, 1);
+    const label = makeLabel("Sublevel 01 / interior cutaway", BASE_PALETTE.floorLine);
+    label.position.set(-width / 2 + 1.9, wallHeight - 0.7, -depth / 2 - wallT + 0.06);
+    label.scale.set(1.7, 0.36, 1);
     this.baseGroup.add(label);
   }
 
@@ -1407,8 +1524,8 @@ export class BaseView {
 
   private makeCrewFigure(color: number, scale = 1): Group {
     const person = new Group();
-    const bodyMat = makeMaterial(0x0f172a, color, 0.24);
-    const visorMat = this.glowMaterial(0xdffbff, 0.68);
+    const bodyMat = makeMaterial(BASE_PALETTE.steel, color, 0.24);
+    const visorMat = this.glowMaterial(BASE_PALETTE.accent.command, 0.68);
     const body = new Mesh(new CylinderGeometry(0.045 * scale, 0.06 * scale, 0.2 * scale, 8), bodyMat);
     body.position.y = 0.22 * scale;
     const head = new Mesh(new SphereGeometry(0.055 * scale, 12, 8), visorMat);
@@ -1422,397 +1539,214 @@ export class BaseView {
   }
 
   private buildCorridor(corridor: BaseCorridor): void {
+    const steel = this.sharedSteel!;
     const group = new Group();
     group.position.copy(this.cellCenter(corridor.x, corridor.y, corridor.w, corridor.h));
     this.baseGroup.add(group);
 
     const width = corridor.w * CELL - 0.28;
     const depth = corridor.h * CELL - 0.28;
-    const floor = new Mesh(
-      new BoxGeometry(width, 0.08, depth),
-      makeMaterial(0x1f3344, 0x061522, 0.18),
-    );
+    const long = Math.max(width, depth);
+    const longAxisIsX = width >= depth;
+
+    // Concrete trench floor connecting the bays.
+    const floor = new Mesh(new BoxGeometry(width, 0.08, depth), this.sharedConcrete!);
     floor.position.y = 0.035;
+    floor.receiveShadow = true;
     group.add(floor);
 
     const edge = new LineSegments(
       new EdgesGeometry(floor.geometry),
-      new MeshBasicMaterial({ color: 0x67e8f9, transparent: true, opacity: 0.45 }),
+      new MeshBasicMaterial({
+        color: BASE_PALETTE.floorLine,
+        transparent: true,
+        opacity: 0.45,
+        blending: AdditiveBlending,
+        depthWrite: false,
+      }),
     );
     edge.position.copy(floor.position);
     group.add(edge);
 
-    this.addWalls(group, width, depth, 0x67e8f9, 0.28, 0.035, 0.1);
-    this.addFloorPanelLines(group, width, depth, 0x67e8f9, 0.28);
+    // Low steel curbs along the long sides — reads as a floored corridor, not
+    // a gap. Cast small contact shadows onto the concrete.
+    const curbH = 0.16;
+    const curbLong = long * 0.42;
+    const curbDeep = 0.07;
+    const offset = (longAxisIsX ? depth : width) / 2 - 0.05;
+    for (const sign of [-1, 1]) {
+      const curb = new Mesh(
+        longAxisIsX
+          ? new BoxGeometry(curbLong, curbH, curbDeep)
+          : new BoxGeometry(curbDeep, curbH, curbLong),
+        steel,
+      );
+      curb.position.y = curbH / 2 + 0.03;
+      if (longAxisIsX) curb.position.z = sign * offset;
+      else curb.position.x = sign * offset;
+      curb.castShadow = true;
+      curb.receiveShadow = true;
+      group.add(curb);
+    }
 
-    const strip = new Mesh(new BoxGeometry(width * 0.72, 0.018, 0.035), this.glowMaterial(0x67e8f9, 0.42));
-    strip.position.y = 0.13;
+    // Teal floor strip — the corridor's work-light runner.
+    const strip = new Mesh(
+      longAxisIsX
+        ? new BoxGeometry(long * 0.7, 0.018, 0.04)
+        : new BoxGeometry(0.04, 0.018, long * 0.7),
+      this.glowMaterial(BASE_PALETTE.floorLine, 0.5),
+    );
+    strip.position.y = 0.1;
     group.add(strip);
   }
 
   private buildFacility(facility: BaseFacility): void {
-    const color = facilityColor(facility.kind);
+    const role = roleForFacilityKind(facility.kind);
+    const accent = BASE_PALETTE.accent[role];
     const group = new Group();
     group.position.copy(this.roomCenter(facility));
     this.baseGroup.add(group);
 
     const width = facility.w * CELL - ROOM_GAP;
     const depth = facility.h * CELL - ROOM_GAP;
-    const floor = new Mesh(
-      new BoxGeometry(width, 0.12, depth),
-      makeMaterial(color, color, 0.12),
-    );
-    floor.position.y = 0;
-    floor.userData.facilityId = facility.id;
-    this.facilityMeshes.push({ mesh: floor, facilityId: facility.id });
+    // How far the bay floor is sunk below the level slab — bays read as carved
+    // niches, not tiles on a flat surface.
+    const recess = 0.2;
+    const floorY = 0.02 - recess;
+
+    // Recessed concrete niche floor — the bay is carved into the level slab.
+    const floor = new Mesh(new BoxGeometry(width, 0.14, depth), this.sharedConcrete!);
+    floor.position.y = floorY - 0.07;
+    floor.receiveShadow = true;
+    floor.castShadow = true;
     group.add(floor);
 
-    const inset = new Mesh(
-      new BoxGeometry(Math.max(0.2, width - 0.22), 0.025, Math.max(0.2, depth - 0.22)),
+    // Accent-glow hit pad: carries userData.facilityId so the existing hover
+    // tooltip + emissive highlight + click→open-room raycasting still works.
+    // Its OWN accentMaterial instance so applyFacilityHighlight can boost it.
+    const padMat = accentMaterial(role, 0.32);
+    const pad = new Mesh(new BoxGeometry(width - 0.18, 0.04, depth - 0.18), padMat);
+    pad.position.y = floorY + 0.03;
+    pad.receiveShadow = true;
+    pad.userData.facilityId = facility.id;
+    this.facilityMeshes.push({ mesh: pad, facilityId: facility.id });
+    group.add(pad);
+
+    const trim = new LineSegments(
+      new EdgesGeometry(pad.geometry),
       new MeshBasicMaterial({
-        color,
+        color: accent,
         transparent: true,
-        opacity: 0.16,
+        opacity: 0.7,
         blending: AdditiveBlending,
         depthWrite: false,
       }),
     );
-    inset.position.y = 0.085;
-    group.add(inset);
+    trim.position.copy(pad.position);
+    group.add(trim);
 
-    const edge = new LineSegments(
-      new EdgesGeometry(floor.geometry),
-      new MeshBasicMaterial({ color, transparent: true, opacity: 0.75 }),
-    );
-    edge.position.copy(floor.position);
-    group.add(edge);
+    // Raised steel partition walls frame the sunken niche as a room (door gaps
+    // connect neighbouring bays).
+    this.addPartitionCurbs(group, width, depth, floorY);
 
-    this.addWalls(group, width, depth, color);
-    this.addSupportColumns(group, width, depth, color);
-    this.addFloorPanelLines(group, width, depth, color, 0.22);
-    this.addDoorMarkers(group, width, depth, color);
-    this.addEquipment(group, facility, color, width, depth);
-    this.addCrew(group, facility, color, width, depth);
+    // The detailed facility diorama — distinct silhouette per role, built from
+    // the shared palette materials + its signature accent glow. Scaled up to
+    // fill the bay and dropped onto the recessed niche floor. Reactor cores
+    // tag themselves (userData.reactorPulse) so the frame loop can pulse them.
+    const model = buildFacilityModel(role);
+    model.traverse((child) => {
+      if (child instanceof Mesh) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+        if (child.userData.reactorPulse && child.material instanceof MeshStandardMaterial) {
+          this.reactorCores.push(child.material);
+        }
+      }
+    });
+    model.position.y = floorY;
+    model.scale.setScalar(1.3);
+    group.add(model);
 
-    const label = makeLabel(facility.label, color);
-    label.position.set(0, 0.84, -depth * 0.3);
+    // Per-bay accent point light — rooms glow from within (the hero detail).
+    const baseIntensity = 5.0;
+    const bayLight = new PointLight(accent, baseIntensity, 6.5, 2);
+    bayLight.position.set(0, floorY + 0.9, 0);
+    group.add(bayLight);
+    this.bayLights.push({ light: bayLight, facilityId: facility.id, base: baseIntensity });
+
+    const label = makeLabel(facility.label, accent);
+    label.position.set(0, floorY + 0.92, -depth * 0.32);
     group.add(label);
   }
 
+  /** Low steel partition curbs around a bay — frames it as a room while leaving
+   *  a central door gap in each side so bays read as connected niches. */
+  private addPartitionCurbs(group: Group, width: number, depth: number, baseY: number): void {
+    const steel = this.sharedSteel!;
+    const h = 0.55;
+    const t = 0.07;
+    const gap = Math.min(0.52, Math.min(width, depth) * 0.3);
+    const halfW = width / 2;
+    const halfD = depth / 2;
+    const segX = (width - gap) / 2;
+    const segZ = (depth - gap) / 2;
+    const gx = gap / 2 + segX / 2;
+    const gz = gap / 2 + segZ / 2;
+    const y = h / 2 + baseY;
+    const make = (geoX: number, geoZ: number, x: number, z: number): void => {
+      const curb = new Mesh(new BoxGeometry(geoX, h, geoZ), steel);
+      curb.position.set(x, y, z);
+      curb.castShadow = true;
+      curb.receiveShadow = true;
+      group.add(curb);
+    };
+    make(segX, t, -gx, halfD - t / 2);
+    make(segX, t, gx, halfD - t / 2);
+    make(segX, t, -gx, -halfD + t / 2);
+    make(segX, t, gx, -halfD + t / 2);
+    make(t, segZ, -halfW + t / 2, -gz);
+    make(t, segZ, -halfW + t / 2, gz);
+    make(t, segZ, halfW - t / 2, -gz);
+    make(t, segZ, halfW - t / 2, gz);
+  }
+
   private buildExpansionPad(facility: BaseFacility): void {
-    const color = facilityColor(facility.kind);
     const group = new Group();
     group.position.copy(this.roomCenter(facility));
     this.baseGroup.add(group);
 
     const width = facility.w * CELL - ROOM_GAP;
     const depth = facility.h * CELL - ROOM_GAP;
-    const floor = new Mesh(
-      new BoxGeometry(width, 0.06, depth),
+    // Dark carved niche — unexcavated rock sunk below the concrete level, hint
+    // it can be excavated. Reads as negative space against the lit bays.
+    const niche = new Mesh(new BoxGeometry(width, 0.18, depth), this.sharedRock!);
+    niche.position.y = -0.05;
+    niche.receiveShadow = true;
+    niche.castShadow = true;
+    group.add(niche);
+
+    const edge = new LineSegments(
+      new EdgesGeometry(niche.geometry),
       new MeshBasicMaterial({
-        color,
+        color: BASE_PALETTE.floorLine,
         transparent: true,
-        opacity: 0.08,
+        opacity: 0.34,
         blending: AdditiveBlending,
         depthWrite: false,
       }),
     );
-    floor.position.y = 0.025;
-    group.add(floor);
-
-    const edge = new LineSegments(
-      new EdgesGeometry(floor.geometry),
-      new MeshBasicMaterial({ color, transparent: true, opacity: 0.24 }),
-    );
-    edge.position.copy(floor.position);
+    edge.position.copy(niche.position);
     group.add(edge);
 
-    const marker = makeLabel("Expansion", color);
-    marker.position.set(0, 0.32, 0);
+    const marker = makeLabel("Expansion", BASE_PALETTE.floorLine);
+    marker.position.set(0, 0.22, 0);
     marker.scale.set(0.9, 0.24, 1);
     group.add(marker);
   }
 
-  private addWalls(
-    group: Group,
-    width: number,
-    depth: number,
-    color: number,
-    wallHeight = 0.62,
-    thick = 0.05,
-    opacity = 0.14,
-  ): void {
-    const wallMat = new MeshBasicMaterial({
-      color,
-      transparent: true,
-      opacity,
-      blending: AdditiveBlending,
-      side: DoubleSide,
-      depthWrite: false,
-    });
-    const front = new Mesh(new BoxGeometry(width, wallHeight, thick), wallMat);
-    const back = front.clone();
-    front.position.set(0, wallHeight / 2, depth / 2);
-    back.position.set(0, wallHeight / 2, -depth / 2);
-    const left = new Mesh(new BoxGeometry(thick, wallHeight, depth), wallMat);
-    const right = left.clone();
-    left.position.set(-width / 2, wallHeight / 2, 0);
-    right.position.set(width / 2, wallHeight / 2, 0);
-    group.add(front, back, left, right);
-  }
-
-  private addSupportColumns(group: Group, width: number, depth: number, color: number): void {
-    if (width < 1.6 || depth < 1.1) return;
-    const mat = makeMaterial(0x0d1b27, color, 0.16);
-    const xs = [-width / 2 + 0.18, width / 2 - 0.18];
-    const zs = [-depth / 2 + 0.18, depth / 2 - 0.18];
-    for (const x of xs) {
-      for (const z of zs) {
-        const column = new Mesh(new CylinderGeometry(0.035, 0.055, 0.68, 8), mat);
-        column.position.set(x, 0.36, z);
-        group.add(column);
-      }
-    }
-  }
-
-  private addFloorPanelLines(
-    group: Group,
-    width: number,
-    depth: number,
-    color: number,
-    opacity: number,
-  ): void {
-    const mat = new MeshBasicMaterial({
-      color,
-      transparent: true,
-      opacity,
-      blending: AdditiveBlending,
-      depthWrite: false,
-    });
-    const inset = 0.18;
-    const lineY = 0.105;
-    if (width > 1.3) {
-      const line = new Mesh(new BoxGeometry(width - inset, 0.012, 0.018), mat);
-      line.position.y = lineY;
-      group.add(line);
-    }
-    if (depth > 1.3) {
-      const line = new Mesh(new BoxGeometry(0.018, 0.012, depth - inset), mat);
-      line.position.y = lineY + 0.002;
-      group.add(line);
-    }
-  }
-
-  private addDoorMarkers(group: Group, width: number, depth: number, color: number): void {
-    const mat = this.glowMaterial(color, 0.55);
-    const doorW = 0.26;
-    const doorH = 0.18;
-    const markers = [
-      { x: 0, z: depth / 2 + 0.026, sx: doorW, sz: 0.035 },
-      { x: 0, z: -depth / 2 - 0.026, sx: doorW, sz: 0.035 },
-      { x: width / 2 + 0.026, z: 0, sx: 0.035, sz: doorW },
-      { x: -width / 2 - 0.026, z: 0, sx: 0.035, sz: doorW },
-    ];
-    for (const marker of markers) {
-      const door = new Mesh(new BoxGeometry(marker.sx, doorH, marker.sz), mat);
-      door.position.set(marker.x, 0.28, marker.z);
-      group.add(door);
-    }
-  }
-
-  private addEquipment(
-    group: Group,
-    facility: BaseFacility,
-    color: number,
-    width: number,
-    depth: number,
-  ): void {
-    const mat = makeMaterial(0x27384a, color, 0.28);
-    const accent = this.glowMaterial(color, 0.76);
-
-    switch (facility.kind) {
-      case "hangar": {
-        const ring = new Mesh(new RingGeometry(0.42, 0.52, 48), accent);
-        ring.rotation.x = -Math.PI / 2;
-        ring.position.y = 0.08;
-        const craft = new Group();
-        const body = new Mesh(new BoxGeometry(0.82, 0.16, 0.32), mat);
-        body.position.y = 0.25;
-        const wing = new Mesh(new BoxGeometry(1.15, 0.04, 0.12), mat);
-        wing.position.y = 0.25;
-        const nose = new Mesh(new ConeGeometry(0.16, 0.36, 18), mat);
-        nose.rotation.z = -Math.PI / 2;
-        nose.position.set(0.56, 0.25, 0);
-        const tail = new Mesh(new BoxGeometry(0.12, 0.22, 0.42), mat);
-        tail.position.set(-0.48, 0.29, 0);
-        const gantry = new Mesh(new BoxGeometry(width * 0.82, 0.06, 0.06), accent);
-        gantry.position.set(0, 0.58, -depth * 0.34);
-        craft.add(body, wing, nose, tail);
-        group.add(gantry);
-        group.add(ring, craft);
-        this.addRotator(ring, "z", 0.72);
-        break;
-      }
-      case "command": {
-        for (let i = 0; i < 5; i++) {
-          const angle = (i / 5) * Math.PI * 2;
-          const consoleMesh = new Mesh(new BoxGeometry(0.32, 0.18, 0.18), mat);
-          consoleMesh.position.set(Math.cos(angle) * 0.42, 0.17, Math.sin(angle) * 0.42);
-          consoleMesh.rotation.y = -angle;
-          group.add(consoleMesh);
-        }
-        const table = new Mesh(new CylinderGeometry(0.26, 0.34, 0.16, 24), accent);
-        table.position.y = 0.25;
-        const hologram = new Mesh(new SphereGeometry(0.18, 24, 12), this.glowMaterial(0x67e8f9, 0.42));
-        hologram.position.y = 0.54;
-        group.add(table, hologram);
-        this.addRotator(hologram, "y", 0.8);
-        break;
-      }
-      case "lab": {
-        for (let i = -1; i <= 1; i += 2) {
-          const bench = new Mesh(new BoxGeometry(0.54, 0.18, 0.18), mat);
-          bench.position.set(i * 0.38, 0.18, 0);
-          group.add(bench);
-          const tank = new Mesh(new CylinderGeometry(0.08, 0.08, 0.42, 18), accent);
-          tank.position.set(i * 0.38, 0.47, 0);
-          group.add(tank);
-        }
-        const scanner = new Mesh(new RingGeometry(0.18, 0.24, 32), accent);
-        scanner.rotation.x = -Math.PI / 2;
-        scanner.position.set(0, 0.4, depth * 0.18);
-        group.add(scanner);
-        this.addRotator(scanner, "z", 1.25);
-        break;
-      }
-      case "medbay": {
-        for (let i = -1; i <= 1; i += 2) {
-          const pod = new Mesh(new BoxGeometry(0.28, 0.12, 0.58), mat);
-          pod.position.set(i * 0.24, 0.17, 0.04);
-          group.add(pod);
-          const canopy = new Mesh(new BoxGeometry(0.22, 0.06, 0.36), accent);
-          canopy.position.set(i * 0.24, 0.3, 0.02);
-          group.add(canopy);
-        }
-        const scanner = new Mesh(new RingGeometry(0.2, 0.27, 32), accent);
-        scanner.rotation.x = -Math.PI / 2;
-        scanner.position.set(0, 0.48, -depth * 0.22);
-        group.add(scanner);
-        this.addRotator(scanner, "z", 0.9);
-        break;
-      }
-      case "workshop": {
-        for (let i = -1; i <= 1; i++) {
-          const crate = new Mesh(new BoxGeometry(0.28, 0.22 + i * 0.02, 0.28), mat);
-          crate.position.set(i * 0.32, 0.18, i % 2 === 0 ? 0.16 : -0.16);
-          group.add(crate);
-        }
-        const crane = new Mesh(new BoxGeometry(width * 0.72, 0.05, 0.05), accent);
-        crane.position.set(0, 0.54, -depth * 0.24);
-        group.add(crane);
-        break;
-      }
-      case "stores": {
-        for (let row = -1; row <= 1; row += 2) {
-          const rack = new Mesh(new BoxGeometry(width * 0.68, 0.34, 0.16), mat);
-          rack.position.set(0, 0.26, row * depth * 0.22);
-          group.add(rack);
-          for (let i = -1; i <= 1; i++) {
-            const crate = new Mesh(new BoxGeometry(0.2, 0.15, 0.14), makeMaterial(0x334155, color, 0.12));
-            crate.position.set(i * 0.24, 0.52, row * depth * 0.22);
-            group.add(crate);
-          }
-        }
-        break;
-      }
-      case "power": {
-        for (let i = -1; i <= 1; i += 2) {
-          const core = new Mesh(new CylinderGeometry(0.14, 0.18, 0.58, 24), accent);
-          core.position.set(i * 0.3, 0.36, 0);
-          group.add(core);
-        }
-        const reactorRing = new Mesh(new RingGeometry(0.45, 0.55, 42), accent);
-        reactorRing.rotation.x = -Math.PI / 2;
-        reactorRing.position.y = 0.13;
-        group.add(reactorRing);
-        this.addRotator(reactorRing, "z", 0.64);
-        break;
-      }
-      case "radar": {
-        const mast = new Mesh(new CylinderGeometry(0.04, 0.06, 0.56, 12), mat);
-        mast.position.y = 0.34;
-        const dish = new Mesh(new ConeGeometry(0.28, 0.22, 32, 1, true), accent);
-        dish.position.y = 0.72;
-        dish.rotation.x = Math.PI * 0.38;
-        group.add(mast, dish);
-        this.addRotator(dish, "y", 0.72);
-        break;
-      }
-      case "access": {
-        const shaft = new Mesh(new CylinderGeometry(0.28, 0.28, 0.5, 6), mat);
-        shaft.position.y = 0.31;
-        const cap = new Mesh(new RingGeometry(0.24, 0.36, 6), accent);
-        cap.rotation.x = -Math.PI / 2;
-        cap.position.y = 0.58;
-        const lift = new Mesh(new BoxGeometry(0.34, 0.1, 0.34), accent);
-        lift.position.y = 0.18;
-        group.add(shaft, cap, lift);
-        break;
-      }
-      case "living": {
-        const bunks = Math.max(2, Math.floor(width / 0.48));
-        for (let i = 0; i < bunks; i++) {
-          const bunk = new Mesh(new BoxGeometry(0.32, 0.14, 0.5), mat);
-          bunk.position.set(-width / 2 + 0.32 + i * 0.46, 0.15, depth * 0.05);
-          group.add(bunk);
-        }
-        const mess = new Mesh(new BoxGeometry(0.42, 0.12, 0.32), accent);
-        mess.position.set(width * 0.25, 0.21, -depth * 0.24);
-        group.add(mess);
-        break;
-      }
-      default: {
-        break;
-      }
-    }
-  }
-
-  private addCrew(
-    group: Group,
-    facility: BaseFacility,
-    color: number,
-    width: number,
-    depth: number,
-  ): void {
-    const count =
-      facility.kind === "access" || facility.kind === "radar"
-        ? 1
-        : facility.kind === "hangar" || facility.kind === "command"
-          ? 3
-          : 2;
-    const positions = [
-      [-0.28, -0.18],
-      [0.28, 0.16],
-      [-0.08, 0.28],
-      [0.12, -0.3],
-    ] as const;
-
-    for (let i = 0; i < count; i++) {
-      const [ox, oz] = positions[i % positions.length]!;
-      const person = this.makeCrewFigure(color);
-      person.position.set(
-        Math.max(-width / 2 + 0.24, Math.min(width / 2 - 0.24, ox * width)),
-        0,
-        Math.max(-depth / 2 + 0.24, Math.min(depth / 2 - 0.24, oz * depth)),
-      );
-      person.rotation.y = (i / count) * Math.PI * 0.8;
-      group.add(person);
-    }
-  }
-
   private addOverheadSystems(): void {
-    const pipeMat = makeMaterial(0x0b1b28, 0x67e8f9, 0.22);
-    const glow = this.glowMaterial(0x67e8f9, 0.32);
+    const pipeMat = this.sharedSteel!;
+    const glow = this.glowMaterial(BASE_PALETTE.floorLine, 0.34);
     const systems = [
       { x: 3.25, y: 1.5, sx: CELL * 3.9, sz: 0.045 },
       { x: 4, y: 2.5, sx: 0.045, sz: CELL * 3.1 },
@@ -1824,6 +1758,8 @@ export class BaseView {
       const center = this.cellCenter(item.x, item.y, 1, 1);
       const tray = new Mesh(new BoxGeometry(item.sx, 0.045, item.sz), pipeMat);
       tray.position.set(center.x, 0.74, center.z);
+      tray.castShadow = true;
+      tray.receiveShadow = true;
       const light = new Mesh(new BoxGeometry(item.sx * 0.86, 0.018, item.sz * 0.86), glow);
       light.position.set(center.x, 0.785, center.z);
       this.baseGroup.add(tray, light);
@@ -1843,7 +1779,7 @@ export class BaseView {
         this.pathPoint(3, 3),
         this.pathPoint(2, 3),
       ],
-      0x67e8f9,
+      BASE_PALETTE.accent.lab,
       0.46,
       0,
     );
@@ -1856,7 +1792,7 @@ export class BaseView {
         this.pathPoint(4, 3),
         this.pathPoint(5, 3),
       ],
-      0xfbbf24,
+      BASE_PALETTE.accent.workshop,
       0.36,
       2.4,
     );
@@ -1868,7 +1804,7 @@ export class BaseView {
         this.pathPoint(2, 3),
         this.pathPoint(1, 3),
       ],
-      0x4ade80,
+      BASE_PALETTE.accent.hangar,
       0.3,
       4.2,
     );
@@ -1925,8 +1861,8 @@ export class BaseView {
   private addPerimeterShafts(): void {
     const width = STARTER_BASE_GRID.width * CELL;
     const depth = STARTER_BASE_GRID.height * CELL;
-    const mat = makeMaterial(0x0b1b28, 0x67e8f9, 0.18);
-    const glow = this.glowMaterial(0x67e8f9, 0.36);
+    const mat = this.sharedSteel!;
+    const glow = this.glowMaterial(BASE_PALETTE.floorLine, 0.4);
     const positions = [
       [-width / 2 - 0.28, -depth / 2 - 0.18],
       [width / 2 + 0.28, depth / 2 + 0.18],
@@ -1934,6 +1870,8 @@ export class BaseView {
     for (const [x, z] of positions) {
       const shaft = new Mesh(new CylinderGeometry(0.12, 0.16, 1.35, 10), mat);
       shaft.position.set(x, 0.42, z);
+      shaft.castShadow = true;
+      shaft.receiveShadow = true;
       const beacon = new Mesh(new RingGeometry(0.13, 0.2, 24), glow);
       beacon.rotation.x = -Math.PI / 2;
       beacon.position.set(x, 1.12, z);
@@ -2724,15 +2662,19 @@ export class BaseView {
     this.refreshHud();
   };
 
-  /** Boost the emissive of the selected/hovered facility floor so the 3D cutaway
-   *  stays in sync with the open room. */
+  /** Boost the emissive of the selected/hovered facility pad and its accent
+   *  point light so the 3D cutaway stays in sync with the open room and the
+   *  glow reacts to focus. */
   private applyFacilityHighlight(): void {
     const active = this.selectedFacilityId ?? this.hoveredFacilityId;
     for (const entry of this.facilityMeshes) {
       const mat = entry.mesh.material;
       if (mat instanceof MeshStandardMaterial) {
-        mat.emissiveIntensity = entry.facilityId === active ? 0.55 : 0.12;
+        mat.emissiveIntensity = entry.facilityId === active ? 0.95 : 0.32;
       }
+    }
+    for (const bay of this.bayLights) {
+      bay.light.intensity = bay.facilityId === active ? bay.base * 1.9 : bay.base;
     }
   }
 
@@ -2750,8 +2692,18 @@ export class BaseView {
     this.raf = requestAnimationFrame(this.frame);
     const elapsed = performance.now() * 0.001;
     this.baseGroup.rotation.y = BASE_VIEW_YAW + Math.sin(elapsed * 0.16) * 0.028;
+    // Very subtle idle camera drift for life — reuses camHome (no per-frame
+    // allocation) and lookAt is allocation-free.
+    this.camera.position.x = this.camHome.x + Math.sin(elapsed * 0.12) * 0.14;
+    this.camera.position.y = this.camHome.y + Math.sin(elapsed * 0.09 + 1.1) * 0.1;
+    this.camera.position.z = this.camHome.z + Math.cos(elapsed * 0.1) * 0.12;
+    this.camera.lookAt(0, 0, 0);
     const pulse = 0.82 + Math.sin(elapsed * 3) * 0.18;
     for (const item of this.pulseMaterials) item.material.opacity = item.opacity * pulse;
+    // Reactor cores visibly pulse — mutates the pre-collected materials (no
+    // per-frame allocation/traversal).
+    const reactorPulse = 1.4 + Math.sin(elapsed * 2.2) * 0.7;
+    for (const mat of this.reactorCores) mat.emissiveIntensity = reactorPulse;
     this.updateRotators(elapsed);
     this.updateWalkers(elapsed);
     this.renderer.render(this.scene, this.camera);
