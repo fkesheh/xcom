@@ -43,9 +43,11 @@ import {
 } from "../campaign/base";
 import {
   activeSoldiers,
+  availableItemCount,
   availableWeaponCount,
   availableBaseFacilities,
   CAMPAIGN_WEAPON_IDS,
+  canAssignSoldierItem,
   canAssignSoldierWeapon,
   canBuildFacility,
   canDeploySoldier,
@@ -71,6 +73,7 @@ import {
   researchDuration,
   researchCost,
   researchTree,
+  soldierItemIds,
   soldierWeaponId,
 } from "../campaign/storage";
 import { generateOperation } from "../campaign/operations";
@@ -83,7 +86,7 @@ import type {
   ResearchId,
   UfoContact,
 } from "../campaign/types";
-import { WEAPONS } from "../sim/content";
+import { ITEMS, WEAPONS } from "../sim/content";
 import {
   accentMaterial,
   BASE_PALETTE,
@@ -104,6 +107,8 @@ interface BaseViewOptions {
   onBuildFacility: (id: string) => void;
   onRecruitSoldier: () => void;
   onAssignWeapon: (soldierId: string, weaponId: CampaignWeaponId) => void;
+  onAssignItem?: (soldierId: string, itemId: string) => void;
+  onUnassignItem?: (soldierId: string, itemId: string) => void;
   onToggleDeployment: (soldierId: string, deployed: boolean) => void;
   onStartManufacturing: (id: ManufacturingProjectId) => void;
   onPurchaseWeapon?: (weaponId: CampaignWeaponId) => void;
@@ -115,6 +120,13 @@ const STYLE_ID = "blacksite-base-style";
 const CELL = 1.32;
 const ROOM_GAP = 0.12;
 const BASE_VIEW_YAW = -0.56;
+
+/** Consumable item ids rendered in the barracks backpack, in display order. */
+const ITEM_IDS: readonly string[] = Object.keys(ITEMS);
+/** Per-item glyph shown beside the label (label always present — never color alone). */
+const ITEM_ICON: Record<string, string> = { grenade: "◆", medkit: "✚" };
+/** Max copies of a single item type one soldier may carry. */
+const MAX_ITEM_CARRY = 3;
 
 interface BaseCorridor {
   id: string;
@@ -759,7 +771,7 @@ const CSS = `
 }
 #base-view .soldier-row {
   display: grid;
-  grid-template-columns: auto minmax(64px, 1.4fr) auto auto minmax(92px, 1fr);
+  grid-template-columns: auto minmax(64px, 1.4fr) auto auto minmax(92px, 1fr) minmax(196px, 1.7fr);
   gap: 8px;
   align-items: center;
   padding: 8px 9px;
@@ -797,6 +809,44 @@ const CSS = `
   letter-spacing: .03em;
 }
 #base-view .soldier-row select:disabled { opacity: .45; }
+#base-view .soldier-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+#base-view .item-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border: 1px solid rgba(103,232,249,.2);
+  border-radius: 6px;
+  background: rgba(1,9,15,.55);
+  color: #cdd9e3;
+  font: 600 11px/1 ui-monospace, monospace;
+  white-space: nowrap;
+}
+#base-view .item-icon { color: #67e8f9; font-size: 12px; }
+#base-view .item-label { color: #e7f7ff; }
+#base-view .item-held { color: #fde68a; font-weight: 700; }
+#base-view .item-stock { color: #9db5c5; }
+#base-view .item-btn {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid rgba(103,232,249,.3);
+  border-radius: 5px;
+  background: rgba(8,35,47,.6);
+  color: #e7f7ff;
+  font: 700 13px/1 ui-monospace, monospace;
+  cursor: pointer;
+}
+#base-view .item-btn:hover:not(:disabled) {
+  border-color: rgba(103,232,249,.6);
+  background: rgba(14,51,68,.7);
+}
+#base-view .item-btn:disabled { opacity: .35; cursor: default; }
 #base-view .status-chip {
   display: inline-flex;
   align-items: center;
@@ -2525,7 +2575,14 @@ export class BaseView {
       this.opts.onAssignWeapon(soldier.id, next);
     });
 
-    row.append(deployToggle, nameEl, rankEl, this.renderSoldierStatus(campaign, soldier), weaponSelect);
+    row.append(
+      deployToggle,
+      nameEl,
+      rankEl,
+      this.renderSoldierStatus(campaign, soldier),
+      weaponSelect,
+      this.renderSoldierItems(campaign, soldier),
+    );
     if (this.expandedSoldierId === soldier.id) {
       const detail = el("div", "soldier-detail");
       detail.textContent =
@@ -2538,6 +2595,63 @@ export class BaseView {
       this.refreshHud();
     });
     return row;
+  }
+
+  /** Compact per-soldier backpack: for each consumable item type, show how many
+   *  the soldier carries vs. the armory's available stock, with +/− equip
+   *  controls that route through onAssignItem/onUnassignItem. Icon + label carry
+   *  the meaning; color is secondary. The row stays one line per soldier. */
+  private renderSoldierItems(campaign: CampaignState, soldier: CampaignSoldier): HTMLElement {
+    const wrap = el("div", "soldier-items");
+    const interactive =
+      campaign.strategic.status === "active" && soldier.status !== "kia";
+    const wired = this.opts.onAssignItem !== undefined && this.opts.onUnassignItem !== undefined;
+    const carried = soldierItemIds(campaign, soldier.id);
+    for (const itemId of ITEM_IDS) {
+      const meta = ITEMS[itemId];
+      const held = carried.filter((id) => id === itemId).length;
+      const stock = availableItemCount(campaign, itemId);
+      const group = el("div", "item-control");
+      const icon = el("span", "item-icon");
+      icon.textContent = ITEM_ICON[itemId] ?? "■";
+      const label = el("span", "item-label");
+      label.textContent = meta?.name ?? itemId;
+      const heldEl = el("span", "item-held");
+      heldEl.textContent = `×${held}`;
+      const stockEl = el("span", "item-stock");
+      stockEl.textContent = `${stock} in armory`;
+      const minusBtn = el("button", "item-btn");
+      minusBtn.type = "button";
+      minusBtn.textContent = "−";
+      minusBtn.setAttribute(
+        "aria-label",
+        `Remove one ${meta?.name ?? itemId} from ${soldier.name}`,
+      );
+      minusBtn.disabled = !interactive || !wired || held === 0;
+      minusBtn.addEventListener("click", (event: MouseEvent) => {
+        event.stopPropagation();
+        this.opts.onUnassignItem?.(soldier.id, itemId);
+      });
+      const plusBtn = el("button", "item-btn");
+      plusBtn.type = "button";
+      plusBtn.textContent = "+";
+      plusBtn.setAttribute(
+        "aria-label",
+        `Assign one ${meta?.name ?? itemId} to ${soldier.name}`,
+      );
+      plusBtn.disabled =
+        !interactive ||
+        !wired ||
+        held >= MAX_ITEM_CARRY ||
+        !canAssignSoldierItem(campaign, soldier.id, itemId);
+      plusBtn.addEventListener("click", (event: MouseEvent) => {
+        event.stopPropagation();
+        this.opts.onAssignItem?.(soldier.id, itemId);
+      });
+      group.append(icon, label, heldEl, stockEl, minusBtn, plusBtn);
+      wrap.appendChild(group);
+    }
+    return wrap;
   }
 
   /** Status chip: icon + text carry the meaning, color is secondary. */

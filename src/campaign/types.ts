@@ -41,6 +41,8 @@ export interface CampaignResources {
 
 export interface CampaignArmory {
   weapons: Record<CampaignWeaponId, number>;
+  /** Stock of consumable items (grenades, medkits) available to assign to soldiers. */
+  items?: Record<string, number>;
 }
 
 export interface StrategicState {
@@ -156,6 +158,8 @@ export interface CampaignSoldier {
   missions: number;
   survivedMissions: number;
   woundedUntilHour?: number;
+  /** Consumable items this soldier is carrying into battle (grenades, medkits). */
+  loadoutItems?: string[];
 }
 
 export interface SoldierStatBonus {

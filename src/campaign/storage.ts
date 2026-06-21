@@ -402,6 +402,7 @@ export const STARTING_ARMORY: CampaignArmory = {
     pistol: 2,
     plasma: 0,
   },
+  items: { grenade: 8, medkit: 4 },
 };
 
 const RANKS: readonly { rank: SoldierRank; minSurvived: number; bonus: SoldierStatBonus }[] = [
@@ -789,6 +790,71 @@ export function assignSoldierWeapon(
 
 export function deploymentWeaponIds(campaign: CampaignState): CampaignWeaponId[] {
   return deploymentSoldiers(campaign).map((soldier) => soldierWeaponId(campaign, soldier.id));
+}
+
+export function availableItemCount(campaign: CampaignState, itemId: string): number {
+  // The armory item pool is decremented at assign time (and restored on unassign), so
+  // the remaining stock IS the available count. Do not subtract loadouts again — that
+  // would double-count items already removed from the pool.
+  return campaign.armory.items?.[itemId] ?? 0;
+}
+
+export function soldierItemIds(campaign: CampaignState, soldierId: string): string[] {
+  const soldier = campaign.soldiers.find((candidate) => candidate.id === soldierId);
+  return soldier ? [...(soldier.loadoutItems ?? [])] : [];
+}
+
+export function canAssignSoldierItem(campaign: CampaignState, soldierId: string, itemId: string): boolean {
+  if (campaign.strategic.status !== "active") return false;
+  const soldier = campaign.soldiers.find((candidate) => candidate.id === soldierId);
+  if (!soldier || soldier.status === "kia") return false;
+  return availableItemCount(campaign, itemId) > 0;
+}
+
+function addItemStock(armory: CampaignArmory, itemId: string, delta: number): CampaignArmory {
+  const current = armory.items?.[itemId] ?? 0;
+  return {
+    ...armory,
+    items: {
+      ...(armory.items ?? {}),
+      [itemId]: Math.max(0, current + Math.floor(delta)),
+    },
+  };
+}
+
+export function assignSoldierItem(campaign: CampaignState, soldierId: string, itemId: string): CampaignState {
+  if (!canAssignSoldierItem(campaign, soldierId, itemId)) return campaign;
+  const soldiers = campaign.soldiers.map((soldier) =>
+    soldier.id === soldierId
+      ? { ...soldier, loadoutItems: [...(soldier.loadoutItems ?? []), itemId] }
+      : soldier,
+  );
+  return {
+    ...campaign,
+    armory: addItemStock(campaign.armory, itemId, -1),
+    soldiers,
+  };
+}
+
+export function unassignSoldierItem(campaign: CampaignState, soldierId: string, itemId: string): CampaignState {
+  const soldier = campaign.soldiers.find((candidate) => candidate.id === soldierId);
+  if (!soldier || soldier.status === "kia") return campaign;
+  const items = soldier.loadoutItems ?? [];
+  const at = items.indexOf(itemId);
+  if (at === -1) return campaign;
+  const loadoutItems = items.filter((_, index) => index !== at);
+  const soldiers = campaign.soldiers.map((entry) =>
+    entry.id === soldierId ? { ...entry, loadoutItems } : entry,
+  );
+  return {
+    ...campaign,
+    armory: addItemStock(campaign.armory, itemId, 1),
+    soldiers,
+  };
+}
+
+export function deploymentItemIds(campaign: CampaignState): string[][] {
+  return deploymentSoldiers(campaign).map((soldier) => [...(soldier.loadoutItems ?? [])]);
 }
 
 export function canPurchaseWeapon(
@@ -1433,6 +1499,7 @@ function emptyWeaponCounts(): Record<CampaignWeaponId, number> {
 function cloneArmory(armory: CampaignArmory): CampaignArmory {
   return {
     weapons: { ...armory.weapons },
+    ...(armory.items ? { items: { ...armory.items } } : {}),
   };
 }
 
@@ -1461,6 +1528,7 @@ function addWeapon(armory: CampaignArmory, weaponId: CampaignWeaponId, count: nu
       ...armory.weapons,
       [weaponId]: Math.max(0, armory.weapons[weaponId] + Math.floor(count)),
     },
+    ...(armory.items ? { items: { ...armory.items } } : {}),
   };
 }
 
@@ -1895,7 +1963,19 @@ function normalizeArmory(
         typeof weapons.plasma === "number" ? Math.floor(weapons.plasma) : defaultArmory.weapons.plasma,
       ),
     },
+    items: normalizeItemStock(maybe.items, defaultArmory.items ?? {}),
   };
+}
+
+function normalizeItemStock(value: unknown, fallback: Record<string, number>): Record<string, number> {
+  const items: Record<string, number> = { ...fallback };
+  if (!value || typeof value !== "object") return items;
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof raw === "number" && Number.isFinite(raw)) {
+      items[key] = Math.max(0, Math.floor(raw));
+    }
+  }
+  return items;
 }
 
 function normalizeSoldierLoadouts(
@@ -1979,10 +2059,16 @@ function normalizeSoldiers(value: unknown): CampaignSoldier[] {
           maybe.status === "wounded" && typeof maybe.woundedUntilHour === "number"
             ? Math.max(0, Math.floor(maybe.woundedUntilHour))
             : undefined,
+        loadoutItems: normalizeLoadoutItems(maybe.loadoutItems),
       },
     ];
   });
   return soldiers.length > 0 ? soldiers : startingSoldiers();
+}
+
+function normalizeLoadoutItems(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
 }
 
 function normalizeResearch(value: unknown): ResearchId[] {

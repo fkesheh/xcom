@@ -52,11 +52,13 @@ import {
 } from "../campaign/geoscape";
 import { generateOperation } from "../campaign/operations";
 import {
+  assignSoldierItem,
   assignSoldierWeapon,
   clearCampaign,
   buildFacility,
   campaignSoldierStatBonus,
   createCampaign,
+  deploymentItemIds,
   deploymentSoldiers,
   deploymentWeaponIds,
   loadCampaign,
@@ -67,6 +69,7 @@ import {
   setSoldierDeployment,
   startManufacturing,
   startResearch,
+  unassignSoldierItem,
 } from "../campaign/storage";
 
 import { Renderer } from "./renderer";
@@ -307,6 +310,22 @@ function showBase(campaign: CampaignState): void {
       debouncedSave(updated);
       baseView?.update(updated);
     },
+    onAssignItem: (soldierId, itemId) => {
+      const base = currentCampaign ?? campaign;
+      const updated = assignSoldierItem(base, soldierId, itemId);
+      if (updated === base) return;
+      currentCampaign = updated;
+      debouncedSave(updated);
+      baseView?.update(updated);
+    },
+    onUnassignItem: (soldierId, itemId) => {
+      const base = currentCampaign ?? campaign;
+      const updated = unassignSoldierItem(base, soldierId, itemId);
+      if (updated === base) return;
+      currentCampaign = updated;
+      debouncedSave(updated);
+      baseView?.update(updated);
+    },
     onToggleDeployment: (soldierId, deployed) => {
       const updated = setSoldierDeployment(currentCampaign ?? campaign, soldierId, deployed);
       currentCampaign = updated;
@@ -382,6 +401,7 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
     themeId: operation.themeId,
     hourOfDay: campaign.clock.hour,
     playerWeaponIds: deploymentWeaponIds(campaign),
+    playerItems: deploymentItemIds(campaign),
     playerNames: deployment.map((soldier) => soldier.name),
     playerSoldierIds: deployment.map((soldier) => soldier.id),
     playerStatBonuses: deployment.map((soldier) => campaignSoldierStatBonus(campaign, soldier)),
