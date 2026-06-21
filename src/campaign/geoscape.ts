@@ -6,7 +6,6 @@ import type {
   InterceptionEncounter,
   InterceptionReport,
   InterceptionResult,
-  InterceptorState,
   MissionType,
   ProjectReport,
   StrategicState,
@@ -18,16 +17,20 @@ import {
   activeSoldiers,
   adjustRegionalPanic,
   canRecruitSoldier,
+  chooseInterceptor,
   completeFinishedConstruction,
   completeFinishedResearch,
   completeFinishedManufacturing,
   constructedFacilities,
+  damageCraft,
   difficultyConfig,
   hasBaseFacility,
   highestRegionalPanic,
   livingSoldiers,
   PROJECT_REPORT_LIMIT,
   recoverWoundedSoldiers,
+  readyInterceptors,
+  repairFleet,
   restockMarket,
 } from "./storage";
 
@@ -221,7 +224,12 @@ export function canLaunchInterceptor(campaign: CampaignState): boolean {
 }
 
 export function isInterceptorReady(campaign: CampaignState): boolean {
-  return !campaign.interceptor.repairedAtHour || campaign.interceptor.repairedAtHour <= campaign.clock.elapsedHours;
+  return readyInterceptors(campaign).length > 0;
+}
+
+/** Current damage of the interceptor that would engage the next UFO (0 if none is ready). */
+function engagingDamage(campaign: CampaignState): number {
+  return chooseInterceptor(campaign)?.damage ?? 0;
 }
 
 export function interceptorRepairHours(campaign: CampaignState, damage: number): number {
@@ -237,7 +245,7 @@ function interceptorEngagementScore(campaign: CampaignState): number {
     INTERCEPTOR_BASE_SCORE +
     (hasBaseFacility(campaign, "radar-2") ? 10 : 0) +
     (hasBaseFacility(campaign, "workshop-2") ? 8 : 0) -
-    Math.floor(campaign.interceptor.damage / 2)
+    Math.floor(engagingDamage(campaign) / 2)
   );
 }
 
@@ -317,26 +325,23 @@ function applyInterceptionOutcome(
   reportDamage: number,
 ): CampaignState {
   const totalDamage = Math.max(0, Math.min(100, Math.floor(finalInterceptorDamage)));
-  const interceptor: InterceptorState = {
-    damage: totalDamage,
-    sorties: campaign.interceptor.sorties + 1,
-    repairedAtHour: campaign.clock.elapsedHours + interceptorRepairHours(campaign, totalDamage),
-  };
+  // Route the damage onto the engaging craft (and keep the legacy interceptor field in sync).
+  const chosen = chooseInterceptor(campaign);
+  const afterCraft = chosen ? damageCraft(campaign, chosen.id, totalDamage) : campaign;
   // A UFO forced down over open ocean is lost — no assault mission can reach the wreck.
   const overOcean = result === "crashed" && !isLand(contact.lat, contact.lon);
-  const report = makeInterceptionReport(contact, result, reportDamage, campaign.clock.elapsedHours, overOcean);
+  const report = makeInterceptionReport(contact, result, reportDamage, afterCraft.clock.elapsedHours, overOcean);
   if (result === "escaped") {
-    const regionalPanic = adjustRegionalPanic(campaign.regionalPanic, contact.region, 12, 1);
-    const strategic = statusAfterStrategicChange({ ...campaign, regionalPanic }, {
-      ...campaign.strategic,
-      threat: Math.min(100, campaign.strategic.threat + 8),
-      funding: Math.max(0, campaign.strategic.funding - 20),
-      score: campaign.strategic.score - 20,
+    const regionalPanic = adjustRegionalPanic(afterCraft.regionalPanic, contact.region, 12, 1);
+    const strategic = statusAfterStrategicChange({ ...afterCraft, regionalPanic }, {
+      ...afterCraft.strategic,
+      threat: Math.min(100, afterCraft.strategic.threat + 8),
+      funding: Math.max(0, afterCraft.strategic.funding - 20),
+      score: afterCraft.strategic.score - 20,
     });
     return {
-      ...campaign,
-      clock: { ...campaign.clock, lastContactHour: campaign.clock.elapsedHours },
-      interceptor,
+      ...afterCraft,
+      clock: { ...afterCraft.clock, lastContactHour: afterCraft.clock.elapsedHours },
       lastInterceptionReport: report,
       strategic,
       regionalPanic,
@@ -345,22 +350,21 @@ function applyInterceptionOutcome(
     };
   }
   return {
-    ...campaign,
-    interceptor,
+    ...afterCraft,
     lastInterceptionReport: report,
     strategic: {
-      ...campaign.strategic,
-      score: campaign.strategic.score + 25,
+      ...afterCraft.strategic,
+      score: afterCraft.strategic.score + 25,
     },
-    regionalPanic: adjustRegionalPanic(campaign.regionalPanic, contact.region, -4),
+    regionalPanic: adjustRegionalPanic(afterCraft.regionalPanic, contact.region, -4),
     ufoContact: {
       ...contact,
       status: "crashed",
-      interceptedAtHour: campaign.clock.elapsedHours,
+      interceptedAtHour: afterCraft.clock.elapsedHours,
       // Lost at sea: the wreck cannot be assaulted, so it expires immediately.
       expiresAtHour: overOcean
-        ? campaign.clock.elapsedHours
-        : campaign.clock.elapsedHours + CRASH_SITE_LIFETIME_HOURS,
+        ? afterCraft.clock.elapsedHours
+        : afterCraft.clock.elapsedHours + CRASH_SITE_LIFETIME_HOURS,
       interceptorDamage: reportDamage,
       overOcean,
     },
@@ -373,7 +377,7 @@ export function interceptUfo(campaign: CampaignState): CampaignState {
   if (!forecast?.canLaunch) return campaign;
   const contact = campaign.ufoContact!;
   const result: InterceptionResult = forecast.succeeds ? "crashed" : "escaped";
-  const finalDamage = Math.min(100, campaign.interceptor.damage + forecast.damage);
+  const finalDamage = Math.min(100, engagingDamage(campaign) + forecast.damage);
   return applyInterceptionOutcome(campaign, contact, result, finalDamage, forecast.damage);
 }
 
@@ -407,7 +411,7 @@ function encounterUfoHpMax(contact: UfoContact): number {
 }
 
 function encounterInterceptorHp(campaign: CampaignState): number {
-  return Math.max(1, 100 - campaign.interceptor.damage);
+  return Math.max(1, 100 - engagingDamage(campaign));
 }
 
 /** An interactive, choice-based interception encounter is currently in progress. */
@@ -497,11 +501,11 @@ export function executeInterceptionAction(
   // A simultaneous kill is resolved in the interceptor's favor (UFO forced down).
   if (ufoHp <= 0) {
     const finalInterceptorDamage = 100 - interceptorHp;
-    const reportDamage = Math.max(0, finalInterceptorDamage - campaign.interceptor.damage);
+    const reportDamage = Math.max(0, finalInterceptorDamage - engagingDamage(campaign));
     return applyInterceptionOutcome(campaign, contact, "crashed", finalInterceptorDamage, reportDamage);
   }
   if (interceptorHp <= 0) {
-    const reportDamage = Math.max(0, 100 - campaign.interceptor.damage);
+    const reportDamage = Math.max(0, 100 - engagingDamage(campaign));
     return applyInterceptionOutcome(campaign, contact, "escaped", 100, reportDamage);
   }
 
@@ -518,15 +522,7 @@ export function executeInterceptionAction(
 }
 
 function repairInterceptor(campaign: CampaignState): CampaignState {
-  const repairedAt = campaign.interceptor.repairedAtHour;
-  if (repairedAt === undefined || repairedAt > campaign.clock.elapsedHours) return campaign;
-  return {
-    ...campaign,
-    interceptor: {
-      damage: 0,
-      sorties: campaign.interceptor.sorties,
-    },
-  };
+  return repairFleet(campaign);
 }
 
 function statusAfterStrategicChange(campaign: CampaignState, strategic: StrategicState): StrategicState {

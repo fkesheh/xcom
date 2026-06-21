@@ -288,7 +288,11 @@ describe("campaign state", () => {
     expect(intercepted.interceptor.damage).toBe(intercepted.ufoContact?.interceptorDamage);
     expect(intercepted.interceptor.sorties).toBe(1);
     expect(intercepted.interceptor.repairedAtHour).toBeGreaterThan(intercepted.clock.elapsedHours);
-    expect(isInterceptorReady(intercepted)).toBe(false);
+    // The engaging craft is grounded for repairs; the standby interceptor keeps the fleet ready.
+    expect(
+      intercepted.fleet!.find((craft) => craft.id === "int-1")?.repairedAtHour,
+    ).toBeGreaterThan(intercepted.clock.elapsedHours);
+    expect(isInterceptorReady(intercepted)).toBe(true);
     expect(operation.region).toBe(intercepted.ufoContact?.region);
     expect(operation.missionSeed).toBe(intercepted.ufoContact?.missionSeed);
     expect(operation.durationHours).toBeGreaterThan(0);
@@ -371,7 +375,7 @@ describe("campaign state", () => {
     expect(recovered.lastInterceptionReport?.result).toBe("crashed");
   });
 
-  it("repairs interceptor damage over geoscape time and blocks launches while damaged", () => {
+  it("repairs interceptor damage over geoscape time while the standby interceptor covers launches", () => {
     const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 12345);
     const detected = advanceGeoscape(campaign, 18);
     const damaged = interceptUfo(detected);
@@ -389,9 +393,13 @@ describe("campaign state", () => {
 
     expect(repairHours).toBe(interceptorRepairHours(detected, damaged.interceptor.damage));
     expect(repairingWithContact.ufoContact?.status).toBe("tracked");
-    expect(isInterceptorReady(repairingWithContact)).toBe(false);
-    expect(canLaunchInterceptor(repairingWithContact)).toBe(false);
-    expect(interceptUfo(repairingWithContact)).toBe(repairingWithContact);
+    // The damaged primary is still repairing, but the standby interceptor can still launch.
+    expect(isInterceptorReady(repairingWithContact)).toBe(true);
+    expect(canLaunchInterceptor(repairingWithContact)).toBe(true);
+    const secondStrike = interceptUfo(repairingWithContact);
+    expect(secondStrike).not.toBe(repairingWithContact);
+    expect(secondStrike.fleet!.find((craft) => craft.id === "int-2")?.sorties).toBe(1);
+    expect(secondStrike.fleet!.find((craft) => craft.id === "int-2")?.damage).toBeGreaterThan(0);
     expect(repaired.interceptor).toEqual({ damage: 0, sorties: 1 });
     expect(isInterceptorReady(repaired)).toBe(true);
     expect(workshopDamaged.interceptor.repairedAtHour! - workshopDamaged.clock.elapsedHours).toBeLessThan(repairHours);

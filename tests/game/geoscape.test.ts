@@ -62,9 +62,9 @@ describe("geoscape coordinate picking", () => {
       disabled: false,
     });
     expect(repairingWithContact.ufoContact?.status).toBe("tracked");
-    expect(isInterceptorReady(repairingWithContact)).toBe(false);
+    expect(isInterceptorReady(repairingWithContact)).toBe(true);
     expect(geoscapeTimeAction(repairingWithContact)).toEqual({
-      label: `Wait ${GEOSCAPE_SCAN_HOURS}h`,
+      label: `Track ${GEOSCAPE_SCAN_HOURS}h`,
       hours: GEOSCAPE_SCAN_HOURS,
       disabled: false,
     });

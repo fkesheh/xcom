@@ -81,6 +81,7 @@ import type {
   CampaignSoldier,
   CampaignState,
   CampaignWeaponId,
+  Craft,
   ManufacturingProjectId,
   OperationPlan,
   ResearchId,
@@ -1083,6 +1084,54 @@ const CSS = `
   #base-view .top-chip { padding: 5px 8px; }
   #base-view .base-footer { bottom: auto; top: 56px; }
 }
+#base-view .craft-list {
+  display: grid;
+  gap: 7px;
+}
+#base-view .craft-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid rgba(103,232,249,.16);
+  border-radius: 8px;
+  background: rgba(2,12,20,.42);
+}
+#base-view .craft-row.transport { border-color: rgba(74,222,128,.18); }
+#base-view .craft-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  font-size: 14px;
+  color: #67e8f9;
+  background: rgba(103,232,249,.12);
+}
+#base-view .craft-row.transport .craft-icon {
+  color: #4ade80;
+  background: rgba(74,222,128,.12);
+}
+#base-view .craft-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+#base-view .craft-kind {
+  color: #9db5c5;
+  font: 700 10px/1 ui-monospace, monospace;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+#base-view .craft-row.transport .craft-kind { color: #86efac; }
+#base-view .craft-row .craft-heading strong {
+  color: #e7f7ff;
+  font: 800 13px/1.2 ui-monospace, monospace;
+  letter-spacing: .03em;
+}
+#base-view .craft-body .card-copy { margin: 3px 0 0; }
 `;
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -2480,24 +2529,80 @@ export class BaseView {
     return wrap;
   }
 
-  /** Hangar room: interceptor status (integrity + sorties/repair) followed by the
-   *  council equipment market. The market keeps its `.market-card` container with
-   *  Buy buttons so smoke/screen readers can always locate it here. */
+  /** Hangar room: the fleet roster (2 interceptors + 1 Skyranger transport) with
+   *  per-craft integrity/sorties/repair status, followed by the council equipment
+   *  market. The market keeps its `.market-card` container with Buy buttons so
+   *  smoke/screen readers can always locate it here. */
   private renderHangarRoom(campaign: CampaignState): HTMLElement {
     const wrap = el("div");
     const status = el("section", "tab-card");
-    const strong = el("strong");
-    strong.textContent = "Interceptor";
-    const integrity = Math.max(0, 100 - campaign.interceptor.damage);
-    const repairedAt = campaign.interceptor.repairedAtHour;
-    const repairing = repairedAt !== undefined && repairedAt > campaign.clock.elapsedHours;
-    const copy = el("p", "card-copy");
-    copy.textContent = repairing
-      ? `Integrity ${integrity}% — repairs underway (${repairedAt! - campaign.clock.elapsedHours}h remaining).`
-      : `Integrity ${integrity}% — ${campaign.interceptor.sorties} sorties flown. Ready to intercept.`;
-    status.append(strong, copy);
+    const head = el("div", "panel-head");
+    const title = el("span", "panel-title");
+    title.textContent = "Fleet";
+    head.append(title);
+    const list = el("div", "craft-list");
+    for (const craft of this.resolveFleet(campaign)) {
+      list.appendChild(this.renderCraftRow(campaign, craft));
+    }
+    status.append(head, list);
     wrap.append(status, this.buildMarketPanel());
     return wrap;
+  }
+
+  /** Resolve the hangar fleet. New saves carry `campaign.fleet` directly; older
+   *  single-interceptor saves (pre-fleet) synthesize the 3-craft roster from the
+   *  legacy interceptor so the hangar always lists the full fleet. */
+  private resolveFleet(campaign: CampaignState): Craft[] {
+    if (campaign.fleet && campaign.fleet.length > 0) {
+      return campaign.fleet;
+    }
+    const legacy = campaign.interceptor;
+    return [
+      {
+        id: "int-1",
+        kind: "interceptor",
+        name: "Raptor-1",
+        damage: legacy.damage,
+        sorties: legacy.sorties,
+        repairedAtHour: legacy.repairedAtHour,
+      },
+      { id: "int-2", kind: "interceptor", name: "Raptor-2", damage: 0, sorties: 0 },
+      { id: "sky-1", kind: "transport", name: "Skyranger", damage: 0, sorties: 0 },
+    ];
+  }
+
+  /** One craft row: a kind label + name (the icon color is always paired with the
+   *  kind label text, never conveyed by color alone) and an integrity / sorties /
+   *  repair status line. Interceptors show damage + sorties; the transport shows
+   *  deployment readiness. */
+  private renderCraftRow(campaign: CampaignState, craft: Craft): HTMLElement {
+    const row = el("div", `craft-row ${craft.kind}`);
+    const icon = el("span", "craft-icon");
+    icon.textContent = "✈";
+    const body = el("div", "craft-body");
+    const heading = el("div", "craft-heading");
+    const kind = el("span", "craft-kind");
+    kind.textContent = craft.kind === "interceptor" ? "Interceptor" : "Transport";
+    const name = el("strong");
+    name.textContent = craft.name;
+    heading.append(kind, name);
+    const copy = el("p", "card-copy");
+    const repairedAt = craft.repairedAtHour;
+    const repairing = repairedAt !== undefined && repairedAt > campaign.clock.elapsedHours;
+    const integrity = Math.max(0, 100 - craft.damage);
+    if (craft.kind === "transport") {
+      copy.textContent = repairing
+        ? `In maintenance — ${repairedAt! - campaign.clock.elapsedHours}h until ready.`
+        : `Ready for deployment — ${craft.sorties} sorties flown.`;
+    } else if (repairing) {
+      copy.textContent =
+        `Integrity ${integrity}% — repairs underway (${repairedAt! - campaign.clock.elapsedHours}h remaining).`;
+    } else {
+      copy.textContent = `Integrity ${integrity}% — ${craft.sorties} sorties flown. Ready to intercept.`;
+    }
+    body.append(heading, copy);
+    row.append(icon, body);
+    return row;
   }
 
   /** Barracks room: compact roster table — deploy toggle, name, rank, status

@@ -15,6 +15,7 @@ import type {
   CampaignState,
   CampaignWeaponId,
   CouncilRegion,
+  Craft,
   DifficultyLevel,
   EquipmentMarket,
   ManufacturingProjectId,
@@ -54,6 +55,150 @@ export const STARTING_INTERCEPTOR: InterceptorState = {
   damage: 0,
   sorties: 0,
 };
+
+/**
+ * The hangar fleet the player starts with: two interceptors (Raptor-1 / Raptor-2)
+ * for air-to-air UFO interception, plus one Skyranger transport for ground missions.
+ * Mirrors the original game's starting complement.
+ */
+export const STARTING_FLEET: readonly Craft[] = [
+  { id: "int-1", kind: "interceptor", name: "Raptor-1", damage: 0, sorties: 0 },
+  { id: "int-2", kind: "interceptor", name: "Raptor-2", damage: 0, sorties: 0 },
+  { id: "sky-1", kind: "transport", name: "Skyranger", damage: 0, sorties: 0 },
+];
+
+/** Craft id synthesized for the legacy single-interceptor field when no fleet exists. */
+export const LEGACY_CRAFT_ID = "int-legacy";
+
+/** Damage fraction at or above which an interceptor is too banged up to be "ready". */
+const INTERCEPTOR_DAMAGE_MAX = 100;
+
+/**
+ * The effective fleet for interception purposes. A real `fleet` is used when present;
+ * otherwise a single synthesized craft is derived from the legacy `interceptor` field
+ * so old saves and manually-staged fixtures without a fleet keep working.
+ */
+function effectiveFleet(campaign: CampaignState): Craft[] {
+  if (Array.isArray(campaign.fleet) && campaign.fleet.length > 0) {
+    return campaign.fleet;
+  }
+  const legacy = campaign.interceptor;
+  return [
+    {
+      id: LEGACY_CRAFT_ID,
+      kind: "interceptor",
+      name: "Interceptor",
+      damage: legacy.damage,
+      sorties: legacy.sorties,
+      ...(legacy.repairedAtHour !== undefined ? { repairedAtHour: legacy.repairedAtHour } : {}),
+    },
+  ];
+}
+
+/** Interceptors that can launch right now (no repair pending or repair already complete). */
+export function readyInterceptors(campaign: CampaignState): Craft[] {
+  return effectiveFleet(campaign).filter(
+    (craft) =>
+      craft.kind === "interceptor" &&
+      (craft.repairedAtHour === undefined || craft.repairedAtHour <= campaign.clock.elapsedHours),
+  );
+}
+
+/** First ready interceptor — the craft that engages the next UFO. */
+export function chooseInterceptor(campaign: CampaignState): Craft | undefined {
+  return readyInterceptors(campaign)[0];
+}
+
+/** The Skyranger transport craft, if the fleet has one. */
+export function transportCraft(campaign: CampaignState): Craft | undefined {
+  return (campaign.fleet ?? []).find((craft) => craft.kind === "transport");
+}
+
+/**
+ * Repair-duration for a damaged craft, matching the legacy interceptor formula: longer
+ * for heavier damage, shortened by a workshop. Duplicated from geoscape.interceptorRepairHours
+ * to keep storage free of a reverse dependency on the geoscape module.
+ */
+function craftRepairHours(campaign: CampaignState, damage: number): number {
+  const workshopBonus = hasBaseFacility(campaign, "workshop-2") ? 10 : 0;
+  return Math.max(6, Math.min(72, Math.ceil(damage * 1.15) - workshopBonus));
+}
+
+/**
+ * Applies interception damage to a single craft: sets total damage, records a sortie,
+ * and schedules its repair. The legacy `interceptor` field is mirrored to the damaged
+ * craft so UI/migration code that still reads it stays consistent. No-op if the craft
+ * is not in the fleet.
+ */
+export function damageCraft(campaign: CampaignState, craftId: string, damage: number): CampaignState {
+  const totalDamage = Math.max(0, Math.min(INTERCEPTOR_DAMAGE_MAX, Math.floor(damage)));
+  const repairedAtHour = campaign.clock.elapsedHours + craftRepairHours(campaign, totalDamage);
+  if (Array.isArray(campaign.fleet) && campaign.fleet.length > 0) {
+    const idx = campaign.fleet.findIndex((craft) => craft.id === craftId);
+    if (idx === -1) return campaign;
+    const craft = campaign.fleet[idx]!;
+    const sorties = craft.sorties + 1;
+    const updated: Craft = {
+      id: craft.id,
+      kind: craft.kind,
+      name: craft.name,
+      damage: totalDamage,
+      sorties,
+      repairedAtHour,
+    };
+    const fleet = [...campaign.fleet.slice(0, idx), updated, ...campaign.fleet.slice(idx + 1)];
+    return {
+      ...campaign,
+      fleet,
+      interceptor: { damage: totalDamage, sorties, repairedAtHour },
+    };
+  }
+  // Legacy fallback (no fleet): apply directly to the single interceptor.
+  const sorties = campaign.interceptor.sorties + 1;
+  return {
+    ...campaign,
+    interceptor: { damage: totalDamage, sorties, repairedAtHour },
+  };
+}
+
+/**
+ * Completes any fleet repairs whose scheduled time has arrived. Each interceptor craft
+ * is repaired on its own `repairedAtHour`; the legacy `interceptor` field is repaired
+ * on its own schedule too (the two are kept in sync at damage-write time, but repairing
+ * them independently avoids clobbering either when they happen to diverge).
+ */
+export function repairFleet(campaign: CampaignState, currentHour?: number): CampaignState {
+  const deadline =
+    typeof currentHour === "number" ? Math.max(0, Math.floor(currentHour)) : campaign.clock.elapsedHours;
+  let next = campaign;
+  if (Array.isArray(campaign.fleet) && campaign.fleet.length > 0) {
+    let changed = false;
+    const fleet = campaign.fleet.map((craft) => {
+      if (
+        craft.kind === "interceptor" &&
+        craft.repairedAtHour !== undefined &&
+        craft.repairedAtHour <= deadline
+      ) {
+        changed = true;
+        return {
+          id: craft.id,
+          kind: craft.kind,
+          name: craft.name,
+          damage: 0,
+          sorties: craft.sorties,
+        } satisfies Craft;
+      }
+      return craft;
+    });
+    if (changed) next = { ...next, fleet };
+  }
+  const legacyRepairedAt = next.interceptor.repairedAtHour;
+  if (legacyRepairedAt !== undefined && legacyRepairedAt <= deadline) {
+    next = { ...next, interceptor: { damage: 0, sorties: next.interceptor.sorties } };
+  }
+  return next;
+}
+
 
 export const STARTING_RESOURCES: CampaignResources = {
   credits: 650,
@@ -469,6 +614,7 @@ export function createCampaign(
     clock: { ...STARTING_CLOCK },
     lastFundingReport: undefined,
     interceptor: { ...STARTING_INTERCEPTOR },
+    fleet: STARTING_FLEET.map((craft) => ({ ...craft })),
     lastInterceptionReport: undefined,
     resources: { ...STARTING_RESOURCES, credits: config.startingCredits },
     armory: cloneArmory(STARTING_ARMORY),
@@ -631,15 +777,7 @@ function completedOperationDuration(operation: OperationPlan): number {
 }
 
 function resolveInterceptorRepair(campaign: CampaignState): CampaignState {
-  const repairedAt = campaign.interceptor.repairedAtHour;
-  if (repairedAt === undefined || repairedAt > campaign.clock.elapsedHours) return campaign;
-  return {
-    ...campaign,
-    interceptor: {
-      damage: 0,
-      sorties: campaign.interceptor.sorties,
-    },
-  };
+  return repairFleet(campaign);
 }
 
 function completeStrategicProgress(campaign: CampaignState): CampaignState {
@@ -1572,6 +1710,7 @@ export function loadCampaign(): CampaignState | null {
     const clock = normalizeClock(parsed.clock);
     const completedResearch = normalizeResearch(parsed.completedResearch);
     const armory = normalizeArmory(parsed.armory, soldiers, completedResearch);
+    const interceptor = normalizeInterceptor(parsed.interceptor, clock);
     const normalized: CampaignState = {
       version: 1,
       id: parsed.id,
@@ -1582,7 +1721,8 @@ export function loadCampaign(): CampaignState | null {
       regionalPanic,
       clock,
       lastFundingReport: normalizeFundingReport(parsed.lastFundingReport),
-      interceptor: normalizeInterceptor(parsed.interceptor, clock),
+      interceptor,
+      fleet: normalizeFleet(parsed.fleet, interceptor, clock),
       lastInterceptionReport: normalizeInterceptionReport(parsed.lastInterceptionReport),
       ufoContact: normalizeUfoContact(parsed.ufoContact, clock),
       interception: normalizeInterception(parsed.interception),
@@ -1756,6 +1896,68 @@ function normalizeInterceptor(value: unknown, clock: CampaignClock): Interceptor
     sorties: typeof maybe.sorties === "number" ? Math.max(0, Math.floor(maybe.sorties)) : 0,
     repairedAtHour,
   };
+}
+
+/**
+ * Normalizes the hangar fleet on load. A valid fleet array (with at least one
+ * interceptor) is kept; anything missing or malformed is rebuilt from the legacy
+ * single interceptor so old saves migrate to the 3-craft complement.
+ */
+function normalizeFleet(value: unknown, interceptor: InterceptorState, clock: CampaignClock): Craft[] {
+  if (Array.isArray(value)) {
+    const crafts = value
+      .map((item) => normalizeCraft(item, clock))
+      .filter((craft): craft is Craft => craft !== undefined);
+    if (crafts.some((craft) => craft.kind === "interceptor")) {
+      return crafts;
+    }
+  }
+  return migrateLegacyFleet(interceptor);
+}
+
+function normalizeCraft(value: unknown, clock: CampaignClock): Craft | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const maybe = value as Partial<Craft>;
+  if (
+    typeof maybe.id !== "string" ||
+    typeof maybe.name !== "string" ||
+    (maybe.kind !== "interceptor" && maybe.kind !== "transport")
+  ) {
+    return undefined;
+  }
+  const damage =
+    typeof maybe.damage === "number" ? Math.max(0, Math.min(100, Math.floor(maybe.damage))) : 0;
+  const sorties = typeof maybe.sorties === "number" ? Math.max(0, Math.floor(maybe.sorties)) : 0;
+  const repairedAtHour =
+    typeof maybe.repairedAtHour === "number" ? Math.max(0, Math.floor(maybe.repairedAtHour)) : undefined;
+  // A repair whose scheduled time has already passed is treated as complete.
+  if (repairedAtHour !== undefined && repairedAtHour <= clock.elapsedHours) {
+    return { id: maybe.id, kind: maybe.kind, name: maybe.name, damage: 0, sorties };
+  }
+  return {
+    id: maybe.id,
+    kind: maybe.kind,
+    name: maybe.name,
+    damage,
+    sorties,
+    ...(repairedAtHour !== undefined ? { repairedAtHour } : {}),
+  };
+}
+
+/**
+ * Migration path for pre-fleet saves: the legacy single interceptor becomes int-1
+ * (carrying its damage/sorties/repair), and a fresh int-2 + Skyranger are added.
+ */
+function migrateLegacyFleet(interceptor: InterceptorState): Craft[] {
+  const int1: Craft = {
+    id: "int-1",
+    kind: "interceptor",
+    name: "Raptor-1",
+    damage: interceptor.damage,
+    sorties: interceptor.sorties,
+    ...(interceptor.repairedAtHour !== undefined ? { repairedAtHour: interceptor.repairedAtHour } : {}),
+  };
+  return [int1, { ...STARTING_FLEET[1]! }, { ...STARTING_FLEET[2]! }];
 }
 
 function normalizeUfoContact(value: unknown, clock: CampaignClock): UfoContact | undefined {

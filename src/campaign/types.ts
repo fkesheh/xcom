@@ -80,6 +80,16 @@ export interface InterceptorState {
   repairedAtHour?: number;
 }
 
+/** A craft in the hangar: interceptors shoot down UFOs; the transport carries soldiers to ground missions. */
+export interface Craft {
+  id: string;
+  kind: "interceptor" | "transport";
+  name: string;
+  damage: number;
+  sorties: number;
+  repairedAtHour?: number;
+}
+
 export interface UfoContact {
   id: string;
   status: "tracked" | "landed" | "engaging" | "crashed" | "escaped";
@@ -237,6 +247,8 @@ export interface CampaignState {
   clock: CampaignClock;
   lastFundingReport?: FundingReport;
   interceptor: InterceptorState;
+  /** The hangar fleet: 2 interceptors + 1 transport (Skyranger) at start. */
+  fleet?: Craft[];
   lastInterceptionReport?: InterceptionReport;
   ufoContact?: UfoContact;
   resources: CampaignResources;

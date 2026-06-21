@@ -104,6 +104,9 @@ describe("interactive interception encounters", () => {
     const detected = withTrackedContact();
     const fragile: CampaignState = {
       ...detected,
+      fleet: detected.fleet!.map((craft) =>
+        craft.id === "int-1" ? { ...craft, damage: 99 } : craft,
+      ),
       interceptor: { damage: 99, sorties: 0 },
     };
 

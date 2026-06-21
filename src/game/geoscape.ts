@@ -50,7 +50,7 @@ import {
   interceptionForecast,
   isInterceptorReady,
 } from "../campaign/geoscape";
-import { campaignObjectiveProgress, DIFFICULTY_CONFIGS, highestRegionalPanic } from "../campaign/storage";
+import { campaignObjectiveProgress, DIFFICULTY_CONFIGS, highestRegionalPanic, transportCraft } from "../campaign/storage";
 import {
   WORLD_CITY_POINTS,
   WORLD_LAND_RINGS,
@@ -1143,6 +1143,7 @@ export class GeoscapeView {
     baseN: Vector3;
     siteN: Vector3;
     region: string;
+    craftName: string;
     startMs: number;
     arrived: boolean;
     onArrived: () => void;
@@ -2380,6 +2381,7 @@ export class GeoscapeView {
       baseN,
       siteN,
       region: contact.region,
+      craftName: transportCraft(campaign)?.name ?? "Skyranger",
       startMs: performance.now(),
       arrived: false,
       onArrived,
@@ -2409,7 +2411,7 @@ export class GeoscapeView {
     const overlay = el("div", "geo-overlay geo-deploy");
     const panel = el("div", "geo-deploy-panel");
     const eye = el("div", "eyebrow");
-    eye.textContent = "✈ Skyranger en route";
+    eye.textContent = `✈ ${this.deploymentFlight?.craftName ?? "Skyranger"} en route`;
     const heading = el("h2");
     heading.textContent = "Deploying squad";
     const copy = el("p");

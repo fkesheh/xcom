@@ -271,9 +271,9 @@ function showBase(campaign: CampaignState): void {
         startTactical(current);
         return;
       }
-      // Stage the Skyranger deployment flight on the globe, then enter the
-      // battlescape on arrival. The geoscape pauses time for the flight; on
-      // arrival, onArrived routes into the existing startTactical launch path.
+      // Stage the fleet's Skyranger transport deployment flight on the globe, then
+      // enter the battlescape on arrival. The geoscape pauses time for the flight;
+      // on arrival, onArrived routes into the existing startTactical launch path.
       flushSave();
       currentCampaign = current;
       disposeTacticalIfExists();
