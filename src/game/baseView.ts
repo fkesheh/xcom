@@ -70,6 +70,7 @@ import {
   manufacturingDuration,
   researchDuration,
   researchCost,
+  researchTree,
   soldierWeaponId,
 } from "../campaign/storage";
 import { generateOperation } from "../campaign/operations";
@@ -131,6 +132,10 @@ interface BaseRotator {
   speed: number;
   baseRotation: number;
 }
+
+/** A research project paired with its current tree status. Derived from
+ *  {@link researchTree}'s return type so it tracks the campaign layer's shape. */
+type ResearchTreeNode = ReturnType<typeof researchTree>[number];
 
 /** Corridor cells (the empty grid cells between bays). Bay positions are sealed
  *  in src/campaign/base.ts, and the unbuildable facilities render as expansion
@@ -595,6 +600,158 @@ const CSS = `
   background: rgba(10,35,22,.4);
   font: 700 12px/1 ui-monospace, monospace;
   letter-spacing: .03em;
+}
+#base-view .tech-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 11px;
+  padding: 8px 11px;
+  border: 1px solid rgba(103,232,249,.18);
+  border-radius: 8px;
+  background: rgba(2,12,20,.4);
+}
+#base-view .tech-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #9db5c5;
+  font: 700 11px/1 ui-monospace, monospace;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+#base-view .tech-legend-item.completed { color: #bbf7d0; }
+#base-view .tech-legend-item.available { color: #67e8f9; }
+#base-view .tech-legend-item.locked { color: #8aa7b8; }
+#base-view .tech-tree {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  overflow-x: auto;
+  padding-bottom: 6px;
+}
+#base-view .tech-tier {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-width: 212px;
+  flex: 0 0 auto;
+  padding-right: 14px;
+}
+#base-view .tech-tier.linked {
+  padding-left: 22px;
+  border-left: 2px solid rgba(103,232,249,.2);
+}
+#base-view .tech-tier-label {
+  margin-bottom: 2px;
+  color: #67e8f9;
+  font: 800 11px/1 ui-monospace, monospace;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+}
+#base-view .tech-node {
+  position: relative;
+  padding: 10px 11px;
+  border: 1px solid rgba(103,232,249,.22);
+  border-radius: 10px;
+  background: rgba(2,12,20,.5);
+}
+#base-view .tech-node.completed {
+  border-color: rgba(74,222,128,.45);
+  background: rgba(10,35,22,.4);
+}
+#base-view .tech-node.available {
+  border-color: rgba(103,232,249,.6);
+  background: rgba(8,35,47,.45);
+  box-shadow: 0 0 18px rgba(34,211,238,.12);
+}
+#base-view .tech-node.locked {
+  border-color: rgba(148,163,184,.22);
+  background: rgba(2,12,20,.42);
+  opacity: .82;
+}
+#base-view .tech-node.active {
+  border-color: rgba(251,191,36,.6);
+  background: rgba(35,24,4,.32);
+  box-shadow: 0 0 20px rgba(251,191,36,.16);
+}
+#base-view .tech-connector {
+  position: absolute;
+  left: -22px;
+  top: 17px;
+  width: 18px;
+  color: rgba(103,232,249,.55);
+  font: 700 12px/1 ui-monospace, monospace;
+  text-align: center;
+}
+#base-view .tech-node-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 5px;
+}
+#base-view .tech-node-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  font-size: 13px;
+}
+#base-view .tech-node.completed .tech-node-icon { color: #4ade80; }
+#base-view .tech-node.available .tech-node-icon { color: #67e8f9; }
+#base-view .tech-node.locked .tech-node-icon { color: #8aa7b8; }
+#base-view .tech-node.active .tech-node-icon { color: #fbbf24; }
+#base-view .tech-node-title {
+  flex: 1;
+  min-width: 0;
+  color: #e7f7ff;
+  font: 800 12px/1.2 ui-monospace, monospace;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+#base-view .tech-node.locked .tech-node-title { color: #8aa7b8; }
+#base-view .tech-node-status {
+  flex: none;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font: 700 10px/1 ui-monospace, monospace;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+#base-view .tech-node.completed .tech-node-status { color: #bbf7d0; border: 1px solid rgba(74,222,128,.4); }
+#base-view .tech-node.available .tech-node-status { color: #67e8f9; border: 1px solid rgba(103,232,249,.4); }
+#base-view .tech-node.locked .tech-node-status { color: #94a3b8; border: 1px solid rgba(148,163,184,.3); }
+#base-view .tech-node.active .tech-node-status { color: #fde68a; border: 1px solid rgba(251,191,36,.5); }
+#base-view .tech-node-desc {
+  margin: 0 0 7px;
+  color: #adc5d2;
+  font: 500 11px/1.4 Inter, sans-serif;
+  letter-spacing: 0;
+  text-transform: none;
+}
+#base-view .tech-node-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  color: #9db5c5;
+  font: 700 11px/1.2 ui-monospace, monospace;
+}
+#base-view .tech-node-meta .card-cost { color: #fbbf24; }
+#base-view .tech-node-req {
+  color: #fb7185;
+  font: 700 11px/1.35 ui-monospace, monospace;
+  letter-spacing: .02em;
+}
+#base-view .tech-node .tech-progress { margin: 2px 0 6px; }
+#base-view .tech-node button {
+  width: 100%;
+  margin-top: 9px;
+  min-height: 36px;
+  font-size: 11px;
 }
 #base-view .soldier-table {
   display: grid;
@@ -2452,86 +2609,187 @@ export class BaseView {
     this.refreshHud();
   }
 
-  /** Research room: completed work as chips, the active project with a progress
-   *  bar + remaining hours, then available projects (cost + Start). */
+  /** Research room rendered as a prerequisite tech tree. Projects are grouped
+   *  into tier columns (tier = longest prerequisite chain depth; tier-0 roots in
+   *  the first column) with a connector rail linking each tier to the one before
+   *  it. Each node is color-coded AND labeled by status (icon + text badge, never
+   *  color alone): completed (green check), available (cyan, Start button),
+   *  locked (muted, lists unmet prerequisites), or in-progress (amber bar).
+   *  Status comes from {@link researchTree}; the active project is always rendered
+   *  with its progress bar regardless of its tree status. */
   private renderResearchRoom(campaign: CampaignState): HTMLElement {
     const wrap = el("div");
 
-    if (campaign.completedResearch.length > 0) {
-      const chipRow = el("div", "chip-row");
-      for (const id of campaign.completedResearch) {
-        const project = RESEARCH_PROJECTS.find((candidate) => candidate.id === id);
-        const chip = el("span", "done-chip");
-        chip.textContent = project?.title ?? id;
-        chipRow.appendChild(chip);
+    const legend = el("div", "tech-legend");
+    legend.append(
+      this.techLegend("✓", "Completed", "completed"),
+      this.techLegend("▸", "Available", "available"),
+      this.techLegend("⊘", "Locked", "locked"),
+    );
+    wrap.appendChild(legend);
+
+    const tree = researchTree(campaign);
+    const tierOf = this.researchTiers();
+    const maxTier = Math.max(0, ...tierOf.values());
+    const treeEl = el("div", "tech-tree");
+    for (let tier = 0; tier <= maxTier; tier++) {
+      const entries = tree.filter((node) => tierOf.get(node.project.id) === tier);
+      if (entries.length === 0) continue;
+      const column = el("div", tier > 0 ? "tech-tier linked" : "tech-tier");
+      const label = el("div", "tech-tier-label");
+      label.textContent = `Tier ${tier}`;
+      column.appendChild(label);
+      for (const entry of entries) {
+        column.appendChild(
+          this.renderResearchNode(campaign, entry, tier),
+        );
       }
-      wrap.appendChild(chipRow);
+      treeEl.appendChild(column);
+    }
+    wrap.appendChild(treeEl);
+    return wrap;
+  }
+
+  /** Compute each project's tier (longest prerequisite chain depth). Tier-0 roots
+   *  have no prerequisites; every other project sits one tier deeper than its
+   *  deepest prerequisite. Cycle-guarded so a malformed graph can't hang the UI. */
+  private researchTiers(): Map<ResearchId, number> {
+    const byId = new Map<ResearchId, ResearchProject>();
+    for (const project of RESEARCH_PROJECTS) byId.set(project.id, project);
+    const cache = new Map<ResearchId, number>();
+    const visiting = new Set<ResearchId>();
+    const resolve = (id: ResearchId): number => {
+      const cached = cache.get(id);
+      if (cached !== undefined) return cached;
+      if (visiting.has(id)) return 0;
+      visiting.add(id);
+      const project = byId.get(id);
+      let tier = 0;
+      if (project) {
+        for (const req of project.requires) tier = Math.max(tier, resolve(req) + 1);
+      }
+      visiting.delete(id);
+      cache.set(id, tier);
+      return tier;
+    };
+    for (const project of RESEARCH_PROJECTS) resolve(project.id);
+    return cache;
+  }
+
+  private techLegend(icon: string, label: string, cls: string): HTMLElement {
+    const chip = el("span", `tech-legend-item ${cls}`);
+    const iconEl = el("span", "tech-node-icon");
+    iconEl.textContent = icon;
+    chip.append(iconEl, document.createTextNode(label));
+    return chip;
+  }
+
+  private renderResearchNode(
+    campaign: CampaignState,
+    entry: ResearchTreeNode,
+    tier: number,
+  ): HTMLElement {
+    const project = entry.project;
+    const activeRes = campaign.activeResearch;
+    const isActive = activeRes?.projectId === project.id;
+
+    // Reconcile the tree status: researchTree may report "locked" simply because
+    // the lab is busy. A project whose prerequisites are all met is rendered as
+    // available (just lab-blocked), so we never show a misleading "Requires:"
+    // line on something the player has actually unlocked.
+    const unmetRequires = project.requires
+      .filter((req) => !hasResearch(campaign, req))
+      .map((req) => RESEARCH_PROJECTS.find((candidate) => candidate.id === req)?.title ?? req);
+    const requiresMet = unmetRequires.length === 0;
+    const status: "completed" | "available" | "locked" | "active" =
+      isActive ? "active"
+        : entry.status === "locked" && requiresMet ? "available"
+        : entry.status;
+
+    const node = el("article", `tech-node ${status}`);
+
+    if (tier > 0) {
+      const connector = el("span", "tech-connector");
+      connector.textContent = "►";
+      connector.title = `Descends from Tier ${tier - 1}`;
+      node.appendChild(connector);
     }
 
-    const activeRes = campaign.activeResearch;
-    if (activeRes) {
-      const project = RESEARCH_PROJECTS.find((candidate) => candidate.id === activeRes.projectId);
+    const head = el("div", "tech-node-head");
+    const icon = el("span", "tech-node-icon");
+    const badge = el("span", "tech-node-status");
+    if (status === "active") {
+      icon.textContent = "↻";
+      badge.textContent = "In progress";
+    } else if (status === "completed") {
+      icon.textContent = "✓";
+      badge.textContent = "Completed";
+    } else if (status === "available") {
+      icon.textContent = "▸";
+      badge.textContent = "Available";
+    } else {
+      icon.textContent = "⊘";
+      badge.textContent = "Locked";
+    }
+    const title = el("span", "tech-node-title");
+    title.textContent = project.title;
+    head.append(icon, title, badge);
+    node.appendChild(head);
+
+    const desc = el("p", "tech-node-desc");
+    desc.textContent = project.description;
+    node.appendChild(desc);
+
+    if (status === "active" && activeRes) {
       const remaining = Math.max(0, activeRes.completesAtHour - campaign.clock.elapsedHours);
       const duration = activeRes.completesAtHour - activeRes.startedAtHour;
       const fraction =
         duration > 0
           ? Math.min(1, Math.max(0, (campaign.clock.elapsedHours - activeRes.startedAtHour) / duration))
           : 0;
-      const card = el("section", "tab-card");
-      const strong = el("strong");
-      strong.textContent = `${project?.title ?? activeRes.projectId} in progress`;
-      const bar = el("div", "progress");
+      const bar = el("div", "progress tech-progress");
       const fill = el("i");
       fill.style.width = `${Math.round(fraction * 100)}%`;
       bar.appendChild(fill);
-      const copy = el("p", "card-copy");
-      copy.textContent = `${remaining}h remaining — scientists are working.`;
-      card.append(strong, bar, copy);
-      wrap.appendChild(card);
+      const meta = el("div", "tech-node-meta");
+      meta.textContent = `${remaining}h remaining — scientists are working`;
+      node.append(bar, meta);
+      return node;
     }
 
-    const available = RESEARCH_PROJECTS.filter(
-      (project) => !hasResearch(campaign, project.id) && project.id !== activeRes?.projectId,
-    );
-    if (available.length > 0) {
-      const label = el("div", "section-label");
-      label.textContent = "Available projects";
-      wrap.appendChild(label);
-      for (const project of available) {
-        wrap.appendChild(this.renderResearchCard(campaign, project, !!activeRes));
-      }
-    } else if (!activeRes) {
-      const empty = el("div", "empty-state");
-      empty.textContent = "All research projects complete.";
-      wrap.appendChild(empty);
+    if (status === "completed") {
+      const meta = el("div", "tech-node-meta");
+      meta.textContent = project.completedDescription;
+      node.appendChild(meta);
+      return node;
     }
-    return wrap;
-  }
 
-  private renderResearchCard(
-    campaign: CampaignState,
-    project: ResearchProject,
-    labBusy: boolean,
-  ): HTMLElement {
-    const card = el("section", "tab-card");
-    const canResearch = canStartResearch(campaign, project.id);
+    if (status === "locked") {
+      const req = el("div", "tech-node-req");
+      req.textContent = unmetRequires.length > 0
+        ? `Requires: ${unmetRequires.join(", ")}`
+        : "Locked";
+      node.appendChild(req);
+      return node;
+    }
+
+    // available
     const cost = researchCost(campaign, project.id);
-    const title = el("strong");
-    title.textContent = project.title;
-    const copy = el("p", "card-copy");
-    copy.textContent =
-      `${project.description} Requires ${cost.alienData} data, ${cost.alloys} alloys, ` +
-      `${cost.elerium} elerium, ${cost.credits}c · ${researchDuration(campaign, project.id)}h.`;
-    const row = el("div", "card-row");
-    const costLabel = el("span", "card-cost");
-    costLabel.textContent = formatCost(cost);
+    const meta = el("div", "tech-node-meta");
+    meta.append(
+      span(formatCost(cost), "card-cost"),
+      span(`${researchDuration(campaign, project.id)}h`),
+    );
+    node.appendChild(meta);
+
+    const labBusy = !!campaign.activeResearch;
+    const canStart = canStartResearch(campaign, project.id);
     const button = el("button");
-    button.textContent = labBusy ? "Lab busy" : canResearch ? "Start research" : "Need resources";
-    button.disabled = labBusy || !canResearch;
+    button.textContent = labBusy ? "Lab busy" : canStart ? "Start research" : "Need resources";
+    button.disabled = labBusy || !canStart;
     button.addEventListener("click", () => this.opts.onStartResearch(project.id));
-    row.append(costLabel, button);
-    card.append(title, copy, row);
-    return card;
+    node.appendChild(button);
+    return node;
   }
 
   /** Engineering room: active manufacturing with a progress bar, then buildable

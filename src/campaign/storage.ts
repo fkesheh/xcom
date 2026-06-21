@@ -198,6 +198,48 @@ export const RESEARCH_COSTS: Record<ResearchId, CampaignResources> = {
     elerium: 0,
     alienData: 2,
   },
+  alienBiotech: {
+    credits: 160,
+    alloys: 0,
+    elerium: 0,
+    alienData: 4,
+  },
+  heavyPlasma: {
+    credits: 260,
+    alloys: 12,
+    elerium: 4,
+    alienData: 3,
+  },
+  advancedMetallurgy: {
+    credits: 240,
+    alloys: 14,
+    elerium: 3,
+    alienData: 2,
+  },
+  improvedMedikit: {
+    credits: 180,
+    alloys: 2,
+    elerium: 1,
+    alienData: 4,
+  },
+  poweredArmor: {
+    credits: 320,
+    alloys: 18,
+    elerium: 6,
+    alienData: 3,
+  },
+  eleriumPowerSource: {
+    credits: 360,
+    alloys: 16,
+    elerium: 10,
+    alienData: 5,
+  },
+  mindShield: {
+    credits: 420,
+    alloys: 12,
+    elerium: 12,
+    alienData: 8,
+  },
 };
 
 export interface ResearchProject {
@@ -206,6 +248,9 @@ export interface ResearchProject {
   description: string;
   completedDescription: string;
   durationHours: number;
+  cost: CampaignResources;
+  /** Prerequisite research that must be completed before this project can start. */
+  requires: ResearchId[];
 }
 
 export interface ManufacturingProject {
@@ -235,6 +280,8 @@ export const RESEARCH_PROJECTS: readonly ResearchProject[] = [
     description: "Reverse-engineer recovered emitters. Adds one plasma caster to the armory.",
     completedDescription: "One plasma caster is available in the armory for squad assignment.",
     durationHours: 24,
+    cost: RESEARCH_COSTS.plasmaWeapons,
+    requires: [],
   },
   {
     id: "alloyArmor",
@@ -242,8 +289,82 @@ export const RESEARCH_PROJECTS: readonly ResearchProject[] = [
     description: "Fabricate composite armor plates from recovered alloys. All deployed operatives gain durability.",
     completedDescription: "All deployed operatives gain +6 health and +2 reactions from alloy plate inserts.",
     durationHours: 18,
+    cost: RESEARCH_COSTS.alloyArmor,
+    requires: [],
+  },
+  {
+    id: "alienBiotech",
+    title: "Xenobiology",
+    description: "Catalogue recovered alien physiology. Foundation for medical and neural research.",
+    completedDescription: "Alien tissue data is archived, unlocking biomedical and psionic lines of inquiry.",
+    durationHours: 20,
+    cost: RESEARCH_COSTS.alienBiotech,
+    requires: [],
+  },
+  {
+    id: "heavyPlasma",
+    title: "Heavy plasma cannon",
+    description: "Scale recovered emitter technology into a vehicle-grade anti-materiel platform.",
+    completedDescription: "Heavy plasma fabrication schematics are ready for workshop integration.",
+    durationHours: 30,
+    cost: RESEARCH_COSTS.heavyPlasma,
+    requires: ["plasmaWeapons"],
+  },
+  {
+    id: "advancedMetallurgy",
+    title: "Elerium metallurgy",
+    description: "Infuse alien alloys with elerium to produce hardened composites for powered systems.",
+    completedDescription: "Elerium-doped alloy stock is available for advanced armor and power fabrication.",
+    durationHours: 28,
+    cost: RESEARCH_COSTS.advancedMetallurgy,
+    requires: ["alloyArmor"],
+  },
+  {
+    id: "improvedMedikit",
+    title: "Nano-medikit",
+    description: "Adapt alien protein synthesis into a rapid field stabilizer for wounded operatives.",
+    completedDescription: "Field medics can now stabilize critical wounds in seconds rather than minutes.",
+    durationHours: 22,
+    cost: RESEARCH_COSTS.improvedMedikit,
+    requires: ["alienBiotech"],
+  },
+  {
+    id: "poweredArmor",
+    title: "Powered assault armor",
+    description: "Bundle elerium-hardened plates with servo assist for a true powered infantry suit.",
+    completedDescription: "Powered assault suits dramatically boost operative mobility and survivability.",
+    durationHours: 36,
+    cost: RESEARCH_COSTS.poweredArmor,
+    requires: ["advancedMetallurgy"],
+  },
+  {
+    id: "eleriumPowerSource",
+    title: "Elerium power core",
+    description: "Contain a sustained elerium reaction to power advanced base and weapons systems.",
+    completedDescription: "A stable elerium power core is online, ready to drive next-generation hardware.",
+    durationHours: 40,
+    cost: RESEARCH_COSTS.eleriumPowerSource,
+    requires: ["advancedMetallurgy", "heavyPlasma"],
+  },
+  {
+    id: "mindShield",
+    title: "Neural shield",
+    description: "Combine xenobiology with elerium power to prototype operative neural shielding.",
+    completedDescription: "Neural shields give operatives their first real defense against alien psionics.",
+    durationHours: 44,
+    cost: RESEARCH_COSTS.mindShield,
+    requires: ["alienBiotech", "eleriumPowerSource"],
   },
 ] as const;
+
+export const RESEARCH_IDS: readonly ResearchId[] = RESEARCH_PROJECTS.map((project) => project.id);
+
+export type ResearchStatus = "completed" | "available" | "locked";
+
+export interface ResearchTreeNode {
+  project: ResearchProject;
+  status: ResearchStatus;
+}
 
 export const MANUFACTURING_PROJECTS: readonly ManufacturingProject[] = [
   {
@@ -1210,12 +1331,32 @@ function spend(resources: CampaignResources, cost: CampaignResources): CampaignR
 }
 
 export function canStartResearch(campaign: CampaignState, id: ResearchId): boolean {
+  const project = RESEARCH_PROJECTS.find((candidate) => candidate.id === id);
+  if (!project) return false;
   return (
     campaign.strategic.status === "active" &&
     !campaign.activeResearch &&
     !campaign.completedResearch.includes(id) &&
+    project.requires.every((required) => campaign.completedResearch.includes(required)) &&
     canAfford(campaign.resources, researchCost(campaign, id))
   );
+}
+
+export function researchTree(campaign: CampaignState): readonly ResearchTreeNode[] {
+  const completed = new Set(campaign.completedResearch);
+  const activeProjectId = campaign.activeResearch?.projectId;
+  return RESEARCH_PROJECTS.map((project) => {
+    if (completed.has(project.id)) {
+      return { project, status: "completed" as const };
+    }
+    const prerequisitesMet = project.requires.every((required) => completed.has(required));
+    const blockedByActiveResearch =
+      campaign.activeResearch !== undefined && activeProjectId !== project.id;
+    if (prerequisitesMet && !blockedByActiveResearch) {
+      return { project, status: "available" as const };
+    }
+    return { project, status: "locked" as const };
+  });
 }
 
 export function canCompleteResearch(campaign: CampaignState, id: ResearchId): boolean {
@@ -1304,6 +1445,10 @@ function cloneMarket(market: EquipmentMarket): EquipmentMarket {
 
 function isCampaignWeaponId(value: unknown): value is CampaignWeaponId {
   return value === "rifle" || value === "pistol" || value === "plasma";
+}
+
+function isResearchId(value: unknown): value is ResearchId {
+  return typeof value === "string" && (RESEARCH_IDS as readonly string[]).includes(value);
 }
 
 function isManufacturingProjectId(value: unknown): value is ManufacturingProjectId {
@@ -1842,7 +1987,7 @@ function normalizeSoldiers(value: unknown): CampaignSoldier[] {
 
 function normalizeResearch(value: unknown): ResearchId[] {
   if (!Array.isArray(value)) return [];
-  return value.filter((id): id is ResearchId => id === "plasmaWeapons" || id === "alloyArmor");
+  return value.filter((id): id is ResearchId => isResearchId(id));
 }
 
 function normalizeActiveResearch(
@@ -1854,7 +1999,7 @@ function normalizeActiveResearch(
   const maybe = value as Partial<ActiveResearch>;
   const projectId = maybe.projectId;
   if (
-    (projectId !== "plasmaWeapons" && projectId !== "alloyArmor") ||
+    !isResearchId(projectId) ||
     completedResearch.includes(projectId) ||
     typeof maybe.startedAtHour !== "number" ||
     typeof maybe.completesAtHour !== "number"

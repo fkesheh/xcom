@@ -5,7 +5,16 @@ export interface BaseLocation {
 }
 
 export type MissionResult = "success" | "failure";
-export type ResearchId = "plasmaWeapons" | "alloyArmor";
+export type ResearchId =
+  | "plasmaWeapons"
+  | "alloyArmor"
+  | "alienBiotech"
+  | "heavyPlasma"
+  | "advancedMetallurgy"
+  | "improvedMedikit"
+  | "poweredArmor"
+  | "eleriumPowerSource"
+  | "mindShield";
 export type CampaignStatus = "active" | "won" | "lost";
 export type SoldierStatus = "active" | "wounded" | "kia";
 export type SoldierRank = "rookie" | "squaddie" | "sergeant" | "captain";
