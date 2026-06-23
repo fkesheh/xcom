@@ -90,6 +90,20 @@ export interface Craft {
   repairedAtHour?: number;
 }
 
+/** A friendly craft in transit on the globe (patrol toward UFO, return to base). */
+export interface ActiveFlight {
+  id: string;
+  craftId: string;
+  kind: "interceptor" | "transport";
+  fromLat: number;
+  fromLon: number;
+  toLat: number;
+  toLon: number;
+  progress: number;
+  speedDegPerHour: number;
+  startedAtHour: number;
+}
+
 export interface UfoContact {
   id: string;
   status: "tracked" | "landed" | "engaging" | "crashed" | "escaped";
@@ -249,6 +263,8 @@ export interface CampaignState {
   interceptor: InterceptorState;
   /** The hangar fleet: 2 interceptors + 1 transport (Skyranger) at start. */
   fleet?: Craft[];
+  /** Active flights (patrols/transfers) on the globe during time-flow. */
+  activeFlights?: ActiveFlight[];
   lastInterceptionReport?: InterceptionReport;
   ufoContact?: UfoContact;
   resources: CampaignResources;

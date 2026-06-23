@@ -26,6 +26,7 @@ import {
   Raycaster,
   RingGeometry,
   Scene,
+  ShaderMaterial,
   SphereGeometry,
   SRGBColorSpace,
   type Texture,
@@ -101,6 +102,10 @@ const UFO_TRAIL_MAX = 48;
 const UFO_TRAIL_MIN_DEG = 0.4;
 /** Per-frame lerp factor for the chase-camera follow (higher = tighter, snappier). */
 const CHASE_CAMERA_LERP = 0.06;
+/** Max sampled points of an in-flight craft's contrail (one per refresh while flying). */
+const FLIGHT_TRAIL_MAX = 24;
+/** Min degrees between two flight-trail samples (avoids a dense blob when creeping). */
+const FLIGHT_TRAIL_MIN_DEG = 0.4;
 
 /** Interception combat-FX durations, in milliseconds. */
 const FX_TRACER_MS = 200;
@@ -109,6 +114,27 @@ const FX_BURST_MS = 430;
 const FX_SHAKE_MS = 240;
 /** Camera shake magnitude (world units) at hit onset; decays over FX_SHAKE_MS. */
 const FX_SHAKE_MAGNITUDE = 0.03;
+
+/** Cinematic dogfight camera distance from the engagement midpoint (close-up). */
+const CINE_CAMERA_DISTANCE = 3.3;
+/** Default globe-view camera distance (eased back to this after a dogfight resolves). */
+const GLOBE_CAMERA_DISTANCE = 4.35;
+/** Lerp factor for the cinematic camera distance pull (higher = snappier zoom). */
+const CINE_CAMERA_LERP = 0.07;
+/** Ms the camera keeps easing back to the globe view after an engagement resolves. */
+const CINE_RELEASE_MS = 900;
+/** Contrail particles per craft (ring buffer; no per-frame allocation). */
+const CONTRAIL_MAX = 36;
+/** Particles in the dogfight explosion burst (larger than the standard impact burst). */
+const EXPLOSION_PARTICLES = 26;
+/** Multi-round tracer pulses fired per interceptor volley (reads as a cannon burst). */
+const VOLLEY_ROUNDS = 3;
+/** Stagger between successive tracer rounds within one volley, in milliseconds. */
+const VOLLEY_ROUND_MS = 65;
+/** Ms the interceptor "taking fire" threat badge + screen flash stays lit. */
+const THREAT_FLASH_MS = 420;
+/** Scale boost applied to the interceptor + UFO markers during a cinematic dogfight. */
+const CINE_CRAFT_BOOST = 1.7;
 
 interface SpeedOption {
   speed: number;
@@ -672,6 +698,71 @@ const CSS = `
 #geoscape .geo-deploy-panel h2 { color: #e8fbff; margin-bottom: 6px; }
 #geoscape .geo-deploy-panel p { color: #a9c8d7; font-size: 11px; }
 #geoscape .geo-deploy-panel .geo-bar { margin: 12px 0 0; text-align: left; }
+#geoscape .geo-overlay.geo-dogfight {
+  background: none;
+  backdrop-filter: none;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 0;
+  pointer-events: none;
+}
+#geoscape .geo-overlay.geo-dogfight .geo-encounter {
+  pointer-events: auto;
+  margin: max(16px, env(safe-area-inset-top)) auto 0;
+  width: min(640px, calc(100vw - 32px));
+  max-height: none;
+  border-color: rgba(103,232,249,.55);
+  background: linear-gradient(145deg, rgba(12,20,26,.82), rgba(3,8,12,.86));
+}
+#geoscape .geo-overlay.geo-dogfight .geo-encounter .eyebrow { color: #67e8f9; }
+#geoscape .geo-overlay.geo-dogfight .geo-encounter h2 { color: #e8fbff; }
+#geoscape .geo-dogfight-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 8px 0 2px;
+  color: #93c4d4;
+  font: 700 10px/1 ui-monospace, monospace;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+#geoscape .geo-dogfight-meta b { color: #e8fbff; font-weight: 800; }
+#geoscape .geo-bar-lg .geo-bar-track { height: 16px; }
+#geoscape .geo-bar-lg .geo-bar-label { font-size: 10px; }
+#geoscape .geo-bar-lg .geo-bar-label b { color: #e8fbff; font-weight: 800; }
+#geoscape .geo-threat-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(248,113,113,.7);
+  background: rgba(60,12,18,.55);
+  color: #fecaca;
+  font: 800 10px/1 ui-monospace, monospace;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+#geoscape .geo-threat-tag.active { opacity: 1; animation: geo-threat-pulse .42s ease-out 2; }
+@keyframes geo-threat-pulse {
+  0% { box-shadow: 0 0 0 rgba(248,113,113,0); }
+  50% { box-shadow: 0 0 14px rgba(248,113,113,.7); }
+  100% { box-shadow: 0 0 0 rgba(248,113,113,0); }
+}
+#geoscape .geo-threat-flash {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(circle at 50% 60%, rgba(248,68,68,.34), rgba(120,8,16,.18) 55%, transparent 80%);
+  mix-blend-mode: screen;
+  transition: opacity .12s ease;
+}
+#geoscape .geo-threat-flash.active { opacity: 1; transition: opacity .05s ease; }
 @media (max-width: 820px) {
   #geoscape .geo-panel { width: calc(100vw - 24px); padding: 13px; }
   #geoscape .geo-left { left: 12px; right: 12px; }
@@ -1134,8 +1225,46 @@ export class GeoscapeView {
   private fxInterceptorBurstActive = false;
   private shakeStartMs = 0;
   private shakeActive = false;
+  private shakeMagnitude = FX_SHAKE_MAGNITUDE;
   private readonly cameraBase = new Vector3();
   private damageLayer: HTMLDivElement | null = null;
+
+  // --- Globe visual upgrades (city lights / atmosphere rim / clouds) ---
+  /** City light points; per-vertex color is rewritten each frame from the sun direction. */
+  private cityLights!: Points;
+  /** Local-space unit position of each city point (precomputed; never mutated). */
+  private readonly cityLocal: Vector3[] = [];
+  /** Scratch for the city-light day/night dot product (world space). */
+  private readonly scratchCity = new Vector3();
+  /** Fresnel rim atmosphere material; uSunDir uniform updated each frame. */
+  private rimAtmosphereMat: ShaderMaterial | null = null;
+  /** Slowly rotating translucent cloud shell. */
+  private cloudMesh: Mesh | null = null;
+
+  // --- Cinematic dogfight camera (zoom-in on engage, ease out on resolve) ---
+  private cineMode = false;
+  private cineReleaseUntilMs = 0;
+  private readonly globeCenter = new Vector3(0, 0, 0);
+
+  // --- Thruster contrails behind the interceptor + UFO during an engagement ---
+  private interceptorContrail!: Points;
+  private ufoContrail!: Points;
+  private readonly interceptorContrailRing = new Float32Array(CONTRAIL_MAX * 3);
+  private readonly ufoContrailRing = new Float32Array(CONTRAIL_MAX * 3);
+  private readonly interceptorContrailState = { head: 0, count: 0 };
+  private readonly ufoContrailState = { head: 0, count: 0 };
+
+  // --- Amplified dogfight FX (bigger explosions, multi-round volleys) ---
+  private explosionBurst!: Points;
+  private readonly explosionBurstVel = new Float32Array(EXPLOSION_PARTICLES * 3);
+  private fxExplosionActive = false;
+  private volleyRounds = 0;
+  private volleyNextMs = 0;
+  private volleyDamageShown = false;
+
+  // --- Dogfight HUD "taking fire" threat flash ---
+  private threatFlash: HTMLDivElement | null = null;
+  private threatFlashTimer: number | undefined;
 
   // --- Skyranger deployment flight (staged on mission launch) ---
   private deploying = false;
@@ -1151,6 +1280,13 @@ export class GeoscapeView {
   private readonly skyrangerMarker = new Group();
   private deploymentLine!: Line;
   private deploymentFill: HTMLDivElement | null = null;
+
+  // --- Active-flight markers (interceptors/transports flying across the globe) ---
+  /** Pooled marker + trail per active flight, keyed by flight id (built/disposed on lifecycle). */
+  private readonly flightMarkers = new Map<
+    string,
+    { marker: Group; trail: Line; points: { lat: number; lon: number }[] }
+  >();
 
   constructor(private readonly opts: GeoscapeOptions) {
     injectStyle();
@@ -1238,6 +1374,7 @@ export class GeoscapeView {
     this.disposed = true;
     cancelAnimationFrame(this.raf);
     if (this.toastTimer !== undefined) window.clearTimeout(this.toastTimer);
+    if (this.threatFlashTimer !== undefined) window.clearTimeout(this.threatFlashTimer);
     window.removeEventListener("resize", this.resize);
     this.renderer.domElement.removeEventListener("pointerdown", this.onPointerDown);
     this.renderer.domElement.removeEventListener("pointerup", this.onPointerUp);
@@ -1281,18 +1418,42 @@ export class GeoscapeView {
     this.earthGroup.add(ocean);
 
     const atmosphere = new Mesh(
-      new SphereGeometry(EARTH_RADIUS + 0.08, 64, 32),
+      new SphereGeometry(EARTH_RADIUS + 0.1, 64, 32),
       new MeshBasicMaterial({
         color: 0x67e8f9,
         transparent: true,
-        opacity: 0.105,
+        opacity: 0.13,
         side: BackSide,
         blending: AdditiveBlending,
+        depthWrite: false,
       }),
     );
     this.earthGroup.add(atmosphere);
+    // Fresnel rim glow on the day-side limb, layered over the base atmosphere.
+    this.earthGroup.add(this.buildRimAtmosphere());
 
-    this.earthGroup.add(this.makeSignalNodes());
+    // Faint translucent cloud shell, slowly rotating in the frame loop. Lit by
+    // the sun so wisps read on the day side and go dark at night (rather than an
+    // additive wash that would flatten the night-side city lights).
+    const cloudTexture = this.makeCloudTexture();
+    const cloudMesh = new Mesh(
+      new SphereGeometry(EARTH_RADIUS + 0.05, 48, 24),
+      new MeshStandardMaterial({
+        map: cloudTexture,
+        transparent: true,
+        opacity: 0.5,
+        depthWrite: false,
+        roughness: 1,
+        metalness: 0,
+      }),
+    );
+    cloudMesh.castShadow = false;
+    cloudMesh.receiveShadow = false;
+    this.cloudMesh = cloudMesh;
+    this.earthGroup.add(this.cloudMesh);
+
+    this.cityLights = this.makeSignalNodes();
+    this.earthGroup.add(this.cityLights);
     for (let lat = -60; lat <= 60; lat += 30) this.earthGroup.add(makeLatLine(lat));
     for (let lon = -150; lon <= 180; lon += 30) this.earthGroup.add(makeLonLine(lon));
     this.buildBaseMarker();
@@ -1436,25 +1597,138 @@ export class GeoscapeView {
     );
   }
 
-  /** City points: read as relay beacons on the day side and warm city lights on the dark night side. */
+  /**
+   * City points: emissive beacons that glow warm on the NIGHT side and dim on the
+   * day side. Per-vertex colors (rewritten each frame by updateCityLights from the
+   * sun direction) drive the intensity; additive blending + depthWrite off lets
+   * them read as glowing city lights against the dark hemisphere. Each city's
+   * local unit position is cached in cityLocal for the per-frame dot product.
+   */
   private makeSignalNodes(): Points {
     const positions: number[] = [];
+    const colors: number[] = [];
     for (const [lat, lon] of WORLD_CITY_POINTS) {
       const p = latLonToVector(lat, lon, EARTH_RADIUS + 0.034);
       positions.push(p.x, p.y, p.z);
+      this.cityLocal.push(latLonToVector(lat, lon, 1).normalize());
+      colors.push(0, 0, 0);
     }
     const geometry = new BufferGeometry();
     geometry.setAttribute("position", new Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("color", new Float32BufferAttribute(colors, 3));
     return new Points(
       geometry,
       new PointsMaterial({
-        color: 0xfcd34d,
-        size: 0.014,
+        color: 0xffffff,
+        size: 0.022,
         transparent: true,
-        opacity: 0.85,
+        opacity: 0.95,
         sizeAttenuation: true,
+        vertexColors: true,
+        blending: AdditiveBlending,
+        depthWrite: false,
       }),
     );
+  }
+
+  /**
+   * Recompute each city light's color from its dot product with the sun direction
+   * (world space): bright warm amber on the dark (night) side, near-dark on the
+   * day side. No per-frame allocation — reuses scratchCity + the cached positions.
+   */
+  private updateCityLights(): void {
+    if (!this.cityLights || this.cityLocal.length === 0) return;
+    const colAttr = this.cityLights.geometry.getAttribute("color") as Float32BufferAttribute;
+    const arr = colAttr.array as Float32Array;
+    // Sun direction in world space (sunLight is parented to the scene, not earthGroup).
+    this.scratchA.copy(this.sunLight.position).normalize();
+    for (let i = 0; i < this.cityLocal.length; i++) {
+      this.scratchCity.copy(this.cityLocal[i]!);
+      this.earthGroup.localToWorld(this.scratchCity); // earthGroup has no scale → stays unit length
+      this.scratchCity.normalize();
+      const dot = this.scratchCity.dot(this.scratchA); // >0 day, <0 night
+      const night = dot < 0 ? -dot : 0;
+      const glow = 0.08 + night * 1.0;
+      arr[i * 3] = 0.98 * glow;
+      arr[i * 3 + 1] = 0.82 * glow;
+      arr[i * 3 + 2] = 0.3 * glow;
+    }
+    colAttr.needsUpdate = true;
+  }
+
+  /** Fresnel rim atmosphere: brightest on the day-side limb, faint on the night limb. */
+  private buildRimAtmosphere(): Mesh {
+    const material = new ShaderMaterial({
+      transparent: true,
+      blending: AdditiveBlending,
+      side: BackSide,
+      depthWrite: false,
+      uniforms: {
+        uSunDir: { value: new Vector3(1, 0, 0) },
+        uColor: { value: new Color(0x67e8f9) },
+        uPower: { value: 3.0 },
+      },
+      vertexShader: `
+        varying vec3 vNormalW;
+        varying vec3 vViewDir;
+        void main() {
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vNormalW = normalize(mat3(modelMatrix) * normal);
+          vViewDir = normalize(cameraPosition - wp.xyz);
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vNormalW;
+        varying vec3 vViewDir;
+        uniform vec3 uSunDir;
+        uniform vec3 uColor;
+        uniform float uPower;
+        void main() {
+          float rim = pow(1.0 - abs(dot(vViewDir, vNormalW)), uPower);
+          float day = max(0.0, dot(normalize(vNormalW), normalize(uSunDir)));
+          float a = rim * (0.16 + 0.7 * day);
+          gl_FragColor = vec4(uColor, a);
+        }
+      `,
+    });
+    this.rimAtmosphereMat = material;
+    return new Mesh(new SphereGeometry(EARTH_RADIUS + 0.17, 64, 32), material);
+  }
+
+  /** Sync the rim atmosphere's sun direction uniform with the live sun position. */
+  private updateAtmosphere(): void {
+    if (!this.rimAtmosphereMat) return;
+    const sunUniform = this.rimAtmosphereMat.uniforms.uSunDir;
+    if (!sunUniform) return;
+    (sunUniform.value as Vector3).copy(this.sunLight.position).normalize();
+  }
+
+  /** Faint translucent cloud shell built from soft procedural wisps (deterministic). */
+  private makeCloudTexture(): CanvasTexture {
+    const canvas = document.createElement("canvas");
+    canvas.width = 1024;
+    canvas.height = 512;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("2D canvas unavailable");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // Deterministic soft white wisps scattered across the equirectangular map.
+    for (let i = 0; i < 240; i++) {
+      const cx = hash01(i, 7.3) * canvas.width;
+      const cy = (0.2 + hash01(i, 13.1) * 0.6) * canvas.height;
+      const r = 10 + hash01(i, 21.7) * 46;
+      const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+      const a = 0.05 + hash01(i, 31.9) * 0.12;
+      grad.addColorStop(0, `rgba(255,255,255,${a})`);
+      grad.addColorStop(1, "rgba(255,255,255,0)");
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    const texture = new CanvasTexture(canvas);
+    texture.colorSpace = SRGBColorSpace;
+    return texture;
   }
 
   private buildBaseMarker(): void {
@@ -1806,6 +2080,7 @@ export class GeoscapeView {
       this.ufoMarker.visible = false;
       this.clearUfoTrail();
     }
+    this.refreshFlightMarkers();
   }
 
   /**
@@ -1862,6 +2137,168 @@ export class GeoscapeView {
     this.ufoTrailLine.visible = count >= 2;
   }
 
+  /**
+   * Small craft silhouette for an active flight: cyan dart for interceptors,
+   * slate transport for the Skyranger. Distinct from the engagement-only
+   * interceptorMarker / skyrangerMarker (these fly during normal time-flow).
+   */
+  private buildFlightMarker(kind: "interceptor" | "transport"): Group {
+    const group = new Group();
+    const body =
+      kind === "interceptor"
+        ? new MeshStandardMaterial({
+            color: 0x22d3ee,
+            emissive: new Color(0x06b6d4),
+            emissiveIntensity: 1.2,
+            roughness: 0.3,
+            metalness: 0.45,
+          })
+        : new MeshStandardMaterial({
+            color: 0xe2e8f0,
+            emissive: new Color(0x94a3b8),
+            emissiveIntensity: 0.7,
+            roughness: 0.4,
+            metalness: 0.5,
+          });
+    const fuselage = new Mesh(new CylinderGeometry(0.009, 0.015, 0.12, 8), body);
+    const nose = new Mesh(new ConeGeometry(0.009, 0.032, 8), body);
+    nose.position.y = 0.076;
+    const wingGeo = new BoxGeometry(0.05, 0.026, 0.005);
+    const wingR = new Mesh(wingGeo, body);
+    wingR.position.set(0.032, -0.01, 0);
+    wingR.rotation.z = -0.4;
+    const wingL = new Mesh(wingGeo, body);
+    wingL.position.set(-0.032, -0.01, 0);
+    wingL.rotation.z = 0.4;
+    const tail = new Mesh(new BoxGeometry(0.005, 0.024, 0.016), body);
+    tail.position.set(0, -0.044, 0.009);
+    const ringColor = kind === "interceptor" ? 0x67e8f9 : 0xbbf7d0;
+    const ring = new Mesh(
+      new RingGeometry(0.055, 0.078, 18),
+      new MeshBasicMaterial({
+        color: ringColor,
+        transparent: true,
+        opacity: 0.45,
+        side: DoubleSide,
+        blending: AdditiveBlending,
+      }),
+    );
+    ring.rotation.x = -Math.PI / 2;
+    group.add(fuselage, nose, wingR, wingL, tail, ring);
+    return group;
+  }
+
+  /** Pre-allocated contrail line for one active flight; buffers rewritten per refresh. */
+  private makeFlightTrailLine(): Line {
+    const positions = new Float32Array(FLIGHT_TRAIL_MAX * 3);
+    const colors = new Float32Array(FLIGHT_TRAIL_MAX * 3);
+    const geometry = new BufferGeometry();
+    geometry.setAttribute("position", new Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("color", new Float32BufferAttribute(colors, 3));
+    geometry.setDrawRange(0, 0);
+    const line = new Line(
+      geometry,
+      new LineBasicMaterial({
+        color: 0xffffff,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.6,
+        blending: AdditiveBlending,
+      }),
+    );
+    line.frustumCulled = false;
+    return line;
+  }
+
+  /**
+   * Position + orient every active-flight marker from campaign.activeFlights,
+   * interpolating each flight's great-circle path by its `progress` so markers
+   * visibly fly across the globe as time flows. Markers + trails are pooled by
+   * flight id and built/disposed only on lifecycle changes (never per frame).
+   */
+  private refreshFlightMarkers(): void {
+    const c = this.campaign;
+    const flights = c?.activeFlights ?? [];
+    const live = new Set<string>();
+    for (const flight of flights) {
+      live.add(flight.id);
+      let entry = this.flightMarkers.get(flight.id);
+      if (!entry) {
+        const marker = this.buildFlightMarker(flight.kind);
+        const trail = this.makeFlightTrailLine();
+        marker.visible = false;
+        trail.visible = false;
+        this.earthGroup.add(marker, trail);
+        entry = { marker, trail, points: [] };
+        this.flightMarkers.set(flight.id, entry);
+      }
+      const fromN = latLonToVector(flight.fromLat, flight.fromLon, 1).normalize();
+      const toN = latLonToVector(flight.toLat, flight.toLon, 1).normalize();
+      const progress = Math.max(0, Math.min(1, flight.progress));
+      slerpUnit(fromN, toN, progress, this.scratchA); // unit direction at the craft
+      const cur = vectorToLatLon(this.scratchA); // {lat,lon} (clones internally)
+      this.scratchB.copy(this.scratchA); // posUnit (surface normal at the craft)
+      this.scratchA.multiplyScalar(EARTH_RADIUS + 0.14); // offset position
+      entry.marker.position.copy(this.scratchA);
+      this.orientMarker(entry.marker, this.scratchB, toN);
+      entry.marker.visible = true;
+      // Sample the contrail while in transit; freeze at the endpoints.
+      if (progress > 0 && progress < 1) {
+        const last = entry.points[entry.points.length - 1];
+        if (!last || Math.hypot(cur.lat - last.lat, cur.lon - last.lon) >= FLIGHT_TRAIL_MIN_DEG) {
+          entry.points.push({ lat: cur.lat, lon: cur.lon });
+          if (entry.points.length > FLIGHT_TRAIL_MAX) entry.points.shift();
+        }
+      }
+      this.refillFlightTrail(entry.trail, entry.points, flight.kind);
+    }
+    // Drop markers + trails for flights no longer active.
+    for (const [id, entry] of this.flightMarkers) {
+      if (live.has(id)) continue;
+      this.earthGroup.remove(entry.marker, entry.trail);
+      disposeObject(entry.marker);
+      entry.trail.geometry.dispose();
+      (entry.trail.material as LineBasicMaterial).dispose();
+      this.flightMarkers.delete(id);
+    }
+  }
+
+  /** Rewrite a flight trail's buffers with a tail→head fade (cyan interceptor / green transport). */
+  private refillFlightTrail(
+    trail: Line,
+    points: { lat: number; lon: number }[],
+    kind: "interceptor" | "transport",
+  ): void {
+    const count = points.length;
+    const geo = trail.geometry;
+    const posAttr = geo.getAttribute("position") as Float32BufferAttribute;
+    const colAttr = geo.getAttribute("color") as Float32BufferAttribute;
+    const pos = posAttr.array as Float32Array;
+    const col = colAttr.array as Float32Array;
+    for (let i = 0; i < count; i++) {
+      const p = points[i]!;
+      this.scratchA.copy(latLonToVector(p.lat, p.lon, EARTH_RADIUS + 0.03));
+      pos[i * 3] = this.scratchA.x;
+      pos[i * 3 + 1] = this.scratchA.y;
+      pos[i * 3 + 2] = this.scratchA.z;
+      const fade = count > 1 ? i / (count - 1) : 1;
+      const intensity = 0.12 + 0.88 * fade;
+      if (kind === "interceptor") {
+        col[i * 3] = intensity * 0.4;
+        col[i * 3 + 1] = intensity * 0.92;
+        col[i * 3 + 2] = intensity;
+      } else {
+        col[i * 3] = intensity * 0.73;
+        col[i * 3 + 1] = intensity;
+        col[i * 3 + 2] = intensity * 0.6;
+      }
+    }
+    posAttr.needsUpdate = true;
+    colAttr.needsUpdate = true;
+    geo.setDrawRange(0, count);
+    trail.visible = count >= 2;
+  }
+
   private refreshUfoMarkerType(missionType: MissionType | undefined): void {
     if (this.ufoMissionType === missionType) return;
     this.ufoMissionType = missionType;
@@ -1889,7 +2326,10 @@ export class GeoscapeView {
     const engaging = this.isEngaging();
     // A fresh engagement kicks off the launch flight (reset its clock); the frame
     // loop then flies the craft from base toward the UFO before range closing begins.
-    if (engaging && !this.wasEngaging) this.interceptorFlightStartMs = performance.now();
+    if (engaging && !this.wasEngaging) {
+      this.interceptorFlightStartMs = performance.now();
+      this.resetContrails();
+    }
     this.wasEngaging = engaging;
     if (!engaging || !c?.ufoContact || !c.base) {
       this.interceptorMarker.visible = false;
@@ -1928,7 +2368,10 @@ export class GeoscapeView {
    * at full day for readability.
    */
   private updateTerminator(): void {
-    const hour = this.campaign ? this.campaign.clock.hour : 12;
+    // Fractional hours so the sun/terminator creeps minute-by-minute as time
+    // flows (SPEED_TICKS advance fractional hours); integer `hour` would snap
+    // the day/night line to whole-hour steps.
+    const hour = this.campaign ? this.campaign.clock.elapsedHours % 24 : 12;
     const azimuth = ((hour - 12) / 24) * Math.PI * 2 + Math.PI / 2;
     const radius = 6;
     this.sunLight.position.set(
@@ -1939,21 +2382,48 @@ export class GeoscapeView {
   }
 
   /**
-   * While an interception is live, smoothly recenter the orbit target on the
-   * interceptor and pan the camera by the same delta. Preserving the
-   * (camera - target) offset keeps the player's zoom and orbit angle intact, so
-   * the follow never fights user input; it only pans the rig after the craft.
-   * The target anchors on the surface point under the craft so the globe, not
-   * the model, stays framed. On disengage the rig simply stops following and
-   * free-orbit resumes from wherever it landed.
+   * Cinematic dogfight camera. While an interception is live it frames the
+   * interceptor↔UFO midpoint and zooms the rig to a close-up distance (the globe
+   * becomes a backdrop behind the action). The camera direction is preserved
+   * (only the target + distance move) so it never fights the player's orbit
+   * angle. On resolve it eases back to the globe-center / default distance over
+   * CINE_RELEASE_MS, then releases the rig to free-orbit again.
    */
   private updateChaseCamera(): void {
-    if (!this.isEngaging() || !this.interceptorMarker.visible) return;
-    this.interceptorMarker.getWorldPosition(this.scratchA);
-    this.scratchB.copy(this.scratchA).setLength(EARTH_RADIUS);
-    this.scratchC.copy(this.scratchB).sub(this.controls.target).multiplyScalar(CHASE_CAMERA_LERP);
-    this.controls.target.add(this.scratchC);
-    this.camera.position.add(this.scratchC);
+    const engaging = this.isEngaging();
+    if (engaging && this.interceptorMarker.visible && this.ufoMarker.visible) {
+      this.cineMode = true;
+      this.cineReleaseUntilMs = 0;
+      this.interceptorMarker.getWorldPosition(this.scratchA);
+      this.ufoMarker.getWorldPosition(this.scratchB);
+      this.scratchC.copy(this.scratchA).add(this.scratchB).multiplyScalar(0.5); // engagement midpoint
+      this.controls.target.lerp(this.scratchC, CHASE_CAMERA_LERP);
+      this.applyCinematicDistance(CINE_CAMERA_DISTANCE);
+      return;
+    }
+    if (this.cineMode) {
+      // Just resolved: ease the rig back to the globe view, then release.
+      if (this.cineReleaseUntilMs === 0) this.cineReleaseUntilMs = performance.now() + CINE_RELEASE_MS;
+      if (performance.now() < this.cineReleaseUntilMs) {
+        this.controls.target.lerp(this.globeCenter, CHASE_CAMERA_LERP);
+        this.applyCinematicDistance(GLOBE_CAMERA_DISTANCE);
+      } else {
+        this.cineMode = false;
+        this.cineReleaseUntilMs = 0;
+      }
+    }
+  }
+
+  /**
+   * Pull the camera along its current view direction toward `desired` distance
+   * from the orbit target (lerped so the zoom reads as a smooth dolly). Preserves
+   * the player's orbit angle; only the distance changes.
+   */
+  private applyCinematicDistance(desired: number): void {
+    this.scratchA.copy(this.camera.position).sub(this.controls.target);
+    if (this.scratchA.lengthSq() < 1e-8) return;
+    this.scratchA.setLength(desired).add(this.controls.target);
+    this.camera.position.lerp(this.scratchA, CINE_CAMERA_LERP);
   }
 
   /** Drive the interceptor along base->UFO: launch flight, then range-driven closing; pulse + orient it. */
@@ -1982,7 +2452,8 @@ export class GeoscapeView {
       posN, // z = up
     );
     this.interceptorMarker.quaternion.setFromRotationMatrix(this.scratchBasis);
-    this.interceptorMarker.scale.setScalar(1 + Math.sin(now * 0.012) * 0.18);
+    // Enlarged during the cinematic dogfight for screen presence.
+    this.interceptorMarker.scale.setScalar((1 + Math.sin(now * 0.012) * 0.18) * CINE_CRAFT_BOOST);
   }
 
   /** Crisp DOM layer above the canvas for floating "-N" damage numbers. */
@@ -1990,6 +2461,10 @@ export class GeoscapeView {
     const layer = el("div", "geo-damage-layer");
     this.canvasWrap.appendChild(layer);
     this.damageLayer = layer;
+    // Persistent full-canvas red pulse, lit by flashThreat() when the interceptor is hit.
+    const flash = el("div", "geo-threat-flash");
+    this.canvasWrap.appendChild(flash);
+    this.threatFlash = flash;
   }
 
   /**
@@ -2020,14 +2495,59 @@ export class GeoscapeView {
     this.ufoBurst = this.makeBurst(0xfb923c, this.ufoBurstVel);
     this.interceptorBurst = this.makeBurst(0xfb7185, this.interceptorBurstVel);
     this.earthGroup.add(this.ufoBurst, this.interceptorBurst);
+
+    // Larger explosion/debris burst for amplified dogfight impacts + the kill.
+    this.explosionBurst = this.makeBurstN(0xfdba74, this.explosionBurstVel, EXPLOSION_PARTICLES, 0.05);
+    this.earthGroup.add(this.explosionBurst);
+
+    // Thruster contrails (ring-buffered Points) streaming behind each craft.
+    this.interceptorContrail = this.makeContrail(0x67e8f9);
+    this.ufoContrail = this.makeContrail(0xfb7185);
+    this.earthGroup.add(this.interceptorContrail, this.ufoContrail);
+  }
+
+  /**
+   * Additive thruster contrail: a ring buffer of recent craft positions (local
+   * space) with per-vertex color faded bright (head) → dark (tail) so it reads as
+   * a glowing exhaust trail. No per-frame allocation — position + color buffers
+   * are rewritten in place by updateContrail each frame.
+   */
+  private makeContrail(color: number): Points {
+    const positions = new Float32Array(CONTRAIL_MAX * 3);
+    const colors = new Float32Array(CONTRAIL_MAX * 3);
+    const geo = new BufferGeometry();
+    geo.setAttribute("position", new Float32BufferAttribute(positions, 3));
+    geo.setAttribute("color", new Float32BufferAttribute(colors, 3));
+    geo.setDrawRange(0, 0);
+    const points = new Points(
+      geo,
+      new PointsMaterial({
+        color,
+        size: 0.028,
+        transparent: true,
+        opacity: 0.85,
+        sizeAttenuation: true,
+        vertexColors: true,
+        blending: AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    points.frustumCulled = false;
+    points.visible = false;
+    return points;
   }
 
   /** Particle burst (additive Points) with deterministic precomputed spark directions. */
   private makeBurst(color: number, velocities: Float32Array): Points {
-    const positions = new Float32Array(BURST_PARTICLES * 3);
+    return this.makeBurstN(color, velocities, BURST_PARTICLES, 0.03);
+  }
+
+  /** Sized variant of makeBurst for the larger dogfight explosion/debris burst. */
+  private makeBurstN(color: number, velocities: Float32Array, count: number, size: number): Points {
+    const positions = new Float32Array(count * 3);
     const geo = new BufferGeometry();
     geo.setAttribute("position", new Float32BufferAttribute(positions, 3));
-    for (let i = 0; i < BURST_PARTICLES; i++) {
+    for (let i = 0; i < count; i++) {
       const ax = Math.sin(i * 52.13) * 43758.5453;
       const ay = Math.sin(i * 91.7) * 24634.6345;
       const az = Math.sin(i * 17.39) * 13579.1234;
@@ -2043,7 +2563,7 @@ export class GeoscapeView {
       geo,
       new PointsMaterial({
         color,
-        size: 0.03,
+        size,
         transparent: true,
         opacity: 0,
         blending: AdditiveBlending,
@@ -2077,17 +2597,33 @@ export class GeoscapeView {
       return;
     }
     // Encounter just resolved this update (was engaging, now cleared): play the
-    // killing volley on the UFO using its last known HP as the finishing damage.
+    // killing volley on the UFO using its last known HP as the finishing damage,
+    // plus an amplified kill explosion + heavy shake for the cinematic finish.
     if (this.wasEngaging && this.prevUfoHp !== null && this.prevUfoHp > 0) {
       this.triggerInterceptorVolley(this.prevUfoHp);
+      this.fireExplosion(this.ufoMarker.position, performance.now());
+      this.kickCameraHard();
     }
     this.prevUfoHp = null;
     this.prevInterceptorHp = null;
   }
 
-  /** Interceptor deals damage to the UFO: muzzle flash + tracer + UFO impact burst. */
+  /**
+   * Interceptor deals damage to the UFO: a multi-round cannon volley (tracer +
+   * bigger muzzle flash per round), an impact burst, and an amplified explosion/
+   * debris burst at the UFO. The damage number floats once per volley; subsequent
+   * rounds (scheduled in updateCombatFx) replay the tracer/muzzle/burst visuals.
+   */
   private triggerInterceptorVolley(dmg: number): void {
     const now = performance.now();
+    this.volleyDamageShown = false;
+    this.volleyRounds = VOLLEY_ROUNDS - 1; // remaining rounds after this one
+    this.volleyNextMs = now + VOLLEY_ROUND_MS;
+    this.fireVolleyRound(dmg, now);
+  }
+
+  /** Fire one tracer round: interceptor muzzle → UFO impact + explosion burst. */
+  private fireVolleyRound(dmg: number, now: number): void {
     const from = this.interceptorMarker.position;
     const to = this.ufoMarker.position;
     const attr = this.tracerLineFx.geometry.getAttribute("position") as Float32BufferAttribute;
@@ -2100,24 +2636,36 @@ export class GeoscapeView {
     this.fxTracerStartMs = now;
     this.fxTracerActive = true;
 
+    // Bigger muzzle flash for the dogfight cannon.
     this.muzzleFlash.position.copy(from);
     (this.muzzleFlash.material as MeshBasicMaterial).opacity = 1;
-    this.muzzleFlash.scale.setScalar(1);
+    this.muzzleFlash.scale.setScalar(1.9);
     this.muzzleFlash.visible = true;
     this.fxMuzzleStartMs = now;
     this.fxMuzzleActive = true;
 
     this.fireBurst(this.ufoBurst, to, now);
     this.fxUfoBurstActive = true;
-    this.spawnDamageNumber(this.ufoMarker, Math.round(dmg), "ufo");
+    this.fireExplosion(to, now);
+    if (!this.volleyDamageShown && dmg > 0) {
+      this.spawnDamageNumber(this.ufoMarker, Math.round(dmg), "ufo");
+      this.volleyDamageShown = true;
+    }
     this.kickCamera();
   }
 
-  /** UFO return fire hits the interceptor: impact burst at the interceptor marker. */
+  /** Amplified explosion/debris burst at `pos` (larger particle count + wider spread). */
+  private fireExplosion(pos: Vector3, now: number): void {
+    this.fireBurst(this.explosionBurst, pos, now);
+    this.fxExplosionActive = true;
+  }
+
+  /** UFO return fire hits the interceptor: impact burst + threat flash + shake. */
   private triggerInterceptorHit(dmg: number): void {
     this.fireBurst(this.interceptorBurst, this.interceptorMarker.position, performance.now());
     this.fxInterceptorBurstActive = true;
     this.spawnDamageNumber(this.interceptorMarker, Math.round(dmg), "interceptor");
+    this.flashThreat();
     this.kickCamera();
   }
 
@@ -2133,10 +2681,28 @@ export class GeoscapeView {
     this.fxBurstStartMs = now;
   }
 
-  /** Arm a decaying camera shake (applied around the controls base each frame). */
+  /** Arm a decaying camera shake at standard magnitude (applied each frame). */
   private kickCamera(): void {
+    this.shakeMagnitude = FX_SHAKE_MAGNITUDE;
     this.shakeStartMs = performance.now();
     this.shakeActive = true;
+  }
+
+  /** Heavier shake for kills / large explosions. */
+  private kickCameraHard(): void {
+    this.shakeMagnitude = FX_SHAKE_MAGNITUDE * 2.4;
+    this.shakeStartMs = performance.now();
+    this.shakeActive = true;
+  }
+
+  /** Pulse the "taking fire" threat overlay when the interceptor is hit. */
+  private flashThreat(): void {
+    if (!this.threatFlash) return;
+    this.threatFlash.classList.add("active");
+    if (this.threatFlashTimer !== undefined) window.clearTimeout(this.threatFlashTimer);
+    this.threatFlashTimer = window.setTimeout(() => {
+      this.threatFlash?.classList.remove("active");
+    }, THREAT_FLASH_MS);
   }
 
   /** Flowing time: advance game hours on a timer scaled by the chosen speed. */
@@ -2186,16 +2752,37 @@ export class GeoscapeView {
       }
     }
     // Both bursts share fxBurstStartMs (an exchange fires them together).
-    this.fxUfoBurstActive = this.advanceBurst(this.ufoBurst, this.ufoBurstVel, this.fxUfoBurstActive, now);
+    this.fxUfoBurstActive = this.advanceBurst(this.ufoBurst, this.ufoBurstVel, BURST_PARTICLES, this.fxUfoBurstActive, now);
     this.fxInterceptorBurstActive = this.advanceBurst(
       this.interceptorBurst,
       this.interceptorBurstVel,
+      BURST_PARTICLES,
       this.fxInterceptorBurstActive,
       now,
     );
+    this.fxExplosionActive = this.advanceBurst(
+      this.explosionBurst,
+      this.explosionBurstVel,
+      EXPLOSION_PARTICLES,
+      this.fxExplosionActive,
+      now,
+    );
+    // Multi-round volley: fire the next cannon round on the stagger schedule.
+    if (this.volleyRounds > 0 && now >= this.volleyNextMs) {
+      this.volleyRounds--;
+      this.volleyNextMs = now + VOLLEY_ROUND_MS;
+      if (this.isEngaging()) this.fireVolleyRound(0, now);
+      else this.volleyRounds = 0;
+    }
   }
 
-  private advanceBurst(burst: Points, vel: Float32Array, active: boolean, now: number): boolean {
+  private advanceBurst(
+    burst: Points,
+    vel: Float32Array,
+    count: number,
+    active: boolean,
+    now: number,
+  ): boolean {
     if (!active) return false;
     const t = (now - this.fxBurstStartMs) / FX_BURST_MS;
     if (t >= 1) {
@@ -2205,7 +2792,7 @@ export class GeoscapeView {
     const attr = burst.geometry.getAttribute("position") as Float32BufferAttribute;
     const arr = attr.array as Float32Array;
     const spread = 0.05 * t;
-    for (let i = 0; i < BURST_PARTICLES; i++) {
+    for (let i = 0; i < count; i++) {
       const vx = vel[i * 3] ?? 0;
       const vy = vel[i * 3 + 1] ?? 0;
       const vz = vel[i * 3 + 2] ?? 0;
@@ -2235,7 +2822,80 @@ export class GeoscapeView {
     this.scratchA
       .set(Math.sin(now * 0.13), Math.sin(now * 0.091), Math.cos(now * 0.117))
       .normalize();
-    this.camera.position.addScaledVector(this.scratchA, FX_SHAKE_MAGNITUDE * decay);
+    this.camera.position.addScaledVector(this.scratchA, this.shakeMagnitude * decay);
+  }
+
+  /**
+   * Stream thruster contrails behind the interceptor + UFO while an engagement is
+   * live. Each frame one particle is emitted at each craft's world position
+   * (converted into earthGroup-local space); per-vertex color fades the ring
+   * bright (head) → dark (tail) so it reads as a glowing exhaust trail. Ring
+   * buffers are pooled — no per-frame allocation. Trails are hidden outside combat.
+   */
+  private updateContrails(now: number): void {
+    if (!this.isEngaging()) {
+      this.interceptorContrail.visible = false;
+      this.ufoContrail.visible = false;
+      return;
+    }
+    if (this.interceptorMarker.visible) {
+      this.interceptorMarker.getWorldPosition(this.scratchA);
+      this.emitContrail(this.interceptorContrail, this.interceptorContrailRing, this.interceptorContrailState, this.scratchA, 0.4, 0.92, 1.0);
+    }
+    if (this.ufoMarker.visible) {
+      this.ufoMarker.getWorldPosition(this.scratchA);
+      this.emitContrail(this.ufoContrail, this.ufoContrailRing, this.ufoContrailState, this.scratchA, 1.0, 0.45, 0.52);
+    }
+  }
+
+  private emitContrail(
+    contrail: Points,
+    ring: Float32Array,
+    state: { head: number; count: number },
+    worldPos: Vector3,
+    r: number,
+    g: number,
+    b: number,
+  ): void {
+    this.scratchB.copy(worldPos);
+    this.earthGroup.worldToLocal(this.scratchB); // earthGroup-local position of the craft
+    ring[state.head * 3] = this.scratchB.x;
+    ring[state.head * 3 + 1] = this.scratchB.y;
+    ring[state.head * 3 + 2] = this.scratchB.z;
+    state.head = (state.head + 1) % CONTRAIL_MAX;
+    if (state.count < CONTRAIL_MAX) state.count++;
+    const posAttr = contrail.geometry.getAttribute("position") as Float32BufferAttribute;
+    const colAttr = contrail.geometry.getAttribute("color") as Float32BufferAttribute;
+    const pos = posAttr.array as Float32Array;
+    const col = colAttr.array as Float32Array;
+    for (let i = 0; i < state.count; i++) {
+      // Walk the ring oldest → newest so fade tracks age correctly.
+      const slot = (state.head - state.count + i + CONTRAIL_MAX) % CONTRAIL_MAX;
+      pos[i * 3] = ring[slot * 3] ?? 0;
+      pos[i * 3 + 1] = ring[slot * 3 + 1] ?? 0;
+      pos[i * 3 + 2] = ring[slot * 3 + 2] ?? 0;
+      const fade = state.count > 1 ? i / (state.count - 1) : 1; // 0 oldest .. 1 newest
+      const intensity = fade * fade * 0.95;
+      col[i * 3] = r * intensity;
+      col[i * 3 + 1] = g * intensity;
+      col[i * 3 + 2] = b * intensity;
+    }
+    posAttr.needsUpdate = true;
+    colAttr.needsUpdate = true;
+    contrail.geometry.setDrawRange(0, state.count);
+    contrail.visible = state.count >= 2;
+  }
+
+  /** Clear the contrail ring buffers (on engagement start so stale trails don't linger). */
+  private resetContrails(): void {
+    this.interceptorContrailState.head = 0;
+    this.interceptorContrailState.count = 0;
+    this.ufoContrailState.head = 0;
+    this.ufoContrailState.count = 0;
+    this.interceptorContrail.geometry.setDrawRange(0, 0);
+    this.ufoContrail.geometry.setDrawRange(0, 0);
+    this.interceptorContrail.visible = false;
+    this.ufoContrail.visible = false;
   }
 
   /**
@@ -2574,22 +3234,29 @@ export class GeoscapeView {
     return notice;
   }
 
-  /** Modal interception overlay; rendered only while an encounter is in progress. */
+  /**
+   * Cinematic dogfight HUD: a translucent top panel (no full-screen dimming, so the
+   * 3D engagement stays visible behind it) with large interceptor + UFO HP bars, a
+   * range / round / threat readout, a scrolling engagement log, and the
+   * Close / Attack / Disengage actions. Rendered only while an encounter is live.
+   */
   private buildInterceptionOverlay(): HTMLElement | null {
     const encounter = this.campaign?.interception;
     if (!encounter) return null;
-    const overlay = el("div", "geo-overlay");
+    const overlay = el("div", "geo-overlay geo-dogfight");
     const panel = el("div", "geo-encounter");
     const eye = el("div", "eyebrow");
-    eye.textContent = "Interception encounter";
+    eye.textContent = "▲ Interceptor dogfight";
     const heading = el("h2");
     heading.textContent = `${encounter.contactId} engagement`;
-    const meta = el("div", "geo-encounter-meta");
+    const meta = el("div", "geo-dogfight-meta");
     const range = el("span");
-    range.textContent = `Range ${encounter.range}`;
+    range.innerHTML = `RANGE <b>${encounter.range}</b>`;
     const rounds = el("span");
-    rounds.textContent = `Round ${encounter.roundsElapsed + 1}`;
-    meta.append(range, rounds);
+    rounds.innerHTML = `ROUND <b>${encounter.roundsElapsed + 1}</b>`;
+    const status = el("span");
+    status.innerHTML = `THREAT <b>${this.campaign?.strategic.threat ?? 0}%</b>`;
+    meta.append(range, rounds, status);
     const log = el("div", "geo-encounter-log");
     for (const line of encounter.log) {
       const entry = el("p");
@@ -2607,8 +3274,8 @@ export class GeoscapeView {
       eye,
       heading,
       meta,
-      this.hpBar("UFO", encounter.ufoHp, encounter.ufoHpMax, "ufo"),
-      this.hpBar("Interceptor", encounter.interceptorHp, encounter.interceptorHpMax, "interceptor"),
+      this.hpBar("Interceptor", encounter.interceptorHp, encounter.interceptorHpMax, "interceptor", true),
+      this.hpBar("UFO", encounter.ufoHp, encounter.ufoHpMax, "ufo", true),
       log,
       actions,
     );
@@ -2623,12 +3290,18 @@ export class GeoscapeView {
     return button;
   }
 
-  private hpBar(label: string, hp: number, hpMax: number, variant: "ufo" | "interceptor"): HTMLElement {
-    const wrap = el("div", "geo-bar");
+  private hpBar(
+    label: string,
+    hp: number,
+    hpMax: number,
+    variant: "ufo" | "interceptor",
+    large = false,
+  ): HTMLElement {
+    const wrap = el("div", large ? "geo-bar geo-bar-lg" : "geo-bar");
     const labelRow = el("div", "geo-bar-label");
     const name = el("span");
     name.textContent = label;
-    const value = el("span");
+    const value = el("b");
     value.textContent = `${Math.max(0, Math.floor(hp))}/${hpMax}`;
     labelRow.append(name, value);
     const track = el("div", "geo-bar-track");
@@ -2814,9 +3487,14 @@ export class GeoscapeView {
     const contact = this.campaign?.ufoContact;
     const urgent = contact ? missionTypeInfo(contact.missionType).urgent : false;
     // Urgent contacts (terror / base defense) pulse faster and harder so they
-    // read as higher priority against the steady crash-site markers.
-    this.ufoMarker.scale.setScalar(1 + Math.sin(now * (urgent ? 0.012 : 0.006)) * (urgent ? 0.2 : 0.14));
+    // read as higher priority against the steady crash-site markers. Enlarged
+    // during a cinematic dogfight for screen presence.
+    const craftBoost = this.isEngaging() ? CINE_CRAFT_BOOST : 1;
+    this.ufoMarker.scale.setScalar(
+      (1 + Math.sin(now * (urgent ? 0.012 : 0.006)) * (urgent ? 0.2 : 0.14)) * craftBoost,
+    );
     this.animateInterceptor(now);
+    this.updateContrails(now);
     this.advanceFlowingTime(now);
     // onAdvanceTime may synchronously dispose+remount this view (current controller);
     // bail before touching the disposed renderer/controls in that case.
@@ -2827,6 +3505,9 @@ export class GeoscapeView {
     // disposes this view mid-frame; bail before rendering a torn-down scene.
     if (this.disposed) return;
     this.updateTerminator();
+    this.updateCityLights();
+    this.updateAtmosphere();
+    if (this.cloudMesh) this.cloudMesh.rotation.y += 0.00018;
     this.updateChaseCamera();
     this.controls.update();
     // Camera shake: offset around the controls-derived base, then restore so the

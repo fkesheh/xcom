@@ -121,6 +121,8 @@ const EXPLORED_FEATURE_DIM = 0.55;
 const FOG_VOID = new Color(COLORS.groundVoid);
 const SCRATCH_COLOR = new Color();
 const BLACK = new Color(0, 0, 0);
+/** Reddened emissive tint blended over a hit figure for the damage flash. */
+const HIT_RED = new Color(1, 0.08, 0.08);
 
 // ---------------------------------------------------------------------------
 // Time-of-day lighting (presentation-only). Derived from state.hourOfDay so a
@@ -216,6 +218,12 @@ const TIME_OF_DAY: Record<TimeOfDay, TimeOfDayLighting> = {
 
 const TWEEN_MS = 150;
 const MOVE_TWEEN_MS = 220;
+// Hit-reaction flinch + ragdoll-collapse timing (presentation-only).
+const HIT_REACT_MS = 200;
+const DEATH_COLLAPSE_MS = 420;
+// Screen-shake envelope: impulses add to a decaying energy value (exp decay).
+const SHAKE_DECAY_RATE = 12; // ~150ms fade for a shot, ~300ms for a blast
+const SHAKE_MAX = 0.2;
 
 // ---------------------------------------------------------------------------
 // Floor tones — the per-tile colour painted onto the instanced floor quad (and
@@ -563,6 +571,13 @@ export class Renderer {
   private readonly desiredTarget = new Vector3();
   private panActive = false;
 
+  // Screen shake: impulses add to a decaying energy envelope; each frame pushes
+  // a randomised offset onto the camera position, then strips it back before the
+  // next OrbitControls.update() so the orbit never drifts. No per-frame alloc.
+  private shakeEnergy = 0;
+  private readonly shakeOffset = new Vector3();
+  private lastRenderSec = 0;
+
   constructor() {
     this.renderer = new WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -720,6 +735,15 @@ export class Renderer {
   /** Draw a frame. Eases the focus pan and billboards HP bars first. */
   render(): void {
     const now = performance.now() * 0.001;
+    const dt = this.lastRenderSec === 0 ? 0 : Math.min(0.05, now - this.lastRenderSec);
+    this.lastRenderSec = now;
+
+    // Strip last frame's shake offset FIRST so OrbitControls sees the camera's
+    // true orbit position and the shake never accumulates into drift.
+    if (this.shakeOffset.x !== 0 || this.shakeOffset.y !== 0 || this.shakeOffset.z !== 0) {
+      this.camera.position.sub(this.shakeOffset);
+    }
+
     if (this.panActive && this.controls) {
       const delta = this.desiredTarget.clone().sub(this.controls.target);
       if (delta.lengthSq() < 0.0004) {
@@ -754,7 +778,29 @@ export class Renderer {
       const pulse = 1 + Math.sin(now * 3.2) * 0.08;
       this.carrierBeacon.scale.set(pulse, pulse, pulse);
     }
+
+    // Apply screen shake: decay the energy envelope, push a random offset onto
+    // the camera (stripped back at the top of the next frame). Purely cosmetic;
+    // randomness is fine here — this is the presentation loop, never the sim.
+    if (this.shakeEnergy > 1e-4) {
+      this.shakeEnergy *= Math.exp(-dt * SHAKE_DECAY_RATE);
+      this.shakeOffset.set(
+        (Math.random() * 2 - 1) * this.shakeEnergy,
+        (Math.random() * 2 - 1) * this.shakeEnergy,
+        (Math.random() * 2 - 1) * this.shakeEnergy,
+      );
+      this.camera.position.add(this.shakeOffset);
+    } else {
+      this.shakeEnergy = 0;
+      this.shakeOffset.set(0, 0, 0);
+    }
+
     this.composer.render();
+  }
+
+  /** Add a screen-shake impulse (world-unit amplitude; decays ~150-300ms). */
+  private addShake(amplitude: number): void {
+    this.shakeEnergy = Math.min(this.shakeEnergy + amplitude, SHAKE_MAX);
   }
 
   /** Distance from camera to its orbit target (used to scale keyboard pan speed). */
@@ -1573,6 +1619,8 @@ export class Renderer {
       this.faceView(shooter, dirTowards(shooter.root.position, ev.targetPos));
       setCharacterPose(shooter.character, { aiming: true });
     }
+    this.addShake(0.04); // per-shot recoil
+    const target = ev.targetId != null ? this.unitViews.get(ev.targetId) ?? null : null;
     // Bullets originate from the tile the sim actually fired from: the shooter's
     // tile for a direct shot, or the lean tile for a corner peek (so a peek
     // shot's tracers don't visually pass through the wall it's hugging).
@@ -1595,20 +1643,77 @@ export class Renderer {
         rounds: ev.rounds.map((r) => ({ hit: r.hit, deviationRad: r.deviationRad })),
         kind,
       });
+      // Damage feedback on the target: red emissive flash + flinch, only when a
+      // round connected and the target is currently on screen (no fog leak).
+      if (target && target.root.visible && ev.rounds.some((r) => r.hit)) {
+        await this.playHitReaction(target);
+      }
     } finally {
       if (shooter) setCharacterPose(shooter.character, { aiming: false });
     }
   }
 
+  /**
+   * Brief damage feedback on a unit that was just hit: a quick red emissive
+   * flush over its figure plus a small flinch (scale pulse + recoil pitch) that
+   * eases back over ~200ms. Presentation-only — the sim has already applied the
+   * damage. Materials + emissive baselines are captured once at the start and
+   * restored exactly on completion, so the figure is untouched afterwards and
+   * composes cleanly with stance/death animations.
+   */
+  private async playHitReaction(view: UnitView): Promise<void> {
+    const saved: { mat: MeshStandardMaterial; emissive: Color; intensity: number }[] = [];
+    view.character.traverse((node) => {
+      if (!(node instanceof Mesh)) return;
+      const src = node.material;
+      const mats: MeshStandardMaterial[] = Array.isArray(src)
+        ? src.filter((x): x is MeshStandardMaterial => x instanceof MeshStandardMaterial)
+        : src instanceof MeshStandardMaterial
+          ? [src]
+          : [];
+      for (const mat of mats) {
+        if (!saved.some((s) => s.mat === mat)) {
+          saved.push({ mat, emissive: mat.emissive.clone(), intensity: mat.emissiveIntensity });
+        }
+      }
+    });
+
+    const baseScale = view.root.scale.x || 1;
+    await tween(HIT_REACT_MS, (t) => {
+      // Snap then relax: strong at impact, eased back to neutral by the end.
+      const flash = Math.max(0, 1 - t * 1.5);
+      view.root.scale.setScalar(baseScale + flash * 0.06);
+      view.character.rotation.x = flash * 0.16;
+      for (const s of saved) {
+        s.mat.emissive.copy(s.emissive).lerp(HIT_RED, flash);
+        s.mat.emissiveIntensity = s.intensity + flash * 2.0;
+      }
+    });
+    for (const s of saved) {
+      s.mat.emissive.copy(s.emissive);
+      s.mat.emissiveIntensity = s.intensity;
+    }
+    view.root.scale.setScalar(baseScale);
+    view.character.rotation.x = 0;
+  }
+
   async playDeath(ev: Extract<GameEvent, { type: "died" }>): Promise<void> {
     const view = this.unitViews.get(ev.unitId);
     if (!view) return;
-    await tween(TWEEN_MS + 30, (t) => {
-      const s = Math.max(0.01, 1 - t);
-      view.root.scale.setScalar(s);
+    view.root.visible = true;
+    view.root.scale.setScalar(1);
+    // Ragdoll-ish collapse: pitch forward about the feet, sink and flatten as
+    // the body folds to the ground. Eased-out so the fall has weight.
+    await tween(DEATH_COLLAPSE_MS, (t) => {
+      const e = 1 - Math.pow(1 - t, 3);
+      view.character.rotation.x = e * 1.42; // pitch forward ~80deg onto the ground
+      view.root.position.y = -e * 0.06; // sink as the body folds down
+      view.root.scale.setScalar(1 - e * 0.1);
     });
     view.root.visible = false;
+    view.root.position.y = 0;
     view.root.scale.setScalar(1);
+    view.character.rotation.x = 0;
     if (this.selectedId === ev.unitId) this.setSelected(null);
   }
 
@@ -1620,6 +1725,7 @@ export class Renderer {
    */
   async playBlast(center: Vec2, radius: number): Promise<void> {
     const w = tileToWorld(center.x, center.y, 0);
+    this.addShake(0.12); // per-blast concussion
     await this.effects.playBlast(new Vector3(w.x, 0.4, w.z), radius);
   }
 

@@ -1,7 +1,9 @@
 import type {
+  ActiveFlight,
   CampaignClock,
   CampaignResources,
   CampaignState,
+  Craft,
   FundingReport,
   InterceptionEncounter,
   InterceptionReport,
@@ -750,6 +752,210 @@ function rollContactMissionType(campaign: CampaignState, detectedAtHour: number)
   return "terror";
 }
 
+// ===========================================================================
+// ACTIVE FLIGHTS — friendly craft (patrols/transfers) flying across the globe.
+// Pure great-circle maths reusing the same model as tracked-UFO movement; the
+// visual layer reads `activeFlights` and renders each marker between its ends.
+// ===========================================================================
+
+/** Patrol interceptor cruise-speed band (degrees of arc per hour on the globe). */
+const PATROL_SPEED_MIN_DEG_PER_HOUR = 3;
+const PATROL_SPEED_MAX_DEG_PER_HOUR = 5;
+/** Interceptor cruise speed scales with the target UFO's speed so it visibly gains. */
+const PATROL_SPEED_TO_UFO_SPEED_RATIO = 6;
+/**
+ * A patrol that has closed to within this fraction of its target UFO shadows it
+ * (progress clamped) rather than "arriving": the interceptor tails the UFO until
+ * the player engages or the contact expires, so it never teleports home to respawn.
+ */
+const PATROL_SHADOW_PROGRESS = 0.99;
+/** Patrol flights carry an id prefix so the sim can tell them from return legs. */
+const PATROL_ID_PREFIX = "patrol:";
+const RETURN_ID_PREFIX = "return:";
+
+/** Great-circle angular distance between two lat/lon points, in degrees. */
+function greatCircleDistanceDeg(
+  fromLat: number,
+  fromLon: number,
+  toLat: number,
+  toLon: number,
+): number {
+  const toRad = Math.PI / 180;
+  const toDeg = 180 / Math.PI;
+  const phi1 = fromLat * toRad;
+  const phi2 = toLat * toRad;
+  const dLon = (toLon - fromLon) * toRad;
+  const cosCentral =
+    Math.sin(phi1) * Math.sin(phi2) + Math.cos(phi1) * Math.cos(phi2) * Math.cos(dLon);
+  return Math.acos(Math.max(-1, Math.min(1, cosCentral))) * toDeg;
+}
+
+/**
+ * Position along a great-circle route at a given fraction (0 = from, 1 = to) via
+ * spherical linear interpolation of the endpoint unit vectors. Pure maths; the
+ * geoscape renderer uses this to place a flight marker between its endpoints.
+ */
+export function flightPosition(
+  fromLat: number,
+  fromLon: number,
+  toLat: number,
+  toLon: number,
+  fraction: number,
+): { lat: number; lon: number } {
+  const p = Math.max(0, Math.min(1, fraction));
+  const toRad = Math.PI / 180;
+  const toDeg = 180 / Math.PI;
+  const phi1 = fromLat * toRad;
+  const phi2 = toLat * toRad;
+  const lam1 = fromLon * toRad;
+  const lam2 = toLon * toRad;
+  const cosCentral = Math.max(
+    -1,
+    Math.min(1, Math.sin(phi1) * Math.sin(phi2) + Math.cos(phi1) * Math.cos(phi2) * Math.cos(lam2 - lam1)),
+  );
+  const central = Math.acos(cosCentral);
+  if (central < 1e-9) return { lat: fromLat, lon: fromLon };
+  const sinCentral = Math.sin(central);
+  const a = Math.sin((1 - p) * central) / sinCentral;
+  const b = Math.sin(p * central) / sinCentral;
+  const x = a * Math.cos(phi1) * Math.cos(lam1) + b * Math.cos(phi2) * Math.cos(lam2);
+  const y = a * Math.cos(phi1) * Math.sin(lam1) + b * Math.cos(phi2) * Math.sin(lam2);
+  const z = a * Math.sin(phi1) + b * Math.sin(phi2);
+  return {
+    lat: Math.atan2(z, Math.sqrt(x * x + y * y)) * toDeg,
+    lon: Math.atan2(y, x) * toDeg,
+  };
+}
+
+/** Convenience: live lat/lon of a flight along its current route. */
+export function activeFlightPosition(flight: ActiveFlight): { lat: number; lon: number } {
+  return flightPosition(flight.fromLat, flight.fromLon, flight.toLat, flight.toLon, flight.progress);
+}
+
+function isPatrolFlight(flight: ActiveFlight): boolean {
+  return flight.id.startsWith(PATROL_ID_PREFIX);
+}
+
+/** Deterministic interceptor cruise speed (deg/hour), proportional to the UFO's speed. */
+function patrolSpeedDegPerHour(ufoSpeed: number): number {
+  return Math.max(
+    PATROL_SPEED_MIN_DEG_PER_HOUR,
+    Math.min(PATROL_SPEED_MAX_DEG_PER_HOUR, ufoSpeed * PATROL_SPEED_TO_UFO_SPEED_RATIO),
+  );
+}
+
+/** Moves a flight a fixed `hours` along its route by speedDegPerHour * hours. */
+function advanceFlightProgress(flight: ActiveFlight, hours: number): ActiveFlight {
+  if (hours <= 0) return flight;
+  const distance = greatCircleDistanceDeg(flight.fromLat, flight.fromLon, flight.toLat, flight.toLon);
+  if (distance < 1e-9) return { ...flight, progress: 1 };
+  const delta = (flight.speedDegPerHour * hours) / distance;
+  return { ...flight, progress: Math.min(1, flight.progress + delta) };
+}
+
+/** A ready interceptor that is not already airborne (patrolling or returning). */
+function chooseIdleInterceptor(
+  campaign: CampaignState,
+  flights: readonly ActiveFlight[],
+): Craft | undefined {
+  const airborne = new Set(flights.map((flight) => flight.craftId));
+  return readyInterceptors(campaign).find((craft) => !airborne.has(craft.id));
+}
+
+function makePatrolFlight(craft: Craft, campaign: CampaignState, contact: UfoContact): ActiveFlight {
+  return {
+    id: `${PATROL_ID_PREFIX}${craft.id}:${contact.id}`,
+    craftId: craft.id,
+    kind: "interceptor",
+    fromLat: campaign.base.lat,
+    fromLon: campaign.base.lon,
+    toLat: contact.lat,
+    toLon: contact.lon,
+    progress: 0,
+    speedDegPerHour: patrolSpeedDegPerHour(contact.speed ?? UFO_TRACKING_SPEED_MIN),
+    startedAtHour: campaign.clock.elapsedHours,
+  };
+}
+
+function makeReturnFlight(patrol: ActiveFlight, campaign: CampaignState): ActiveFlight {
+  const pos = activeFlightPosition(patrol);
+  return {
+    id: `${RETURN_ID_PREFIX}${patrol.craftId}:${Math.floor(campaign.clock.elapsedHours)}`,
+    craftId: patrol.craftId,
+    kind: patrol.kind,
+    fromLat: pos.lat,
+    fromLon: pos.lon,
+    toLat: campaign.base.lat,
+    toLon: campaign.base.lon,
+    progress: 0,
+    speedDegPerHour: patrol.speedDegPerHour,
+    startedAtHour: campaign.clock.elapsedHours,
+  };
+}
+
+/** A patrol only has a live target while its UFO is still tracked (or engaging). */
+function patrolTargetLost(contact: UfoContact | undefined): boolean {
+  if (!contact) return true;
+  return contact.status !== "tracked" && contact.status !== "engaging";
+}
+
+/**
+ * Advances every active flight for `dt` hours and reconciles the patrol roster
+ * against the current UFO contact — deterministic, no RNG:
+ *  - patrol flights re-aim at a tracked UFO's current position each tick (homing),
+ *    and shadow it once they close to PATROL_SHADOW_PROGRESS, so the interceptor
+ *    visibly gives chase without teleporting home;
+ *  - when the UFO is gone (expired/escaped/shot down/assaulted) its patrol turns
+ *    back toward the base as a fresh return flight;
+ *  - a ready, idle interceptor auto-launches a patrol toward any tracked UFO;
+ *  - flights whose progress reaches 1 (arrived) are removed.
+ */
+function manageActiveFlights(
+  campaign: CampaignState,
+  contact: UfoContact | undefined,
+  dt: number,
+): ActiveFlight[] {
+  const flights = campaign.activeFlights ?? [];
+  const tracked = contact?.status === "tracked";
+  if (flights.length === 0 && !tracked) return [];
+
+  // 1. Re-aim existing patrols at the tracked UFO's latest position (homing).
+  const reAimed = flights.map((flight) =>
+    isPatrolFlight(flight) && tracked ? { ...flight, toLat: contact!.lat, toLon: contact!.lon } : flight,
+  );
+
+  // 2. Auto-launch ONE patrol toward a tracked UFO if none is airborne yet and a
+  //    ready interceptor is idle. One scramble per UFO (the next craft stays in reserve).
+  let withSpawn = reAimed;
+  if (tracked && !reAimed.some((flight) => isPatrolFlight(flight))) {
+    const idle = chooseIdleInterceptor(campaign, reAimed);
+    if (idle) {
+      withSpawn = [...reAimed, makePatrolFlight(idle, campaign, contact!)];
+    }
+  }
+
+  // 3. Advance every flight along its route by dt (the freshly launched one too).
+  const advanced = withSpawn.map((flight) => advanceFlightProgress(flight, dt));
+
+  // 4. Patrols that have caught a still-tracked UFO shadow it (clamp below arrival).
+  const shadowed = advanced.map((flight) =>
+    isPatrolFlight(flight) && tracked && flight.progress >= PATROL_SHADOW_PROGRESS
+      ? { ...flight, progress: PATROL_SHADOW_PROGRESS }
+      : flight,
+  );
+
+  // 5. Patrols whose UFO is gone convert into return-to-base flights.
+  const converted: ActiveFlight[] = [];
+  const kept = shadowed.flatMap((flight) => {
+    if (isPatrolFlight(flight) && patrolTargetLost(contact)) {
+      converted.push(makeReturnFlight(flight, campaign));
+      return [];
+    }
+    return [flight];
+  });
+  return [...kept, ...converted].filter((flight) => flight.progress < 1);
+}
+
 export function advanceGeoscape(
   campaign: CampaignState,
   hours = GEOSCAPE_SCAN_HOURS,
@@ -794,11 +1000,13 @@ export function advanceGeoscape(
     clock = { ...clock, lastContactHour: clock.elapsedHours };
   }
 
+  const activeFlights = manageActiveFlights(nextCampaign, contact, dt);
   const composed = repairInterceptor(completeFinishedConstruction(completeFinishedManufacturing(recoverWoundedSoldiers(completeFinishedResearch({
     ...nextCampaign,
     clock,
     strategic,
     ufoContact: contact,
+    activeFlights,
   })))));
   return restockMarket(composed, Math.max(0, Math.floor(hours)));
 }

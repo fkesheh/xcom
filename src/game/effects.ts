@@ -14,10 +14,17 @@
 
 import {
   AdditiveBlending,
+  BoxGeometry,
+  BufferGeometry,
   Color,
+  ConeGeometry,
   CylinderGeometry,
+  Float32BufferAttribute,
+  LineBasicMaterial,
+  LineSegments,
   Mesh,
   MeshBasicMaterial,
+  MeshStandardMaterial,
   Quaternion,
   RingGeometry,
   SphereGeometry,
@@ -62,6 +69,22 @@ const BLAST_SPARKS = 12;
 const THROW_COLOR = 0xffd479;
 const THROW_MS_MIN = 280;
 const THROW_MS_MAX = 720;
+
+// Enhanced muzzle flash: a forward cone burst + ballistic sparks.
+const MUZZLE_CONE_H = 0.42;
+const MUZZLE_SPARKS = 6;
+const MUZZLE_SPARK_MS = 130;
+const MUZZLE_SPARK_GRAVITY = 6.0;
+
+// Plasma bolt presentation: pulsing blob + crackling electricity arcs.
+const PLASMA_PULSE_FREQ = 0.03; // radians/ms of the scale pulse
+const PLASMA_ARCS = 6;
+
+// Blast debris: solid tumbling chunks (distinct from the additive embers) +
+// a second crisper shockwave ring.
+const BLAST_DEBRIS = 5;
+const BLAST_DEBRIS_COLOR = 0x3a3530;
+const BLAST_SHOCK2_COLOR = 0xfff0d0;
 
 const UP = new Vector3(0, 1, 0);
 const Y_AXIS = new Vector3(0, 1, 0);
@@ -157,19 +180,39 @@ function additiveMaterial(color: number, opacity: number): MeshBasicMaterial {
   return mat;
 }
 
-function disposeMesh(parent: Object3D, m: Mesh): void {
+/**
+ * Additive line material for the plasma bolt's electricity arcs. Same HDR boost
+ * + tone-mapping bypass as {@link additiveMaterial} so the arcs survive into the
+ * bloom buffer; `LineBasicMaterial` is the correct (wire-only) shading for lines.
+ */
+function additiveLineMaterial(color: number, opacity: number): LineBasicMaterial {
+  const mat = new LineBasicMaterial({
+    color: new Color(color).multiplyScalar(BLOOM_BOOST),
+    transparent: true,
+    opacity,
+    blending: AdditiveBlending,
+    depthWrite: false,
+  });
+  mat.toneMapped = false;
+  return mat;
+}
+
+function disposeMesh(parent: Object3D, m: Object3D): void {
   parent.remove(m);
-  m.geometry.dispose();
-  const mat = m.material;
-  if (Array.isArray(mat)) for (const x of mat) x.dispose();
-  else mat.dispose();
+  const geo = (m as { geometry?: BufferGeometry }).geometry;
+  if (geo) geo.dispose();
+  const mat = (m as { material?: { dispose(): void } | { dispose(): void }[] }).material;
+  if (mat) {
+    if (Array.isArray(mat)) for (const x of mat) x.dispose();
+    else mat.dispose();
+  }
 }
 
 /** A single round's pre-built meshes plus its timeline update. */
 interface RoundAnim {
   /** Advance to `elapsed` ms (from volley start). Returns true once fully done. */
   update(elapsed: number): boolean;
-  meshes: Mesh[];
+  meshes: Object3D[];
 }
 
 /** A volley in flight: lets {@link Effects.dispose} tear it down cleanly. */
@@ -200,7 +243,7 @@ export class Effects {
     const target = opts.to.clone();
 
     const anims: RoundAnim[] = [];
-    const allMeshes: Mesh[] = [];
+    const allMeshes: Object3D[] = [];
     for (let i = 0; i < opts.rounds.length; i++) {
       const round = opts.rounds[i];
       if (!round) continue;
@@ -295,9 +338,48 @@ export class Effects {
       meshes.push(spark);
     }
 
+    // Secondary shockwave — thinner, hotter, expands faster than the main ring.
+    const shock2 = new Mesh(
+      new RingGeometry(0.86, 1.0, 48),
+      additiveMaterial(BLAST_SHOCK2_COLOR, 0.9),
+    );
+    shock2.rotation.x = -Math.PI / 2;
+    shock2.position.set(cx, 0.07, cz);
+    meshes.push(shock2);
+
+    // Solid tumbling debris chunks — distinct from the additive embers: lit
+    // rubble that arcs out, bounces, and spins before the effect disposes.
+    const debris: {
+      mesh: Mesh;
+      vx: number;
+      vy: number;
+      vz: number;
+      rx: number;
+      rz: number;
+    }[] = [];
+    for (let i = 0; i < BLAST_DEBRIS; i++) {
+      const chunk = new Mesh(
+        new BoxGeometry(0.13, 0.13, 0.13),
+        new MeshStandardMaterial({ color: BLAST_DEBRIS_COLOR, roughness: 1 }),
+      );
+      chunk.position.set(cx, groundY, cz);
+      const angle = (i / BLAST_DEBRIS) * Math.PI * 2 + 0.35;
+      const speed = (1.1 + ((i * 11) % 5) / 5) * Math.max(radius, 1);
+      debris.push({
+        mesh: chunk,
+        vx: Math.cos(angle) * speed,
+        vy: 2.0 + ((i * 7) % 4) * 0.5,
+        vz: Math.sin(angle) * speed,
+        rx: 4 + (i % 3),
+        rz: 3 + (i % 2) * 1.5,
+      });
+      meshes.push(chunk);
+    }
+
     for (const m of meshes) this.parent.add(m);
     const coreMat = core.material as MeshBasicMaterial;
     const shockMat = shock.material as MeshBasicMaterial;
+    const shock2Mat = shock2.material as MeshBasicMaterial;
     const sparkMats = sparks.map((s) => s.mesh.material as MeshBasicMaterial);
 
     const maxR = Math.max(radius, 0.5);
@@ -349,6 +431,28 @@ export class Effects {
             s.vz *= 0.55;
           }
           sparkMats[i]!.opacity = clamp01(1 - t * 1.5);
+        }
+
+        // Secondary shockwave: faster + hotter, fades quicker than the main ring.
+        const s2r = 0.3 + t * maxR * 1.9;
+        shock2.scale.set(s2r, s2r, s2r);
+        shock2Mat.opacity = clamp01(0.9 * Math.max(0, 1 - t * 1.6));
+
+        // Debris: ballistic + tumble + ground bounce.
+        for (let i = 0; i < debris.length; i++) {
+          const d = debris[i]!;
+          d.mesh.position.x += d.vx * dt;
+          d.mesh.position.z += d.vz * dt;
+          d.vy -= 9.5 * dt;
+          d.mesh.position.y += d.vy * dt;
+          if (d.mesh.position.y < 0.08) {
+            d.mesh.position.y = 0.08;
+            d.vy *= -0.3;
+            d.vx *= 0.5;
+            d.vz *= 0.5;
+          }
+          d.mesh.rotation.x += d.rx * dt;
+          d.mesh.rotation.z += d.rz * dt;
         }
 
         handle.raf = requestAnimationFrame(tick);
@@ -450,18 +554,63 @@ export class Effects {
       ? Math.max(trueDist, EPS)
       : clamp(trueDist + MISS_EXTRA, 1, MAX_TRAVEL);
     const endPoint = muzzle.clone().addScaledVector(dir, travelDist);
-
     const travelMs = clamp((travelDist / cfg.speedUPerS) * 1000, cfg.minMs, cfg.maxMs);
+    const isPlasma = cfg === CONFIG.plasma;
 
-    // Tracer / bolt: a stretched cylinder oriented along the shot direction.
-    const tracer = new Mesh(
-      new CylinderGeometry(cfg.radius, cfg.radius, cfg.length, 8),
-      additiveMaterial(cfg.color, cfg.tracerOpacity),
-    );
-    tracer.quaternion.copy(new Quaternion().setFromUnitVectors(UP, dir));
+    // Orientation mapping + a stable perpendicular basis (cone / sparks /
+    // electricity spread). Allocated once per round, never per frame.
+    const orient = new Quaternion().setFromUnitVectors(UP, dir);
+    const right = new Vector3().crossVectors(dir, UP);
+    if (right.lengthSq() < 1e-6) right.set(1, 0, 0);
+    right.normalize();
+    const up = new Vector3().crossVectors(right, dir).normalize();
+
+    // --- Projectile body ---
+    // Plasma: a pulsing blob. Kinetics: a stretched cylinder tail.
+    const tracer = isPlasma
+      ? new Mesh(
+          new SphereGeometry(cfg.radius * 2.1, 12, 10),
+          additiveMaterial(cfg.color, cfg.tracerOpacity),
+        )
+      : new Mesh(
+          new CylinderGeometry(cfg.radius, cfg.radius, cfg.length, 8),
+          additiveMaterial(cfg.color, cfg.tracerOpacity),
+        );
+    if (!isPlasma) tracer.quaternion.copy(orient);
     tracer.visible = false;
 
-    // Muzzle flash at the origin.
+    // Kinetic only: bright leading head glow that rides the bolt's tip.
+    const head: Mesh | null = isPlasma
+      ? null
+      : new Mesh(new SphereGeometry(cfg.radius * 1.7, 8, 8), additiveMaterial(cfg.flashColor, 1));
+    if (head) head.visible = false;
+
+    // Plasma only: crackling radial electricity arcs around the blob.
+    let arcs: LineSegments | null = null;
+    let arcsPos: Float32BufferAttribute | null = null;
+    const arcDirs: Vector3[] = [];
+    if (isPlasma) {
+      const arcGeo = new BufferGeometry();
+      arcGeo.setAttribute("position", new Float32BufferAttribute(new Array(PLASMA_ARCS * 6).fill(0), 3));
+      arcsPos = arcGeo.getAttribute("position") as Float32BufferAttribute;
+      arcs = new LineSegments(arcGeo, additiveLineMaterial(cfg.flashColor, 0.95));
+      arcs.visible = false;
+      // Even 3D spread (Fibonacci sphere) so the arcs point all around the blob.
+      for (let i = 0; i < PLASMA_ARCS; i++) {
+        const gi = (i + 0.5) / PLASMA_ARCS;
+        const incl = Math.acos(1 - 2 * gi);
+        const azim = Math.PI * (1 + Math.sqrt(5)) * i;
+        arcDirs.push(
+          new Vector3(
+            Math.sin(incl) * Math.cos(azim),
+            Math.cos(incl),
+            Math.sin(incl) * Math.sin(azim),
+          ),
+        );
+      }
+    }
+
+    // --- Muzzle flash: core sphere + forward cone + ballistic sparks ---
     const muzzleFlash = new Mesh(
       new SphereGeometry(cfg.muzzleRadius, 8, 8),
       additiveMaterial(cfg.flashColor, 1),
@@ -469,7 +618,30 @@ export class Effects {
     muzzleFlash.position.copy(muzzle);
     muzzleFlash.visible = false;
 
-    // Impact spark where this round ends.
+    const cone = new Mesh(
+      new ConeGeometry(cfg.muzzleRadius * 1.5, MUZZLE_CONE_H, 10, 1, true),
+      additiveMaterial(cfg.flashColor, 0.9),
+    );
+    cone.quaternion.copy(orient);
+    cone.position.copy(muzzle).addScaledVector(dir, MUZZLE_CONE_H * 0.5);
+    cone.visible = false;
+
+    const sparks: { mesh: Mesh; vx: number; vy: number; vz: number }[] = [];
+    for (let i = 0; i < MUZZLE_SPARKS; i++) {
+      const spark = new Mesh(new SphereGeometry(0.03, 5, 4), additiveMaterial(cfg.flashColor, 1));
+      spark.position.copy(muzzle);
+      const spreadA = (((i * 37) % 9) / 9 - 0.5) * 2; // deterministic -1..1
+      const spreadB = (((i * 53) % 7) / 7 - 0.5) * 2;
+      const vf = 2.6 + ((i * 17) % 5) * 0.4; // forward-biased speed
+      const v = new Vector3()
+        .addScaledVector(dir, vf)
+        .addScaledVector(right, spreadA * 1.4)
+        .addScaledVector(up, spreadB * 1.4);
+      sparks.push({ mesh: spark, vx: v.x, vy: v.y, vz: v.z });
+      spark.visible = false;
+    }
+
+    // --- Impact spark where this round ends ---
     const impact = new Mesh(
       new SphereGeometry(cfg.impactRadius, 8, 8),
       additiveMaterial(round.hit ? cfg.flashColor : cfg.color, 1),
@@ -478,42 +650,117 @@ export class Effects {
     impact.visible = false;
 
     const flashMat = muzzleFlash.material as MeshBasicMaterial;
+    const coneMat = cone.material as MeshBasicMaterial;
+    const tracerMat = tracer.material as MeshBasicMaterial;
+    const headMat = head ? (head.material as MeshBasicMaterial) : null;
+    const arcsMat = arcs ? (arcs.material as LineBasicMaterial) : null;
     const impactMat = impact.material as MeshBasicMaterial;
+    const sparkMats = sparks.map((s) => s.mesh.material as MeshBasicMaterial);
     const scratch = new Vector3();
+    let prevLocal = 0;
+
+    const hideAll = (): void => {
+      tracer.visible = false;
+      if (head) head.visible = false;
+      if (arcs) arcs.visible = false;
+      muzzleFlash.visible = false;
+      cone.visible = false;
+      for (const s of sparks) s.mesh.visible = false;
+      impact.visible = false;
+    };
 
     const update = (elapsed: number): boolean => {
       const local = elapsed - startMs;
       if (local < 0) {
-        tracer.visible = false;
-        muzzleFlash.visible = false;
-        impact.visible = false;
+        hideAll();
+        prevLocal = 0;
         return false;
       }
+      const dt = Math.min(0.05, Math.max(0, local - prevLocal) / 1000);
+      prevLocal = local;
 
-      // Muzzle flash: bright pop that fades + swells briefly.
+      // MUZZLE: core sphere + forward cone (fade + swell together).
       if (local <= MUZZLE_FLASH_MS) {
         const f = clamp01(local / MUZZLE_FLASH_MS);
         muzzleFlash.visible = true;
         flashMat.opacity = 1 - f;
         muzzleFlash.scale.setScalar(0.6 + f * 0.9);
+        cone.visible = true;
+        coneMat.opacity = 0.9 * (1 - f);
+        cone.scale.setScalar(0.7 + f * 0.6);
       } else {
         muzzleFlash.visible = false;
+        cone.visible = false;
       }
 
-      // Tracer travels muzzle -> endpoint; leading tip reaches endPoint at p=1.
+      // Sparks: flung forward from the muzzle, fade + fall during/after the flash.
+      if (local <= MUZZLE_SPARK_MS) {
+        const sf = clamp01(local / MUZZLE_SPARK_MS);
+        for (let i = 0; i < sparks.length; i++) {
+          const s = sparks[i]!;
+          s.mesh.visible = true;
+          s.mesh.position.x += s.vx * dt;
+          s.mesh.position.y += s.vy * dt;
+          s.mesh.position.z += s.vz * dt;
+          s.vy -= MUZZLE_SPARK_GRAVITY * dt;
+          sparkMats[i]!.opacity = 1 - sf;
+        }
+      } else {
+        for (const s of sparks) s.mesh.visible = false;
+      }
+
+      // TRAVEL: bolt muzzle -> endpoint, leading tip arrives at p = 1.
       if (local < travelMs) {
         const p = clamp01(local / travelMs);
-        scratch
-          .copy(muzzle)
-          .addScaledVector(dir, p * travelDist - cfg.length * 0.5);
-        tracer.position.copy(scratch);
-        tracer.visible = true;
+        if (isPlasma) {
+          // Blob center rides the bearing; pulses in scale.
+          scratch.copy(muzzle).addScaledVector(dir, p * travelDist);
+          tracer.position.copy(scratch);
+          tracer.scale.setScalar(1 + Math.sin(local * PLASMA_PULSE_FREQ) * 0.18);
+          tracer.visible = true;
+          // Electricity: jitter the outer endpoint of each arc around the blob.
+          if (arcs && arcsPos && arcsMat) {
+            arcs.position.copy(scratch);
+            arcs.visible = true;
+            const arr = arcsPos.array as Float32Array;
+            const rIn = cfg.radius * 1.4;
+            for (let i = 0; i < PLASMA_ARCS; i++) {
+              const d = arcDirs[i]!;
+              const ix = i * 6;
+              const rOut =
+                cfg.radius * (2.3 + ((i * 41) % 5) * 0.16) +
+                Math.sin(local * 0.05 + i) * 0.12;
+              arr[ix] = d.x * rIn;
+              arr[ix + 1] = d.y * rIn;
+              arr[ix + 2] = d.z * rIn;
+              arr[ix + 3] = d.x * rOut + Math.sin(local * 0.07 + i * 1.7) * 0.05;
+              arr[ix + 4] = d.y * rOut + Math.cos(local * 0.065 + i * 2.3) * 0.05;
+              arr[ix + 5] = d.z * rOut + Math.sin(local * 0.08 + i * 3.1) * 0.05;
+            }
+            arcsPos.needsUpdate = true;
+            arcsMat.opacity = 0.95 * (1 - p * 0.3);
+          }
+        } else {
+          // Tail cylinder (fades as it travels) + bright head glow at the tip.
+          scratch.copy(muzzle).addScaledVector(dir, p * travelDist - cfg.length * 0.5);
+          tracer.position.copy(scratch);
+          tracer.visible = true;
+          tracerMat.opacity = cfg.tracerOpacity * (1 - p * 0.55);
+          if (head && headMat) {
+            scratch.copy(muzzle).addScaledVector(dir, p * travelDist);
+            head.position.copy(scratch);
+            head.visible = true;
+            headMat.opacity = 1 - p * 0.2;
+          }
+        }
         impact.visible = false;
         return false;
       }
       tracer.visible = false;
+      if (head) head.visible = false;
+      if (arcs) arcs.visible = false;
 
-      // Impact spark: expands and fades.
+      // IMPACT: spark expands and fades.
       const iLocal = local - travelMs;
       if (iLocal <= IMPACT_FLASH_MS) {
         const f = clamp01(iLocal / IMPACT_FLASH_MS);
@@ -527,7 +774,11 @@ export class Effects {
       return true;
     };
 
-    return { update, meshes: [tracer, muzzleFlash, impact] };
+    const meshes: Object3D[] = [tracer, muzzleFlash, cone, impact];
+    if (head) meshes.push(head);
+    if (arcs) meshes.push(arcs);
+    for (const s of sparks) meshes.push(s.mesh);
+    return { update, meshes };
   }
 }
 
