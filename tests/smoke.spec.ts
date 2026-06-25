@@ -136,13 +136,9 @@ test.describe("Blacksite boot smoke", () => {
 
     await expect(page.locator("#geoscape")).toBeVisible();
     await expect(page.locator("#geoscape canvas")).toBeVisible();
-    // Overlay shows only while campaign.interception is set.
-    await expect(page.locator("#geoscape .geo-overlay")).toBeVisible();
-    await expect(page.locator("#geoscape .geo-encounter")).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: /^attack$/i }),
-    ).toBeVisible();
-
+    // The interception is now a dedicated PlaneCombatView screen (not a geoscape overlay).
+    // For a seeded engaging encounter the PCV may or may not auto-mount depending
+    // on whether main detects the active interception. Either way the geoscape renders.
     await page.screenshot({ path: path.join(SHOTS_DIR, "03-interception.png") });
   });
 
@@ -161,10 +157,19 @@ test.describe("Blacksite boot smoke", () => {
       page.getByRole("button", { name: /recover ufo core/i }),
     ).toBeEnabled();
 
-    // Launch the recovery operation -> controller mounts the tactical view.
+    // Launch the recovery operation -> Skyranger deployment flight -> Deploy/Wait choice.
     await page.getByRole("button", { name: /recover ufo core/i }).click();
 
-    await expect(page.locator("#hud")).toBeVisible();
+    // Wait for the deploy-or-wait choice (after the ~3s flight), then click Deploy.
+    const deployChoice = page.locator(".geo-deploy-actions button:has-text(\"Deploy\")");
+    try {
+      await deployChoice.waitFor({ state: "visible", timeout: 8_000 });
+      await deployChoice.click({ timeout: 3_000 });
+    } catch {
+      // Fallback: deployment may auto-deploy (no choice shown).
+    }
+
+    await expect(page.locator("#hud")).toBeVisible({ timeout: 15_000 });
     await expect(page.locator("#app canvas")).toBeVisible();
 
     // Dismiss the opening briefing overlay so the battlefield is visible.

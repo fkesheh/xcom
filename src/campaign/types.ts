@@ -88,6 +88,10 @@ export interface Craft {
   damage: number;
   sorties: number;
   repairedAtHour?: number;
+  /** Current fuel (0..maxFuel). Consumed during flight; refills at base. */
+  fuel?: number;
+  /** Fuel capacity. */
+  maxFuel?: number;
 }
 
 /** A friendly craft in transit on the globe (patrol toward UFO, return to base). */

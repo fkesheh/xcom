@@ -58,6 +58,17 @@ const UFO_SPEED_SALT = 0x2b7e1516;
 /** Tracked UFOs drift in [min, min + range] degrees/hour — slow enough to stay regional. */
 const UFO_TRACKING_SPEED_MIN = 0.25;
 const UFO_TRACKING_SPEED_RANGE = 0.6;
+// --- Ship fuel --------------------------------------------------------------
+/** Fuel capacity assumed when a craft has no explicit maxFuel (legacy fixtures). */
+const CRAFT_MAX_FUEL_DEFAULT = 100;
+/** Fuel burned per great-circle degree a craft travels in flight. */
+const FUEL_BURN_PER_DEG = 0.5;
+/** At or below this fraction of maxFuel an airborne craft turns back for base. */
+const FUEL_RESERVE_FRACTION = 0.2;
+/** Fuel added per hour to a craft sitting repaired in the hangar. */
+const REFUEL_PER_HOUR = 10;
+/** Fuel burned by the engaging interceptor for each Attack round of a dogfight. */
+const ENCOUNTER_FUEL_PER_ATTACK = 5;
 
 export interface InterceptionForecast {
   contactId: string;
@@ -500,19 +511,22 @@ export function executeInterceptionAction(
     `${roundLabel}: interceptor hits ${contact.id} for ${interceptorDmg}; UFO returns ${ufoDmg}.`,
   ];
 
+  // Each Attack round burns fuel from the engaging interceptor.
+  const afterFuel = burnEngagingFuel(campaign);
+
   // A simultaneous kill is resolved in the interceptor's favor (UFO forced down).
   if (ufoHp <= 0) {
     const finalInterceptorDamage = 100 - interceptorHp;
-    const reportDamage = Math.max(0, finalInterceptorDamage - engagingDamage(campaign));
-    return applyInterceptionOutcome(campaign, contact, "crashed", finalInterceptorDamage, reportDamage);
+    const reportDamage = Math.max(0, finalInterceptorDamage - engagingDamage(afterFuel));
+    return applyInterceptionOutcome(afterFuel, contact, "crashed", finalInterceptorDamage, reportDamage);
   }
   if (interceptorHp <= 0) {
-    const reportDamage = Math.max(0, 100 - engagingDamage(campaign));
-    return applyInterceptionOutcome(campaign, contact, "escaped", 100, reportDamage);
+    const reportDamage = Math.max(0, 100 - engagingDamage(afterFuel));
+    return applyInterceptionOutcome(afterFuel, contact, "escaped", 100, reportDamage);
   }
 
   return {
-    ...campaign,
+    ...afterFuel,
     interception: {
       ...encounter,
       ufoHp,
@@ -899,6 +913,83 @@ function patrolTargetLost(contact: UfoContact | undefined): boolean {
   return contact.status !== "tracked" && contact.status !== "engaging";
 }
 
+function isReturnFlight(flight: ActiveFlight): boolean {
+  return flight.id.startsWith(RETURN_ID_PREFIX);
+}
+
+function craftMaxFuel(craft: Craft): number {
+  return typeof craft.maxFuel === "number" && craft.maxFuel > 0 ? craft.maxFuel : CRAFT_MAX_FUEL_DEFAULT;
+}
+
+/** Current fuel of a craft, defaulting to a full tank when unset (legacy fixtures). */
+function craftFuel(craft: Craft): number {
+  const maxFuel = craftMaxFuel(craft);
+  return typeof craft.fuel === "number" && Number.isFinite(craft.fuel)
+    ? Math.max(0, Math.min(maxFuel, craft.fuel))
+    : maxFuel;
+}
+
+function roundFuel(fuel: number): number {
+  return Math.round(fuel * 1000) / 1000;
+}
+
+/** Great-circle degrees a flight actually covers this tick, capped at the remaining leg. */
+function flightDistanceThisTick(flight: ActiveFlight, dt: number): number {
+  if (dt <= 0) return 0;
+  const route = greatCircleDistanceDeg(flight.fromLat, flight.fromLon, flight.toLat, flight.toLon);
+  if (route < 1e-9) return 0;
+  const remaining = route * Math.max(0, 1 - flight.progress);
+  return Math.max(0, Math.min(flight.speedDegPerHour * dt, remaining));
+}
+
+/** Subtracts per-craft flight fuel burn from a copy of the fleet. */
+function applyFlightFuelBurn(fleet: readonly Craft[], burnByCraft: ReadonlyMap<string, number>): Craft[] {
+  if (burnByCraft.size === 0) return [...fleet];
+  return fleet.map((craft) => {
+    const burn = burnByCraft.get(craft.id);
+    if (burn === undefined || burn <= 0) return craft;
+    const maxFuel = craftMaxFuel(craft);
+    return { ...craft, fuel: roundFuel(Math.max(0, craftFuel(craft) - burn)), maxFuel };
+  });
+}
+
+/** True when the craft's fuel has reached the reserve fraction of its capacity. */
+function craftFuelBelowReserve(fleet: readonly Craft[], craftId: string): boolean {
+  const craft = fleet.find((entry) => entry.id === craftId);
+  if (!craft) return false;
+  return craftFuel(craft) <= craftMaxFuel(craft) * FUEL_RESERVE_FRACTION;
+}
+
+/** Refuels every craft currently in the hangar (no active flight) for `dt` hours. */
+function refuelAtBase(fleet: readonly Craft[], flights: readonly ActiveFlight[], dt: number): Craft[] {
+  if (dt <= 0) return [...fleet];
+  const airborne = new Set(flights.map((flight) => flight.craftId));
+  let changed = false;
+  const refueled = fleet.map((craft) => {
+    if (airborne.has(craft.id)) return craft;
+    const maxFuel = craftMaxFuel(craft);
+    const fuel = roundFuel(Math.min(maxFuel, craftFuel(craft) + REFUEL_PER_HOUR * dt));
+    if (craft.fuel === fuel && craft.maxFuel === maxFuel) return craft;
+    changed = true;
+    return { ...craft, fuel, maxFuel };
+  });
+  return changed ? refueled : [...fleet];
+}
+
+/** Burns one Attack round's worth of fuel from the engaging interceptor. */
+function burnEngagingFuel(campaign: CampaignState): CampaignState {
+  const engaging = chooseInterceptor(campaign);
+  const fleet = campaign.fleet;
+  if (!engaging || !Array.isArray(fleet) || fleet.length === 0) return campaign;
+  const idx = fleet.findIndex((craft) => craft.id === engaging.id);
+  if (idx === -1) return campaign;
+  const craft = fleet[idx]!;
+  const maxFuel = craftMaxFuel(craft);
+  const fuel = roundFuel(Math.max(0, craftFuel(craft) - ENCOUNTER_FUEL_PER_ATTACK));
+  const nextFleet = [...fleet.slice(0, idx), { ...craft, fuel, maxFuel }, ...fleet.slice(idx + 1)];
+  return { ...campaign, fleet: nextFleet };
+}
+
 /**
  * Advances every active flight for `dt` hours and reconciles the patrol roster
  * against the current UFO contact — deterministic, no RNG:
@@ -909,15 +1000,22 @@ function patrolTargetLost(contact: UfoContact | undefined): boolean {
  *    back toward the base as a fresh return flight;
  *  - a ready, idle interceptor auto-launches a patrol toward any tracked UFO;
  *  - flights whose progress reaches 1 (arrived) are removed.
+ * Fuel: each flight burns FUEL_BURN_PER_DEG per degree traveled from its engaging
+ * craft; a craft that drops to the FUEL_RESERVE fraction turns back for base; and
+ * any craft with no active flight refuels in the hangar for the elapsed dt. Returns
+ * both the resolved flight roster and the fuel-updated fleet.
  */
 function manageActiveFlights(
   campaign: CampaignState,
   contact: UfoContact | undefined,
   dt: number,
-): ActiveFlight[] {
+): { flights: ActiveFlight[]; fleet: Craft[] } {
   const flights = campaign.activeFlights ?? [];
   const tracked = contact?.status === "tracked";
-  if (flights.length === 0 && !tracked) return [];
+  const baseFleet = campaign.fleet ?? [];
+  if (flights.length === 0 && !tracked) {
+    return { flights: [], fleet: refuelAtBase(baseFleet, [], dt) };
+  }
 
   // 1. Re-aim existing patrols at the tracked UFO's latest position (homing).
   const reAimed = flights.map((flight) =>
@@ -934,8 +1032,17 @@ function manageActiveFlights(
     }
   }
 
-  // 3. Advance every flight along its route by dt (the freshly launched one too).
-  const advanced = withSpawn.map((flight) => advanceFlightProgress(flight, dt));
+  // 3. Advance every flight along its route by dt and burn fuel from each engaging
+  //    craft proportional to the great-circle distance it covered this tick.
+  const burnByCraft = new Map<string, number>();
+  const advanced = withSpawn.map((flight) => {
+    const traveled = flightDistanceThisTick(flight, dt);
+    if (traveled > 0) {
+      burnByCraft.set(flight.craftId, (burnByCraft.get(flight.craftId) ?? 0) + traveled * FUEL_BURN_PER_DEG);
+    }
+    return advanceFlightProgress(flight, dt);
+  });
+  const burnedFleet = applyFlightFuelBurn(baseFleet, burnByCraft);
 
   // 4. Patrols that have caught a still-tracked UFO shadow it (clamp below arrival).
   const shadowed = advanced.map((flight) =>
@@ -944,16 +1051,22 @@ function manageActiveFlights(
       : flight,
   );
 
-  // 5. Patrols whose UFO is gone convert into return-to-base flights.
+  // 5. Patrols whose UFO is gone OR whose craft is low on fuel turn for home.
   const converted: ActiveFlight[] = [];
   const kept = shadowed.flatMap((flight) => {
-    if (isPatrolFlight(flight) && patrolTargetLost(contact)) {
+    const outOfFuel = !isReturnFlight(flight) && craftFuelBelowReserve(burnedFleet, flight.craftId);
+    if (isPatrolFlight(flight) && (patrolTargetLost(contact) || outOfFuel)) {
       converted.push(makeReturnFlight(flight, campaign));
       return [];
     }
     return [flight];
   });
-  return [...kept, ...converted].filter((flight) => flight.progress < 1);
+  const finalFlights = [...kept, ...converted].filter((flight) => flight.progress < 1);
+
+  // 6. Refuel crafts sitting in the hangar (no active flight) for the elapsed dt.
+  const finalFleet = refuelAtBase(burnedFleet, finalFlights, dt);
+
+  return { flights: finalFlights, fleet: finalFleet };
 }
 
 export function advanceGeoscape(
@@ -1000,13 +1113,14 @@ export function advanceGeoscape(
     clock = { ...clock, lastContactHour: clock.elapsedHours };
   }
 
-  const activeFlights = manageActiveFlights(nextCampaign, contact, dt);
+  const { flights: activeFlights, fleet: advancedFleet } = manageActiveFlights(nextCampaign, contact, dt);
   const composed = repairInterceptor(completeFinishedConstruction(completeFinishedManufacturing(recoverWoundedSoldiers(completeFinishedResearch({
     ...nextCampaign,
     clock,
     strategic,
     ufoContact: contact,
     activeFlights,
+    fleet: advancedFleet,
   })))));
   return restockMarket(composed, Math.max(0, Math.floor(hours)));
 }

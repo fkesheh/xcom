@@ -62,9 +62,9 @@ export const STARTING_INTERCEPTOR: InterceptorState = {
  * Mirrors the original game's starting complement.
  */
 export const STARTING_FLEET: readonly Craft[] = [
-  { id: "int-1", kind: "interceptor", name: "Raptor-1", damage: 0, sorties: 0 },
-  { id: "int-2", kind: "interceptor", name: "Raptor-2", damage: 0, sorties: 0 },
-  { id: "sky-1", kind: "transport", name: "Skyranger", damage: 0, sorties: 0 },
+  { id: "int-1", kind: "interceptor", name: "Raptor-1", damage: 0, sorties: 0, fuel: 100, maxFuel: 100 },
+  { id: "int-2", kind: "interceptor", name: "Raptor-2", damage: 0, sorties: 0, fuel: 100, maxFuel: 100 },
+  { id: "sky-1", kind: "transport", name: "Skyranger", damage: 0, sorties: 0, fuel: 100, maxFuel: 100 },
 ];
 
 /** Craft id synthesized for the legacy single-interceptor field when no fleet exists. */
@@ -90,6 +90,8 @@ function effectiveFleet(campaign: CampaignState): Craft[] {
       name: "Interceptor",
       damage: legacy.damage,
       sorties: legacy.sorties,
+      fuel: 100,
+      maxFuel: 100,
       ...(legacy.repairedAtHour !== undefined ? { repairedAtHour: legacy.repairedAtHour } : {}),
     },
   ];
@@ -145,6 +147,8 @@ export function damageCraft(campaign: CampaignState, craftId: string, damage: nu
       damage: totalDamage,
       sorties,
       repairedAtHour,
+      fuel: craft.fuel,
+      maxFuel: craft.maxFuel,
     };
     const fleet = [...campaign.fleet.slice(0, idx), updated, ...campaign.fleet.slice(idx + 1)];
     return {
@@ -186,6 +190,8 @@ export function repairFleet(campaign: CampaignState, currentHour?: number): Camp
           name: craft.name,
           damage: 0,
           sorties: craft.sorties,
+          fuel: craft.fuel,
+          maxFuel: craft.maxFuel,
         } satisfies Craft;
       }
       return craft;
@@ -1930,9 +1936,15 @@ function normalizeCraft(value: unknown, clock: CampaignClock): Craft | undefined
   const sorties = typeof maybe.sorties === "number" ? Math.max(0, Math.floor(maybe.sorties)) : 0;
   const repairedAtHour =
     typeof maybe.repairedAtHour === "number" ? Math.max(0, Math.floor(maybe.repairedAtHour)) : undefined;
+  // Fuel capacity defaults to 100; a missing fuel level is treated as a full tank.
+  const maxFuel = typeof maybe.maxFuel === "number" && maybe.maxFuel > 0 ? Math.floor(maybe.maxFuel) : 100;
+  const fuel =
+    typeof maybe.fuel === "number" && Number.isFinite(maybe.fuel)
+      ? Math.max(0, Math.min(maxFuel, maybe.fuel))
+      : maxFuel;
   // A repair whose scheduled time has already passed is treated as complete.
   if (repairedAtHour !== undefined && repairedAtHour <= clock.elapsedHours) {
-    return { id: maybe.id, kind: maybe.kind, name: maybe.name, damage: 0, sorties };
+    return { id: maybe.id, kind: maybe.kind, name: maybe.name, damage: 0, sorties, fuel, maxFuel };
   }
   return {
     id: maybe.id,
@@ -1940,6 +1952,8 @@ function normalizeCraft(value: unknown, clock: CampaignClock): Craft | undefined
     name: maybe.name,
     damage,
     sorties,
+    fuel,
+    maxFuel,
     ...(repairedAtHour !== undefined ? { repairedAtHour } : {}),
   };
 }
@@ -1955,6 +1969,8 @@ function migrateLegacyFleet(interceptor: InterceptorState): Craft[] {
     name: "Raptor-1",
     damage: interceptor.damage,
     sorties: interceptor.sorties,
+    fuel: 100,
+    maxFuel: 100,
     ...(interceptor.repairedAtHour !== undefined ? { repairedAtHour: interceptor.repairedAtHour } : {}),
   };
   return [int1, { ...STARTING_FLEET[1]! }, { ...STARTING_FLEET[2]! }];

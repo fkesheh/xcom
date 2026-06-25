@@ -77,6 +77,7 @@ import { Sfx } from "./audio";
 import type { ProjectileKind } from "./effects";
 import { BaseView } from "./baseView";
 import { GeoscapeView } from "./geoscape";
+import { PlaneCombatView } from "./planeCombatView";
 import { Hud, type HudDebrief, type HudHover, type HudSoldierDetail } from "./hud";
 
 function urlSeed(): number | null {
@@ -106,6 +107,8 @@ let geoscape: GeoscapeView | null = null;
 let baseView: BaseView | null = null;
 /** Teardown for an active tactical view, invoked before mounting any other screen. */
 let tacticalCleanup: (() => void) | null = null;
+/** Active interception dogfight screen; mounted in place of the geoscape during an encounter. */
+let planeCombat: PlaneCombatView | null = null;
 
 /**
  * In-memory source of truth for the live campaign. The geoscape's flowing-time
@@ -205,13 +208,14 @@ function buildGeoscapeCallbacks(campaign: CampaignState | null) {
       if (!currentCampaign) return;
       currentCampaign = startInterceptionEncounter(currentCampaign);
       debouncedSave(currentCampaign);
-      geoscape?.update(currentCampaign);
-    },
-    onInterceptionAction: (action: InterceptionAction) => {
-      if (!currentCampaign) return;
-      currentCampaign = executeInterceptionAction(currentCampaign, action);
-      debouncedSave(currentCampaign);
-      geoscape?.update(currentCampaign);
+      // startInterceptionEncounter no-ops (leaves `interception` unset) unless the
+      // contact is a tracked crashSite with a ready interceptor; in that case stay
+      // on the globe. Otherwise hand the live encounter to the dogfight screen.
+      if (!currentCampaign.interception) {
+        geoscape?.update(currentCampaign);
+        return;
+      }
+      mountPlaneCombat(currentCampaign);
     },
     onResetCampaign: () => {
       // Flush before clearing so a pending debounced save can't resurrect it.
@@ -231,6 +235,33 @@ function mountGeoscape(campaign: CampaignState | null): GeoscapeView {
   return geoscape;
 }
 
+/**
+ * Dispose the geoscape and mount the dedicated interception dogfight screen for an
+ * active encounter. The view's onAction advances the encounter in place and
+ * re-renders; onResolve fires once the encounter clears (UFO down, interceptor
+ * lost, or disengage), tearing the screen down and returning to the globe.
+ */
+function mountPlaneCombat(campaign: CampaignState): void {
+  geoscape?.dispose();
+  geoscape = null;
+  planeCombat?.dispose();
+  planeCombat = new PlaneCombatView({
+    campaign,
+    onAction: (action: InterceptionAction) => {
+      if (!currentCampaign) return;
+      currentCampaign = executeInterceptionAction(currentCampaign, action);
+      debouncedSave(currentCampaign);
+      planeCombat?.update(currentCampaign);
+    },
+    onResolve: () => {
+      planeCombat?.dispose();
+      planeCombat = null;
+      showGeoscape();
+    },
+  });
+  planeCombat.mount(appRoot);
+}
+
 function showGeoscape(): void {
   flushSave();
   // Seed the in-memory campaign once from storage; every geoscape callback then
@@ -240,6 +271,8 @@ function showGeoscape(): void {
   disposeTacticalIfExists();
   baseView?.dispose();
   baseView = null;
+  planeCombat?.dispose();
+  planeCombat = null;
   mountGeoscape(currentCampaign);
 }
 
@@ -254,6 +287,8 @@ function showBase(campaign: CampaignState): void {
   geoscape?.dispose();
   geoscape = null;
   baseView?.dispose();
+  planeCombat?.dispose();
+  planeCombat = null;
   baseView = new BaseView({
     campaign,
     operation,
@@ -377,6 +412,8 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
   geoscape = null;
   baseView?.dispose();
   baseView = null;
+  planeCombat?.dispose();
+  planeCombat = null;
   const SEED = operation.missionSeed;
   // Map the campaign mission type onto the sim's objective + civilian spawn so
   // each mission type is actually playable: a terror site builds a rescue

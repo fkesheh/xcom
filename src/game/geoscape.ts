@@ -100,8 +100,6 @@ const BURST_PARTICLES = 14;
 const UFO_TRAIL_MAX = 48;
 /** Minimum degrees between two trail samples (avoids a dense blob when the UFO creeps). */
 const UFO_TRAIL_MIN_DEG = 0.4;
-/** Per-frame lerp factor for the chase-camera follow (higher = tighter, snappier). */
-const CHASE_CAMERA_LERP = 0.06;
 /** Max sampled points of an in-flight craft's contrail (one per refresh while flying). */
 const FLIGHT_TRAIL_MAX = 24;
 /** Min degrees between two flight-trail samples (avoids a dense blob when creeping). */
@@ -115,14 +113,6 @@ const FX_SHAKE_MS = 240;
 /** Camera shake magnitude (world units) at hit onset; decays over FX_SHAKE_MS. */
 const FX_SHAKE_MAGNITUDE = 0.03;
 
-/** Cinematic dogfight camera distance from the engagement midpoint (close-up). */
-const CINE_CAMERA_DISTANCE = 3.3;
-/** Default globe-view camera distance (eased back to this after a dogfight resolves). */
-const GLOBE_CAMERA_DISTANCE = 4.35;
-/** Lerp factor for the cinematic camera distance pull (higher = snappier zoom). */
-const CINE_CAMERA_LERP = 0.07;
-/** Ms the camera keeps easing back to the globe view after an engagement resolves. */
-const CINE_RELEASE_MS = 900;
 /** Contrail particles per craft (ring buffer; no per-frame allocation). */
 const CONTRAIL_MAX = 36;
 /** Particles in the dogfight explosion burst (larger than the standard impact burst). */
@@ -133,8 +123,6 @@ const VOLLEY_ROUNDS = 3;
 const VOLLEY_ROUND_MS = 65;
 /** Ms the interceptor "taking fire" threat badge + screen flash stays lit. */
 const THREAT_FLASH_MS = 420;
-/** Scale boost applied to the interceptor + UFO markers during a cinematic dogfight. */
-const CINE_CRAFT_BOOST = 1.7;
 
 interface SpeedOption {
   speed: number;
@@ -519,29 +507,6 @@ const CSS = `
   background: rgba(2,8,14,.62);
   backdrop-filter: blur(4px);
 }
-#geoscape .geo-encounter {
-  display: flex;
-  flex-direction: column;
-  width: min(520px, calc(100vw - 48px));
-  max-height: calc(100vh - 48px);
-  padding: 18px;
-  border: 1px solid rgba(251,113,133,.5);
-  border-radius: 12px;
-  background: linear-gradient(145deg, rgba(20,12,16,.96), rgba(4,8,12,.97));
-  box-shadow: 0 30px 90px rgba(0,0,0,.55);
-}
-#geoscape .geo-encounter .eyebrow { color: #fb7185; }
-#geoscape .geo-encounter h2 { color: #ffe4e6; }
-#geoscape .geo-encounter-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
-  margin: 10px 0 4px;
-  color: #fda4af;
-  font: 700 10px/1 ui-monospace, monospace;
-  letter-spacing: .12em;
-  text-transform: uppercase;
-}
 #geoscape .geo-bar { margin: 8px 0; }
 #geoscape .geo-bar-label {
   display: flex;
@@ -566,22 +531,6 @@ const CSS = `
 }
 #geoscape .geo-bar-fill.ufo { background: linear-gradient(90deg, #fb7185, #f43f5e); }
 #geoscape .geo-bar-fill.interceptor { background: linear-gradient(90deg, #67e8f9, #22d3ee); }
-#geoscape .geo-encounter-log {
-  flex: 1;
-  min-height: 80px;
-  max-height: 168px;
-  margin: 10px 0;
-  padding: 8px 10px;
-  overflow-y: auto;
-  border: 1px solid rgba(255,255,255,.08);
-  border-radius: 7px;
-  background: rgba(0,0,0,.3);
-  color: #a8c0d0;
-  font: 600 10px/1.5 ui-monospace, monospace;
-}
-#geoscape .geo-encounter-log p { margin: 0 0 4px; color: #a8c0d0; }
-#geoscape .geo-encounter-actions { display: flex; gap: 8px; }
-#geoscape .geo-encounter-actions button { flex: 1; }
 #geoscape .geo-overlay-host {
   position: absolute;
   inset: 0;
@@ -698,38 +647,8 @@ const CSS = `
 #geoscape .geo-deploy-panel h2 { color: #e8fbff; margin-bottom: 6px; }
 #geoscape .geo-deploy-panel p { color: #a9c8d7; font-size: 11px; }
 #geoscape .geo-deploy-panel .geo-bar { margin: 12px 0 0; text-align: left; }
-#geoscape .geo-overlay.geo-dogfight {
-  background: none;
-  backdrop-filter: none;
-  align-items: flex-start;
-  justify-content: flex-start;
-  padding: 0;
-  pointer-events: none;
-}
-#geoscape .geo-overlay.geo-dogfight .geo-encounter {
-  pointer-events: auto;
-  margin: max(16px, env(safe-area-inset-top)) auto 0;
-  width: min(640px, calc(100vw - 32px));
-  max-height: none;
-  border-color: rgba(103,232,249,.55);
-  background: linear-gradient(145deg, rgba(12,20,26,.82), rgba(3,8,12,.86));
-}
-#geoscape .geo-overlay.geo-dogfight .geo-encounter .eyebrow { color: #67e8f9; }
-#geoscape .geo-overlay.geo-dogfight .geo-encounter h2 { color: #e8fbff; }
-#geoscape .geo-dogfight-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin: 8px 0 2px;
-  color: #93c4d4;
-  font: 700 10px/1 ui-monospace, monospace;
-  letter-spacing: .12em;
-  text-transform: uppercase;
-}
-#geoscape .geo-dogfight-meta b { color: #e8fbff; font-weight: 800; }
-#geoscape .geo-bar-lg .geo-bar-track { height: 16px; }
-#geoscape .geo-bar-lg .geo-bar-label { font-size: 10px; }
-#geoscape .geo-bar-lg .geo-bar-label b { color: #e8fbff; font-weight: 800; }
+#geoscape .geo-deploy-actions { display: flex; gap: 8px; margin-top: 14px; }
+#geoscape .geo-deploy-actions button { flex: 1; }
 #geoscape .geo-threat-tag {
   display: inline-flex;
   align-items: center;
@@ -770,8 +689,6 @@ const CSS = `
   #geoscape h1 { font-size: 30px; }
   #geoscape .geo-status { grid-template-columns: 1fr; }
   #geoscape .geo-hint { display: none; }
-  #geoscape .geo-encounter { max-height: calc(100vh - 24px); }
-  #geoscape .geo-encounter-log { max-height: 120px; }
   #geoscape .geo-actions { flex-wrap: wrap; }
   #geoscape .geo-speed-btn { min-height: 36px; }
 }
@@ -1161,7 +1078,6 @@ export class GeoscapeView {
   private readonly ufoTrailLine: Line;
   private selectedBase: BaseLocation | null;
   private selectedDifficulty: DifficultyLevel = "veteran";
-  private encounterLog: HTMLElement | null = null;
   private raf = 0;
   private down: { x: number; y: number } | null = null;
   private disposed = false;
@@ -1241,11 +1157,6 @@ export class GeoscapeView {
   /** Slowly rotating translucent cloud shell. */
   private cloudMesh: Mesh | null = null;
 
-  // --- Cinematic dogfight camera (zoom-in on engage, ease out on resolve) ---
-  private cineMode = false;
-  private cineReleaseUntilMs = 0;
-  private readonly globeCenter = new Vector3(0, 0, 0);
-
   // --- Thruster contrails behind the interceptor + UFO during an engagement ---
   private interceptorContrail!: Points;
   private ufoContrail!: Points;
@@ -1267,19 +1178,24 @@ export class GeoscapeView {
   private threatFlashTimer: number | undefined;
 
   // --- Skyranger deployment flight (staged on mission launch) ---
+  /** Inbound: the transport is animating from base to the mission site. */
   private deploying = false;
+  /** Arrived: a Deploy/Wait choice overlay is open (time frozen until the pick). */
+  private deployArrived = false;
+  /** Wait chosen: the transport loiters at the site, time flows, deploy on demand. */
+  private loitering = false;
+  /** Time-flow speed before the deployment pause; restored on Wait to resume flow. */
+  private preDeploySpeed = 0;
   private deploymentFlight: {
     baseN: Vector3;
     siteN: Vector3;
     region: string;
     craftName: string;
     startMs: number;
-    arrived: boolean;
-    onArrived: () => void;
+    onDeployed: () => void;
   } | null = null;
   private readonly skyrangerMarker = new Group();
   private deploymentLine!: Line;
-  private deploymentFill: HTMLDivElement | null = null;
 
   // --- Active-flight markers (interceptors/transports flying across the globe) ---
   /** Pooled marker + trail per active flight, keyed by flight id (built/disposed on lifecycle). */
@@ -1364,8 +1280,6 @@ export class GeoscapeView {
     this.renderer.domElement.addEventListener("pointerup", this.onPointerUp);
     window.addEventListener("resize", this.resize);
     this.resize();
-    // Surface the most recent engagement log line (the panel is rebuilt per action).
-    if (this.encounterLog) this.encounterLog.scrollTop = this.encounterLog.scrollHeight;
     this.frame();
   }
 
@@ -1385,6 +1299,8 @@ export class GeoscapeView {
     // Drop any in-flight deployment callback/state so a torn-down view can't fire it.
     this.deploymentFlight = null;
     this.deploying = false;
+    this.deployArrived = false;
+    this.loitering = false;
     this.damageLayer = null;
   }
 
@@ -1888,9 +1804,6 @@ export class GeoscapeView {
    * or rebuilds the three.js scene — only moves markers and refreshes DOM text.
    */
   private refresh(): void {
-    // Detect HP deltas before refreshInterceptor updates wasEngaging, so a
-    // resolving encounter still reads the previous engaging state.
-    this.detectEncounterDamage();
     this.notifyCampaignEvent();
     this.refreshForcedPause();
     this.refreshStats();
@@ -1901,7 +1814,6 @@ export class GeoscapeView {
     this.refreshMarkers();
     this.refreshInterceptor();
     this.refreshSpeedState();
-    if (this.encounterLog) this.encounterLog.scrollTop = this.encounterLog.scrollHeight;
   }
 
   /** True while an interactive interception encounter overlay is open. */
@@ -1923,9 +1835,9 @@ export class GeoscapeView {
     lastEventSnapshot = snapshot;
   }
 
-  /** Force pause whenever the overlay is up or the campaign is no longer active. */
+  /** Force pause whenever an overlay is up or the campaign is no longer active. */
   private refreshForcedPause(): void {
-    if (this.deploying && this.timeSpeed !== 0) this.setTimeSpeed(0);
+    if ((this.deploying || this.deployArrived) && this.timeSpeed !== 0) this.setTimeSpeed(0);
     else if (this.isEngaging() && this.timeSpeed !== 0) this.setTimeSpeed(0);
     else if (this.campaign && this.campaign.strategic.status !== "active" && this.timeSpeed !== 0) {
       this.setTimeSpeed(0);
@@ -1946,7 +1858,8 @@ export class GeoscapeView {
       !!this.campaign &&
       this.campaign.strategic.status === "active" &&
       !this.isEngaging() &&
-      !this.deploying;
+      !this.deploying &&
+      !this.deployArrived;
     for (const btn of this.speedButtons) {
       const speed = Number(btn.dataset.speed);
       btn.setAttribute("aria-pressed", String(this.timeSpeed === speed));
@@ -2040,6 +1953,15 @@ export class GeoscapeView {
       this.speedButtons.push(btn);
     }
     this.actionsSlot.append(speedGroup);
+    if (this.loitering) {
+      // A Skyranger is on station: deploy on demand instead of offering a fresh
+      // launch/intercept (the squad is already inbound to this site).
+      const deploy = el("button", "primary");
+      deploy.textContent = "Deploy squad";
+      deploy.addEventListener("click", () => this.deploySquad());
+      this.actionsSlot.append(deploy);
+      return;
+    }
     if (c.ufoContact?.status === "tracked") {
       const intercept = el("button", "primary");
       const forecast = interceptionForecast(c);
@@ -2058,12 +1980,12 @@ export class GeoscapeView {
   }
 
   private refreshOverlay(): void {
-    const encounter = this.buildInterceptionOverlay();
-    const deploy = this.deploying ? this.buildDeploymentOverlay() : null;
-    this.overlaySlot.replaceChildren(
-      ...(encounter ? [encounter] : []),
-      ...(deploy ? [deploy] : []),
-    );
+    const overlay = this.deploying
+      ? this.buildDeploymentOverlay()
+      : this.deployArrived
+        ? this.buildDeployChoiceOverlay()
+        : null;
+    this.overlaySlot.replaceChildren(...(overlay ? [overlay] : []));
   }
 
   /** Reposition the base + UFO markers; rebuild the UFO marker when its mission type changes. */
@@ -2381,51 +2303,6 @@ export class GeoscapeView {
     );
   }
 
-  /**
-   * Cinematic dogfight camera. While an interception is live it frames the
-   * interceptor↔UFO midpoint and zooms the rig to a close-up distance (the globe
-   * becomes a backdrop behind the action). The camera direction is preserved
-   * (only the target + distance move) so it never fights the player's orbit
-   * angle. On resolve it eases back to the globe-center / default distance over
-   * CINE_RELEASE_MS, then releases the rig to free-orbit again.
-   */
-  private updateChaseCamera(): void {
-    const engaging = this.isEngaging();
-    if (engaging && this.interceptorMarker.visible && this.ufoMarker.visible) {
-      this.cineMode = true;
-      this.cineReleaseUntilMs = 0;
-      this.interceptorMarker.getWorldPosition(this.scratchA);
-      this.ufoMarker.getWorldPosition(this.scratchB);
-      this.scratchC.copy(this.scratchA).add(this.scratchB).multiplyScalar(0.5); // engagement midpoint
-      this.controls.target.lerp(this.scratchC, CHASE_CAMERA_LERP);
-      this.applyCinematicDistance(CINE_CAMERA_DISTANCE);
-      return;
-    }
-    if (this.cineMode) {
-      // Just resolved: ease the rig back to the globe view, then release.
-      if (this.cineReleaseUntilMs === 0) this.cineReleaseUntilMs = performance.now() + CINE_RELEASE_MS;
-      if (performance.now() < this.cineReleaseUntilMs) {
-        this.controls.target.lerp(this.globeCenter, CHASE_CAMERA_LERP);
-        this.applyCinematicDistance(GLOBE_CAMERA_DISTANCE);
-      } else {
-        this.cineMode = false;
-        this.cineReleaseUntilMs = 0;
-      }
-    }
-  }
-
-  /**
-   * Pull the camera along its current view direction toward `desired` distance
-   * from the orbit target (lerped so the zoom reads as a smooth dolly). Preserves
-   * the player's orbit angle; only the distance changes.
-   */
-  private applyCinematicDistance(desired: number): void {
-    this.scratchA.copy(this.camera.position).sub(this.controls.target);
-    if (this.scratchA.lengthSq() < 1e-8) return;
-    this.scratchA.setLength(desired).add(this.controls.target);
-    this.camera.position.lerp(this.scratchA, CINE_CAMERA_LERP);
-  }
-
   /** Drive the interceptor along base->UFO: launch flight, then range-driven closing; pulse + orient it. */
   private animateInterceptor(now: number): void {
     const route = this.interceptorRoute;
@@ -2452,8 +2329,7 @@ export class GeoscapeView {
       posN, // z = up
     );
     this.interceptorMarker.quaternion.setFromRotationMatrix(this.scratchBasis);
-    // Enlarged during the cinematic dogfight for screen presence.
-    this.interceptorMarker.scale.setScalar((1 + Math.sin(now * 0.012) * 0.18) * CINE_CRAFT_BOOST);
+    this.interceptorMarker.scale.setScalar(1 + Math.sin(now * 0.012) * 0.18);
   }
 
   /** Crisp DOM layer above the canvas for floating "-N" damage numbers. */
@@ -2711,6 +2587,7 @@ export class GeoscapeView {
     if (
       speed <= 0 ||
       this.deploying ||
+      this.deployArrived ||
       !this.campaign ||
       this.campaign.strategic.status !== "active" ||
       this.isEngaging()
@@ -3019,15 +2896,17 @@ export class GeoscapeView {
 
   /**
    * Stage the Skyranger deployment flight: fly a transport marker from the base to
-   * the mission site along a great-circle arc over DEPLOYMENT_FLIGHT_MS, show a
-   * "Deploying squad" overlay + trajectory line, then invoke onArrived (which the
-   * controller routes into the battlescape). Pauses time flow for the duration.
+   * the mission site along a great-circle arc over DEPLOYMENT_FLIGHT_MS with a
+   * "Skyranger en route" overlay + trajectory line. On arrival the view shows a
+   * Deploy/Wait choice: Deploy invokes `onDeployed` (-> battlescape); Wait drops
+   * into a loiter so the player can deploy later (e.g. at dawn). Pauses time flow
+   * for the inbound flight + the choice.
    */
-  playDeploymentFlight(campaign: CampaignState, onArrived: () => void): void {
+  playDeploymentFlight(campaign: CampaignState, onDeployed: () => void): void {
     if (this.disposed) return;
     const contact = campaign.ufoContact;
     if (!contact) {
-      onArrived();
+      onDeployed();
       return;
     }
     const baseN = latLonToVector(campaign.base.lat, campaign.base.lon, 1).normalize();
@@ -3035,6 +2914,9 @@ export class GeoscapeView {
     this.fillDeploymentTrajectory(baseN, siteN);
     this.deploymentLine.visible = true;
     this.skyrangerMarker.visible = true;
+    this.deployArrived = false;
+    this.loitering = false;
+    this.preDeploySpeed = this.timeSpeed;
     this.deploying = true;
     this.setTimeSpeed(0);
     this.deploymentFlight = {
@@ -3043,27 +2925,41 @@ export class GeoscapeView {
       region: contact.region,
       craftName: transportCraft(campaign)?.name ?? "Skyranger",
       startMs: performance.now(),
-      arrived: false,
-      onArrived,
+      onDeployed,
     };
     this.refreshOverlay();
   }
 
-  /** Advance the Skyranger along its arc; on arrival, hand off to onArrived once. */
+  /**
+   * Advance the Skyranger along its arc. On arrival, surface a Deploy/Wait choice
+   * (Deploy -> onDeployed -> battlescape; Wait -> loiter at the site with time
+   * flowing). While loitering the transport holds at the site and a "Deploy squad"
+   * button is offered from the actions panel; if the contact expires meanwhile the
+   * loiter is abandoned back to normal time flow.
+   */
   private updateDeployment(now: number): void {
     const dep = this.deploymentFlight;
-    if (!dep || !this.deploying) return;
-    const t = Math.min(1, (now - dep.startMs) / DEPLOYMENT_FLIGHT_MS);
-    slerpUnit(dep.baseN, dep.siteN, t, this.scratchA); // unit surface direction
-    this.skyrangerMarker.position.copy(this.scratchA).multiplyScalar(EARTH_RADIUS + 0.16);
-    this.orientMarker(this.skyrangerMarker, this.scratchA, dep.siteN);
-    this.skyrangerMarker.scale.setScalar(1 + Math.sin(now * 0.01) * 0.12);
-    if (this.deploymentFill) this.deploymentFill.style.width = `${Math.round(t * 100)}%`;
-    if (t >= 1 && !dep.arrived) {
-      dep.arrived = true;
-      this.deploying = false;
-      this.deploymentFlight = null;
-      dep.onArrived(); // -> startTactical -> disposes this view mid-frame
+    if (dep && this.deploying) {
+      const t = Math.min(1, (now - dep.startMs) / DEPLOYMENT_FLIGHT_MS);
+      slerpUnit(dep.baseN, dep.siteN, t, this.scratchA); // unit surface direction
+      this.skyrangerMarker.position.copy(this.scratchA).multiplyScalar(EARTH_RADIUS + 0.16);
+      this.orientMarker(this.skyrangerMarker, this.scratchA, dep.siteN);
+      this.skyrangerMarker.scale.setScalar(1 + Math.sin(now * 0.01) * 0.12);
+      if (t >= 1) {
+        this.deploying = false;
+        this.showDeployChoice();
+      }
+      return;
+    }
+    if (dep && this.loitering) {
+      // The site vanished while loitering (contact expired): abandon the loiter.
+      if (!this.campaign?.ufoContact) {
+        this.cancelLoiter();
+        return;
+      }
+      // Hold at the site with a gentle hover; time flows so fuel burns / dawn breaks.
+      this.skyrangerMarker.position.copy(dep.siteN).multiplyScalar(EARTH_RADIUS + 0.16);
+      this.skyrangerMarker.scale.setScalar(1 + Math.sin(now * 0.008) * 0.1);
     }
   }
 
@@ -3076,15 +2972,8 @@ export class GeoscapeView {
     heading.textContent = "Deploying squad";
     const copy = el("p");
     copy.textContent = `Inbound to ${this.deploymentFlight?.region ?? "mission site"}. Stand by for landing.`;
-    const bar = el("div", "geo-bar");
-    const track = el("div", "geo-bar-track");
-    const fill = el("div", "geo-bar-fill interceptor");
-    fill.style.width = "0%";
-    track.append(fill);
-    bar.append(track);
-    panel.append(eye, heading, copy, bar);
+    panel.append(eye, heading, copy);
     overlay.append(panel);
-    this.deploymentFill = fill;
     return overlay;
   }
 
@@ -3235,82 +3124,67 @@ export class GeoscapeView {
   }
 
   /**
-   * Cinematic dogfight HUD: a translucent top panel (no full-screen dimming, so the
-   * 3D engagement stays visible behind it) with large interceptor + UFO HP bars, a
-   * range / round / threat readout, a scrolling engagement log, and the
-   * Close / Attack / Disengage actions. Rendered only while an encounter is live.
+   * Deploy/Wait choice shown when the Skyranger reaches the mission site. Deploy
+   * hands off to `onDeployed` (-> battlescape at the current time-of-day); Wait
+   * dismisses the choice and drops into a loiter so the player can deploy later
+   * (e.g. at dawn) while time flows and fuel burns.
    */
-  private buildInterceptionOverlay(): HTMLElement | null {
-    const encounter = this.campaign?.interception;
-    if (!encounter) return null;
-    const overlay = el("div", "geo-overlay geo-dogfight");
-    const panel = el("div", "geo-encounter");
+  private buildDeployChoiceOverlay(): HTMLElement {
+    const overlay = el("div", "geo-overlay geo-deploy");
+    const panel = el("div", "geo-deploy-panel");
     const eye = el("div", "eyebrow");
-    eye.textContent = "▲ Interceptor dogfight";
+    eye.textContent = `✈ ${this.deploymentFlight?.craftName ?? "Skyranger"} on station`;
     const heading = el("h2");
-    heading.textContent = `${encounter.contactId} engagement`;
-    const meta = el("div", "geo-dogfight-meta");
-    const range = el("span");
-    range.innerHTML = `RANGE <b>${encounter.range}</b>`;
-    const rounds = el("span");
-    rounds.innerHTML = `ROUND <b>${encounter.roundsElapsed + 1}</b>`;
-    const status = el("span");
-    status.innerHTML = `THREAT <b>${this.campaign?.strategic.threat ?? 0}%</b>`;
-    meta.append(range, rounds, status);
-    const log = el("div", "geo-encounter-log");
-    for (const line of encounter.log) {
-      const entry = el("p");
-      entry.textContent = line;
-      log.append(entry);
-    }
-    this.encounterLog = log;
-    const actions = el("div", "geo-encounter-actions");
-    actions.append(
-      this.encounterButton("Close", "close"),
-      this.encounterButton("Attack", "attack", true),
-      this.encounterButton("Disengage", "disengage"),
-    );
-    panel.append(
-      eye,
-      heading,
-      meta,
-      this.hpBar("Interceptor", encounter.interceptorHp, encounter.interceptorHpMax, "interceptor", true),
-      this.hpBar("UFO", encounter.ufoHp, encounter.ufoHpMax, "ufo", true),
-      log,
-      actions,
-    );
+    heading.textContent = "Deploy squad?";
+    const copy = el("p");
+    copy.textContent = `Arrived at ${this.deploymentFlight?.region ?? "mission site"}. Deploy now or wait for daylight.`;
+    const actions = el("div", "geo-deploy-actions");
+    const wait = el("button");
+    wait.textContent = "Wait";
+    wait.addEventListener("click", () => this.waitAtSite());
+    const deploy = el("button", "primary");
+    deploy.textContent = "Deploy";
+    deploy.addEventListener("click", () => this.deploySquad());
+    actions.append(wait, deploy);
+    panel.append(eye, heading, copy, actions);
     overlay.append(panel);
     return overlay;
   }
 
-  private encounterButton(label: string, action: InterceptionAction, primary = false): HTMLButtonElement {
-    const button = el("button", primary ? "primary" : undefined);
-    button.textContent = label;
-    button.addEventListener("click", () => this.opts.onInterceptionAction?.(action));
-    return button;
+  /** Surface the Deploy/Wait choice on arrival; freeze time while the player decides. */
+  private showDeployChoice(): void {
+    this.deployArrived = true;
+    this.setTimeSpeed(0);
+    this.refreshOverlay();
   }
 
-  private hpBar(
-    label: string,
-    hp: number,
-    hpMax: number,
-    variant: "ufo" | "interceptor",
-    large = false,
-  ): HTMLElement {
-    const wrap = el("div", large ? "geo-bar geo-bar-lg" : "geo-bar");
-    const labelRow = el("div", "geo-bar-label");
-    const name = el("span");
-    name.textContent = label;
-    const value = el("b");
-    value.textContent = `${Math.max(0, Math.floor(hp))}/${hpMax}`;
-    labelRow.append(name, value);
-    const track = el("div", "geo-bar-track");
-    const fill = el("div", `geo-bar-fill ${variant}`);
-    const pct = hpMax > 0 ? Math.max(0, Math.min(100, (hp / hpMax) * 100)) : 0;
-    fill.style.width = `${pct}%`;
-    track.append(fill);
-    wrap.append(labelRow, track);
-    return wrap;
+  /** Wait: dismiss the choice, loiter at the site, and resume time flow. */
+  private waitAtSite(): void {
+    this.deployArrived = false;
+    this.loitering = true;
+    this.setTimeSpeed(this.preDeploySpeed > 0 ? this.preDeploySpeed : 1);
+    this.refreshOverlay();
+  }
+
+  /** Deploy now (from the choice or the loiter button): invoke onDeployed -> battlescape. */
+  private deploySquad(): void {
+    const dep = this.deploymentFlight;
+    this.deployArrived = false;
+    this.loitering = false;
+    this.deploying = false;
+    this.deploymentFlight = null;
+    if (dep) dep.onDeployed(); // -> startTactical -> disposes this view mid-frame
+  }
+
+  /** Abandon a loiter when the contact vanishes: hide the transport, resume normal flow. */
+  private cancelLoiter(): void {
+    this.loitering = false;
+    this.deployArrived = false;
+    this.deploying = false;
+    this.deploymentFlight = null;
+    this.skyrangerMarker.visible = false;
+    this.deploymentLine.visible = false;
+    this.refresh();
   }
 
   private objectiveCard(): HTMLElement {
@@ -3487,28 +3361,21 @@ export class GeoscapeView {
     const contact = this.campaign?.ufoContact;
     const urgent = contact ? missionTypeInfo(contact.missionType).urgent : false;
     // Urgent contacts (terror / base defense) pulse faster and harder so they
-    // read as higher priority against the steady crash-site markers. Enlarged
-    // during a cinematic dogfight for screen presence.
-    const craftBoost = this.isEngaging() ? CINE_CRAFT_BOOST : 1;
-    this.ufoMarker.scale.setScalar(
-      (1 + Math.sin(now * (urgent ? 0.012 : 0.006)) * (urgent ? 0.2 : 0.14)) * craftBoost,
-    );
+    // read as higher priority against the steady crash-site markers.
+    this.ufoMarker.scale.setScalar(1 + Math.sin(now * (urgent ? 0.012 : 0.006)) * (urgent ? 0.2 : 0.14));
     this.animateInterceptor(now);
-    this.updateContrails(now);
     this.advanceFlowingTime(now);
     // onAdvanceTime may synchronously dispose+remount this view (current controller);
     // bail before touching the disposed renderer/controls in that case.
     if (this.disposed) return;
-    this.updateCombatFx(now);
     this.updateDeployment(now);
-    // Deployment arrival hands control back to main.ts (startTactical), which
-    // disposes this view mid-frame; bail before rendering a torn-down scene.
+    // Deployment arrival surfaces a Deploy/Wait choice (no dispose); Deploy later
+    // invokes onDeployed -> startTactical from a click, which disposes this view.
     if (this.disposed) return;
     this.updateTerminator();
     this.updateCityLights();
     this.updateAtmosphere();
     if (this.cloudMesh) this.cloudMesh.rotation.y += 0.00018;
-    this.updateChaseCamera();
     this.controls.update();
     // Camera shake: offset around the controls-derived base, then restore so the
     // next controls.update() is unaffected (no drift into OrbitControls state).
