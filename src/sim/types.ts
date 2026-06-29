@@ -413,6 +413,7 @@ export type GameEvent =
       tuLeft: number;
     }
   | { type: "mindControlled"; unitId: UnitId; faction: Faction; turnsLeft: number }
+  | { type: "controlEnded"; unitId: UnitId; faction: Faction }
   | { type: "blocked"; reason: string };
 
 /**

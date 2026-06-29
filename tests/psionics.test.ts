@@ -415,17 +415,23 @@ describe("psionics: reducer + AI integration", () => {
     expect(commander.tu).toBeLessThan(commander.stats.timeUnits);
   });
 
-  it("a mind control applied during the enemy turn reverts when the round ends", () => {
-    // Force an MC outcome, then let the full endTurn run to the round boundary
-    // where tickMindControl lapses control back to the player.
+  it("a mind control applied during the enemy turn persists until the enemy has used the seized unit", () => {
+    // Regression: an enemy-cast MC used to lapse in the SAME endPlayerTurn that
+    // applied it (the round-boundary tick fired right after runEnemyTurn),
+    // burning the one-per-battle cap for zero turns of control. It must instead
+    // survive the player's turn and only revert once the controller has had a
+    // full enemy turn to act with the seized unit.
     const commander = makeCommander(10, { x: 5, y: 5 }, 2);
     const soldier = makeUnit(1, "player", { x: 8, y: 5 }, 6, {
       stats: { ...DEFAULT_STATS, psiStrength: 0 },
+      hp: 400,
     });
-    // A second player unit keeps the battle alive (so endTurn doesn't end the game
-    // if the soldier is seized) and gives the commander a non-MC psi target.
+    // A second player unit keeps the battle alive across two full enemy turns
+    // (so endTurn doesn't end the game when the soldier is seized) and is made
+    // tanky so it soaks two rounds of enemy fire.
     const helper = makeUnit(2, "player", { x: 12, y: 5 }, 6, {
       stats: { ...DEFAULT_STATS, psiStrength: 0 },
+      hp: 400,
     });
 
     // Find a seed where the commander's opening cast is a mind control that lands.
@@ -448,16 +454,98 @@ describe("psionics: reducer + AI integration", () => {
     const commander2 = makeCommander(10, { x: 5, y: 5 }, 2);
     const soldier2 = makeUnit(1, "player", { x: 8, y: 5 }, 6, {
       stats: { ...DEFAULT_STATS, psiStrength: 0 },
+      hp: 400,
     });
     const state = makeState([commander2, soldier2, helper], seed);
 
-    applyCommand(state, { type: "endTurn" });
+    // Round 1: the enemy casts MC mid-turn. The seize must NOT lapse at the
+    // coincident round boundary — the controller has not yet acted with the unit.
+    const round1 = applyCommand(state, { type: "endTurn" });
+    const seizedSoldier = unitById(state, 1)!;
+    expect(seizedSoldier.faction).toBe("enemy"); // still fighting for the enemy
+    expect(seizedSoldier.controlledByFaction).toBe("player");
+    expect(seizedSoldier.mcTurnsLeft).toBe(PSI.MC_DURATION_TURNS);
+    expect(round1.some((e) => e.type === "controlEnded")).toBe(false);
 
-    // After the round boundary, the seized soldier is back on the player's side.
-    const soldierAfter = unitById(state, 1)!;
-    expect(soldierAfter.faction).toBe("player");
-    expect(soldierAfter.controlledByFaction).toBeUndefined();
-    expect(soldierAfter.mcTurnsLeft).toBeUndefined();
+    // Round 2: the enemy now actually commands the seized soldier (it's in the
+    // enemy's actor snapshot), then control reverts at the round boundary.
+    const round2 = applyCommand(state, { type: "endTurn" });
+    expect(
+      round2.some((e) => e.type === "shot" && e.shooterId === 1),
+    ).toBe(true); // the seized soldier fired for the enemy this turn
+
+    const reverted = unitById(state, 1)!;
+    expect(reverted.faction).toBe("player"); // home faction restored
+    expect(reverted.controlledByFaction).toBeUndefined();
+    expect(reverted.mcTurnsLeft).toBeUndefined();
+    const ended = round2.find((e) => e.type === "controlEnded" && e.unitId === 1);
+    expect(ended).toBeDefined();
+    // The hard-cap counter is NOT decremented on revert: MC is spent for the battle.
+    expect(state.mcUsedThisBattle).toBe(1);
+  });
+
+  it("a PLAYER mind control reverts at the round boundary (controller acted in the cast turn)", () => {
+    // The player acts in real time, so a player-cast seize is NOT mid-enemy-turn
+    // and is never excepted: it reverts at the first round boundary, exactly as
+    // before the enemy-side fix. This locks in that the fix left player MC alone.
+    const caster = makeUnit(1, "player", { x: 5, y: 5 }, 2, {
+      stats: { ...DEFAULT_STATS, psiSkill: 60, psiStrength: 40 },
+      hp: 400,
+    });
+    const target = makeUnit(2, "enemy", { x: 8, y: 5 }, 6, {
+      stats: { ...DEFAULT_STATS, psiStrength: 0 },
+      hp: 400,
+    });
+    // A second enemy far away keeps the battle alive after the seize (otherwise
+    // seizing the only hostile would trigger an immediate player_win).
+    const distantFoe = makeUnit(3, "enemy", { x: 29, y: 29 }, 6, { hp: 400 });
+
+    // Find a seed where the player's opening MC cast lands on the target.
+    let seed = 0;
+    let landed = false;
+    for (let s = 1; s < 5000; s++) {
+      const c = makeUnit(1, "player", { x: 5, y: 5 }, 2, {
+        stats: { ...DEFAULT_STATS, psiSkill: 60, psiStrength: 40 },
+      });
+      const t = makeUnit(2, "enemy", { x: 8, y: 5 }, 6, { stats: { ...DEFAULT_STATS, psiStrength: 0 } });
+      const st = makeState([c, t, distantFoe], s);
+      const ev = executePsiAttack(st, c, 2, "mindControl");
+      if (psiUsedEvent(ev)?.success && t.faction === "player") {
+        seed = s;
+        landed = true;
+        break;
+      }
+    }
+    expect(landed).toBe(true);
+
+    const state = makeState(
+      [
+        makeUnit(1, "player", { x: 5, y: 5 }, 2, {
+          stats: { ...DEFAULT_STATS, psiSkill: 60, psiStrength: 40 },
+          hp: 400,
+        }),
+        makeUnit(2, "enemy", { x: 8, y: 5 }, 6, {
+          stats: { ...DEFAULT_STATS, psiStrength: 0 },
+          hp: 400,
+        }),
+        distantFoe,
+      ],
+      seed,
+    );
+
+    // Seize the enemy during the player's turn, then end the turn.
+    const castEvents = applyCommand(state, { type: "psiAttack", unitId: 1, targetId: 2, kind: "mindControl" });
+    expect(castEvents.some((e) => e.type === "mindControlled")).toBe(true);
+    expect(unitById(state, 2)!.faction).toBe("player");
+
+    const roundEvents = applyCommand(state, { type: "endTurn" });
+
+    // The seized unit reverted to its home (enemy) faction at the round boundary.
+    const reverted = unitById(state, 2)!;
+    expect(reverted.faction).toBe("enemy");
+    expect(reverted.controlledByFaction).toBeUndefined();
+    expect(reverted.mcTurnsLeft).toBeUndefined();
+    expect(roundEvents.some((e) => e.type === "controlEnded" && e.unitId === 2)).toBe(true);
   });
 });
 

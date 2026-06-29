@@ -717,11 +717,14 @@ function executePrimeItem(
  *  - 'panic': on a hit, dumps the target's morale to 0 — feeding it into the
  *    existing morale/panic system so the target rolls for panic at the start of
  *    its next turn (bravery can still resist that roll).
- *  - 'mindControl': HARD-CAPPED at PSI.MC_MAX_PER_BATTLE per battle. On a hit,
- *    the target switches sides for PSI.MC_DURATION_TURNS: its `faction` becomes
- *    the caster's faction (so combat / AI / victory logic treats it as the
- *    controller's), its home faction is stashed on `controlledByFaction` for
- *    revert, and `mcTurnsLeft` is set. A mind-controlled unit cannot cast psi.
+ *  - 'mindControl': HARD-CAPPED at PSI.MC_MAX_PER_BATTLE per battle (kept global
+ *    by design — the cap is no longer wasted on a seize that yields no turn of
+ *    control, since a seize now persists through the controller's actual next
+ *    turn). On a hit, the target switches sides for PSI.MC_DURATION_TURNS: its
+ *    `faction` becomes the caster's faction (so combat / AI / victory logic
+ *    treats it as the controller's), its home faction is stashed on
+ *    `controlledByFaction` for revert, and `mcTurnsLeft` is set. A
+ *    mind-controlled unit cannot cast psi.
  *
  * Purity: no DOM / three.js. The only rng draw is the single success roll.
  */
@@ -787,7 +790,11 @@ export function executePsiAttack(
 
   // mindControl: seize the target for the caster's faction. `controlledByFaction`
   // stashes the home faction; `faction` is swapped so the unit genuinely fights
-  // for the wrong side until the round-end tick reverts it.
+  // for the wrong side. Control reverts at the round boundary once the controller
+  // has had a turn to act with the unit — see tickMindControl/endPlayerTurn,
+  // which spare a just-applied seize from the coincident round-boundary tick so
+  // the controller (including the enemy, which casts mid-turn) keeps the unit
+  // through its actual next turn.
   target.controlledByFaction = target.faction;
   target.faction = attacker.faction;
   target.mcTurnsLeft = PSI.MC_DURATION_TURNS;
@@ -1045,23 +1052,46 @@ export function tickSmokeClouds(state: BattleState): void {
 }
 
 /**
- * Age every mind-controlled unit one round: decrement `mcTurnsLeft`, and when it
- * hits 0 restore the unit's home faction (stashed on `controlledByFaction`) and
- * clear the MC state — so the unit reverts to its original side. Iterates units
- * in ascending id order for determinism. A no-op when nobody is controlled.
+ * Age every mind-controlled unit one round closer to reverting — EXCEPT any unit
+ * in `exceptIds`. For each unit whose `mcTurnsLeft` hits 0, restore its home
+ * faction (stashed on `controlledByFaction`), clear the MC state, and emit a
+ * `controlEnded` event so the UI can drop its "mind-controlled" toast and signal
+ * restoration. Iterates units in ascending id order for determinism; a no-op when
+ * nobody is controlled (or every controlled unit is excepted).
+ *
+ * `exceptIds` decouples MC aging from the round boundary. An enemy-applied seize
+ * happens mid-enemy-turn, in the SAME endPlayerTurn call as this tick; without
+ * exclusion it would lapse instantly, burning the per-battle cap for zero turns
+ * of control. The caller passes the ids seized *this* enemy turn as `exceptIds`,
+ * so a freshly-applied seize survives into the next enemy turn and only reverts
+ * once its controller has actually been able to act with the unit. Player-applied
+ * seizes are never mid-enemy-turn, so they are never excepted and revert at the
+ * round boundary exactly as before.
  */
-export function tickMindControl(state: BattleState): void {
+export function tickMindControl(
+  state: BattleState,
+  exceptIds: ReadonlySet<UnitId> = new Set(),
+): GameEvent[] {
+  const events: GameEvent[] = [];
   const controlled = state.units
-    .filter((u) => u.controlledByFaction !== undefined && u.mcTurnsLeft !== undefined)
+    .filter(
+      (u) =>
+        u.controlledByFaction !== undefined &&
+        u.mcTurnsLeft !== undefined &&
+        !exceptIds.has(u.id),
+    )
     .sort((a, b) => a.id - b.id);
   for (const u of controlled) {
     u.mcTurnsLeft = Math.max(0, (u.mcTurnsLeft ?? 0) - 1);
     if ((u.mcTurnsLeft ?? 0) <= 0) {
-      u.faction = u.controlledByFaction ?? u.faction;
+      const home = u.controlledByFaction ?? u.faction;
+      u.faction = home;
       u.controlledByFaction = undefined;
       u.mcTurnsLeft = undefined;
+      events.push({ type: "controlEnded", unitId: u.id, faction: home });
     }
   }
+  return events;
 }
 
 function endPlayerTurn(state: BattleState): GameEvent[] {
@@ -1072,6 +1102,16 @@ function endPlayerTurn(state: BattleState): GameEvent[] {
   events.push({ type: "turnStarted", faction: "enemy", turn: state.turn });
   events.push(...startFactionTurn(state, "enemy"));
   if (state.status !== "playing") return events;
+
+  // Snapshot the units already under mind control BEFORE the enemy acts. An
+  // enemy-applied seize lands mid-enemy-turn (after this snapshot), so excluding
+  // these ids from the comparison below marks the just-seized unit as "new" and
+  // spares it the round-boundary tick — without this, an enemy MC would lapse in
+  // the very endPlayerTurn that applied it, yielding zero turns of control while
+  // still burning the one-per-battle cap.
+  const controlledBeforeEnemyTurn = new Set(
+    state.units.filter((u) => u.controlledByFaction !== undefined).map((u) => u.id),
+  );
 
   const exec: AiExecutor = {
     move: (id, to) => executeMove(state, id, to),
@@ -1095,10 +1135,20 @@ function endPlayerTurn(state: BattleState): GameEvent[] {
 
   events.push({ type: "turnEnded", faction: "enemy" });
   state.turn++;
-  // A new round begins: age every active smoke cloud one round, clear any that
-  // have fully dissipated, and lapse every mind control before the player acts.
+  // A new round begins: age every active smoke cloud one round and clear any that
+  // have fully dissipated.
   tickSmokeClouds(state);
-  tickMindControl(state);
+  // Lapse mind control, but spare anything the enemy JUST seized this turn — it
+  // hasn't given the controller a turn yet (the AI snapshotted its actors before
+  // the psi cast, so a just-seized unit is only usable next enemy turn). Newly
+  // seized ids are the controlled set minus the pre-enemy-turn snapshot above.
+  const newlySeized = new Set(
+    state.units
+      .filter((u) => u.controlledByFaction !== undefined)
+      .map((u) => u.id)
+      .filter((id) => !controlledBeforeEnemyTurn.has(id)),
+  );
+  events.push(...tickMindControl(state, newlySeized));
   state.activeFaction = "player";
   refillTU(state, "player");
   for (const u of state.units) {
