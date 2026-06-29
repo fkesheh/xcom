@@ -1,15 +1,17 @@
 /**
- * Facility INTERIOR dioramas for the "enter facility" camera dive. The LAB is
- * the hero — a dense, textured, sculpted room the camera flies INTO and reads
- * as a real research lab. The other roles get a solid generic textured room so
- * entering them is never broken; their full detail rolls out in later passes.
+ * Facility INTERIOR dioramas for the "enter facility" camera dive. Each of the
+ * seven roles is a dense, textured, sculpted diorama the camera flies INTO and
+ * reads as a real room: LAB (research vat + server racks), COMMAND (holo war
+ * table + console arc), WORKSHOP (gantry + robotic arm + forge), BARRACKS
+ * (stacked bunk beds + lockers), HANGAR (interceptor on a pad + crane), RADAR
+ * (lathed dish on a mast + antennas), REACTOR (pulsing core + conduits).
  *
  * ANTI-BLOB CORE: every surface that was a flat color box is now a PROCEDURAL
  * TEXTURE + NORMAL MAP from baseTextures — riveted metal-panel walls/racks,
  * cracked concrete floors, glowing readout screens. Geometry is SCULPTED:
- * racks/crates/beams are extruded Shapes WITH bevel (chamfered edges read as
- * crafted), the research vat is lathed, multi-part silhouettes merge into one
- * read. No naked hard-corner boxes for architecture.
+ * racks/crates/beams/beds/ship parts are extruded Shapes WITH bevel (chamfered
+ * edges read as crafted), the vat + radar dish are lathed, multi-part
+ * silhouettes merge into one read. No naked hard-corner boxes for architecture.
  *
  * All solid colors trace to the frozen basePalette (steel/concrete neutrals +
  * the facility accent). Origin sits at floor center (y = 0 is the floor
@@ -26,12 +28,13 @@
 import {
   BoxGeometry,
   BufferGeometry,
+  ConeGeometry,
   CylinderGeometry,
   ExtrudeGeometry,
   Group,
   LatheGeometry,
   Mesh,
-  type MeshStandardMaterial,
+  MeshStandardMaterial,
   PlaneGeometry,
   Shape,
   SphereGeometry,
@@ -102,6 +105,25 @@ const ACCENT: Record<FacilityRole, AccentSet> = {
   radar: makeAccent("radar"),
   reactor: makeAccent("reactor"),
 };
+
+/**
+ * Matte non-emissive PROP materials for soft/structural props that should NOT
+ * glow (fabric, bedding, machinery frames). Every color traces to BASE_PALETTE
+ * — never ad-hoc hex. Cached at module scope like MAT/ACCENT (dispose-safe via
+ * the baseView disposeObject dedup).
+ */
+const MAT_PROPS = {
+  /** Warm linen (mattresses) — barracks warm-white accent, matte. */
+  linen: new MeshStandardMaterial({ color: BASE_PALETTE.accent.barracks, metalness: 0.0, roughness: 0.92 }),
+  /** Pillow fabric — light palette steel-grey, matte. */
+  pillow: new MeshStandardMaterial({ color: BASE_PALETTE.steelEdge, metalness: 0.0, roughness: 0.96 }),
+  /** Personal blanket — palette danger red, matte. */
+  blanket: new MeshStandardMaterial({ color: BASE_PALETTE.danger, metalness: 0.0, roughness: 0.96 }),
+  /** Matte structural frame (bed frames, lockers, machinery bodies). */
+  frame: new MeshStandardMaterial({ color: BASE_PALETTE.steel, metalness: 0.5, roughness: 0.6 }),
+  /** Dark undersides / recessed bases. */
+  dark: new MeshStandardMaterial({ color: BASE_PALETTE.rockLight, metalness: 0.4, roughness: 0.7 }),
+} as const;
 
 // ---------------------------------------------------------------------------
 // Shared geometry (module scope — cached, never disposed by a group).
@@ -198,6 +220,90 @@ const CABLE = new CylinderGeometry(0.018, 0.018, 1, 6);
 const STOOL_SEAT = new CylinderGeometry(0.16, 0.16, 0.05, 14);
 const STOOL_LEG = new CylinderGeometry(0.03, 0.03, 1, 8);
 
+// --- Role-specific sculpted geometry (module scope — shared + dispose-safe) ---
+// Each role's signature shapes: lathe/bevel/cone/cylinder silhouettes that read
+// as crafted machinery/furniture up close. Small one-off bevels are still made
+// inline at call sites (matching buildWorkbench's established local pattern).
+
+// COMMAND — holo table, console desks, commander podium.
+const PODIUM = bevelBox(0.55, 1.0, 0.42, 0.03);
+const PODIUM_SCREEN = new PlaneGeometry(0.34, 0.24);
+const HOLO_BEAM = new CylinderGeometry(0.025, 0.025, 1, 8);
+const HOLO_RIM = new CylinderGeometry(0.64, 0.64, 0.035, 32);
+const STATUS_WALL = new PlaneGeometry(2.8, 1.0);
+const TACTICAL_MAP = new PlaneGeometry(0.86, 0.62);
+const CONSOLE_DESK = bevelBox(1.05, 0.68, 0.52, 0.03);
+const DESK_SCREEN = new PlaneGeometry(0.62, 0.34);
+
+// WORKSHOP — fabrication gantry, forge/furnace.
+const GANTRY_POST = new CylinderGeometry(0.07, 0.07, 1, 10);
+const GANTRY_BEAM_X = bevelBox(2.4, 0.12, 0.12, 0.02);
+const GANTRY_BEAM_Z = bevelBox(0.12, 0.12, 2.0, 0.02);
+const FORGE = bevelBox(0.85, 0.95, 0.65, 0.04);
+tileUV(FORGE, 1.5, 1.5);
+const FORGE_GLOW = new PlaneGeometry(0.42, 0.32);
+const FORGE_STACK = new CylinderGeometry(0.12, 0.14, 1, 10);
+const FORGE_TONGUE = new ConeGeometry(0.05, 0.18, 8);
+
+// BARRACKS — stacked bunk bed system + lockers.
+const BED_POST = new CylinderGeometry(0.04, 0.04, 1, 8);
+const BED_FRAME = bevelBox(0.9, 0.06, 1.95, 0.015);
+const MATTRESS = bevelBox(0.82, 0.12, 1.85, 0.03);
+const PILLOW = bevelBox(0.32, 0.1, 0.42, 0.03);
+const BLANKET = bevelBox(0.82, 0.04, 1.1, 0.02);
+const BED_RAIL = bevelBox(0.86, 0.04, 0.05, 0.01);
+const LADDER_RAIL = bevelBox(0.04, 1.0, 0.04, 0.008);
+const LADDER_RUNG = bevelBox(0.06, 0.03, 0.3, 0.005);
+const FOOTLOCKER = bevelBox(0.62, 0.4, 0.42, 0.03);
+tileUV(FOOTLOCKER, 1.3, 1.3);
+const LOCKER = bevelBox(0.5, 1.8, 0.5, 0.02);
+tileUV(LOCKER, 1.2, 2.4);
+
+// HANGAR — interceptor ship on a pad + overhead crane.
+const PAD = new CylinderGeometry(2.0, 2.05, 0.04, 36);
+const PAD_RING = new CylinderGeometry(1.92, 1.92, 0.02, 36);
+const FUSELAGE = new CylinderGeometry(0.22, 0.16, 2.4, 18);
+const NOSE_CONE = new ConeGeometry(0.16, 0.5, 18);
+const WING = bevelBox(1.7, 0.06, 0.62, 0.02);
+const TAIL_FIN = bevelBox(0.06, 0.5, 0.45, 0.02);
+const COCKPIT = new SphereGeometry(0.17, 16, 12);
+const ENGINE_NACELLE = new CylinderGeometry(0.11, 0.1, 0.55, 14);
+const ENGINE_GLOW = new CylinderGeometry(0.08, 0.08, 0.04, 14);
+const LANDING_STRUT = new CylinderGeometry(0.025, 0.025, 1, 8);
+const LANDING_FOOT = new CylinderGeometry(0.08, 0.08, 0.04, 10);
+const CRANE_BEAM = bevelBox(2.2, 0.12, 0.14, 0.02);
+const CRANE_HOIST = bevelBox(0.18, 0.14, 0.18, 0.02);
+const TOOL_RACK = bevelBox(0.12, 1.3, 0.32, 0.02);
+const FUEL_TANK = new CylinderGeometry(0.32, 0.32, 1.3, 16);
+const BAY_POST = new CylinderGeometry(0.07, 0.07, 1, 10);
+
+// RADAR — lathed dish on a mast + antenna arrays.
+const MAST_BASE = new CylinderGeometry(0.18, 0.2, 0.1, 16);
+const RADAR_MAST = new CylinderGeometry(0.06, 0.08, 2.2, 12);
+const RADAR_DISH_POINTS: Vector2[] = [
+  new Vector2(0.04, 0.22),
+  new Vector2(0.12, 0.14),
+  new Vector2(0.28, 0.04),
+  new Vector2(0.46, 0.0),
+  new Vector2(0.58, 0.06),
+  new Vector2(0.62, 0.2),
+];
+const RADAR_DISH = new LatheGeometry(RADAR_DISH_POINTS, 28);
+const ANTENNA_MAST = new CylinderGeometry(0.03, 0.03, 1.2, 8);
+const ANTENNA_ARM = bevelBox(0.04, 0.04, 0.7, 0.006);
+const RADAR_CONSOLE = bevelBox(0.95, 0.92, 0.52, 0.025);
+const SWEEP_SCREEN = new PlaneGeometry(0.7, 0.42);
+
+// REACTOR — cylindrical core + conduit pipes + cooling tanks.
+const CORE = new CylinderGeometry(0.55, 0.6, 1.8, 28);
+const CORE_TOP = new CylinderGeometry(0.6, 0.55, 0.16, 28);
+const CORE_BASE_RING = new CylinderGeometry(0.72, 0.78, 0.22, 28);
+const CONDUIT = new CylinderGeometry(0.09, 0.09, 1, 10);
+const COOLING_TANK = new CylinderGeometry(0.36, 0.36, 1.5, 18);
+const COOLING_CAP = new CylinderGeometry(0.38, 0.36, 0.1, 18);
+const REACTOR_CONSOLE = bevelBox(0.9, 0.9, 0.5, 0.025);
+const WARN_STRIPE = new BoxGeometry(0.45, 0.13, 0.05);
+
 // ---------------------------------------------------------------------------
 // Composition helpers
 // ---------------------------------------------------------------------------
@@ -231,10 +337,14 @@ function addShell(group: Group): void {
  * Build one server/equipment rack: extruded beveled cabinet (panel texture) with
  * a glowing readout screen and a column of status lights. Status dots tag
  * themselves userData.interiorBlink so the baseView frame loop may animate them
- * (they already read as a live board statically via on/dim variation).
+ * (they already read as a live board statically via on/dim variation). `accentHex`
+ * recolors the screen + status lights so a rack reads in any facility's accent
+ * (default lab cyan — the hero rack row stays identical).
  */
-function buildRack(screenLabel: string): Group {
+function buildRack(screenLabel: string, accentHex: number = BASE_PALETTE.accent.lab): Group {
   const rack = new Group();
+  const statusOn = accentEmissive(accentHex, 1.8);
+  const statusDim = accentEmissive(accentHex, 0.45);
   // Cabinet body — base sits on the floor (geometry is centered, so y = H/2).
   add(rack, RACK_BODY, MAT.panel, [0, RACK_H / 2, 0]);
   add(rack, RACK_BASE, MAT.panelDark, [0, 0.05, 0]);
@@ -243,7 +353,7 @@ function buildRack(screenLabel: string): Group {
   const screen = add(
     rack,
     RACK_SCREEN,
-    screenMaterial(BASE_PALETTE.accent.lab, screenLabel),
+    screenMaterial(accentHex, screenLabel),
     [0, RACK_H * 0.56, RACK_D / 2 + 0.012],
   );
   screen.userData.interiorScreen = true;
@@ -254,7 +364,7 @@ function buildRack(screenLabel: string): Group {
     const dot = add(
       rack,
       DOT,
-      lit ? STATUS.on : STATUS.dim,
+      lit ? statusOn : statusDim,
       [RACK_W * 0.34, heights[i]!, RACK_D / 2 + 0.02],
     );
     dot.userData.interiorBlink = true;
@@ -311,6 +421,42 @@ function buildWorkbench(): Group {
   add(bench, STOOL_LEG, MAT.worn, [0.1, 0.23, 0.42]);
   add(bench, DISK, MAT.worn, [0.1, 0.02, 0.42], [0.22, 1, 0.22]);
   return bench;
+}
+
+/**
+ * Build a stacked BUNK BED: four corner posts, two mattress platforms, lower +
+ * upper bunks (mattress + pillow + blanket each), an upper safety rail, and a
+ * side ladder. Matte fabric materials (linen/pillow/blanket) read as bedding,
+ * not glowing props. Origin at floor level; footprint ~0.9 x 1.95.
+ */
+function buildBunkBed(): Group {
+  const bed = new Group();
+  const postH = 1.92;
+  // Four corner posts.
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      add(bed, BED_POST, MAT_PROPS.frame, [sx * 0.43, postH / 2, sz * 0.92], [1, postH, 1]);
+    }
+  }
+  // Mattress platforms (recessed frames the mattresses rest on).
+  add(bed, BED_FRAME, MAT_PROPS.frame, [0, 0.48, 0]);
+  add(bed, BED_FRAME, MAT_PROPS.frame, [0, 1.58, 0]);
+  // Lower bunk bedding.
+  add(bed, MATTRESS, MAT_PROPS.linen, [0, 0.57, 0]);
+  add(bed, PILLOW, MAT_PROPS.pillow, [-0.1, 0.66, 0.72]);
+  add(bed, BLANKET, MAT_PROPS.blanket, [0, 0.65, -0.35]);
+  // Upper bunk bedding.
+  add(bed, MATTRESS, MAT_PROPS.linen, [0, 1.67, 0]);
+  add(bed, PILLOW, MAT_PROPS.pillow, [-0.1, 1.76, 0.72]);
+  add(bed, BLANKET, MAT_PROPS.blanket, [0, 1.75, -0.35]);
+  // Upper safety rail along the open side (head-to-foot).
+  add(bed, BED_RAIL, MAT_PROPS.frame, [-0.43, 1.78, 0]);
+  // Ladder on the opposite side: one rail + three rungs.
+  add(bed, LADDER_RAIL, MAT_PROPS.frame, [0.46, 0.95, 0.78], [1, 1.9, 1]);
+  for (const ry of [0.45, 0.9, 1.35]) {
+    add(bed, LADDER_RUNG, MAT_PROPS.frame, [0.42, ry, 0.78]);
+  }
+  return bed;
 }
 
 // ---------------------------------------------------------------------------
@@ -389,64 +535,515 @@ function buildLabInterior(): Group {
 }
 
 /**
- * Build a solid GENERIC textured room for a non-hero role: same concrete-floor
- * + steel-panel shell, a large wall readout screen in the role's accent, an
- * accent work-light strip + beacon, and a few props (console, crates, pillar).
- * Entering the role works and reads as that facility; full density comes later.
+ * Build the COMMAND interior — blue holographic war room. A central holo
+ * projection table (emissive disk + tactical map + light beam to the ceiling),
+ * three curved console desks arranged in an arc facing it, a large status wall
+ * display, a commander podium, overhead strip lights, and prop density.
  */
-function buildGenericInterior(role: FacilityRole): Group {
+function buildCommandInterior(): Group {
   const g = new Group();
-  const accent = ACCENT[role];
+  const hex = BASE_PALETTE.accent.command;
+  const accent = ACCENT.command;
   addShell(g);
 
-  // Large back-wall readout screen — the role's identity + interior glow.
-  const wallScreen = add(
+  // Central holographic projection table — the room's hero.
+  add(g, DISK, MAT.panelDark, [0, 0.4, 0], [1.6, 16, 1.6]); // pedestal
+  add(g, DISK, MAT.panel, [0, 0.83, 0], [1.5, 1, 1.5]); // tabletop
+  const rim = add(g, HOLO_RIM, accent.glow, [0, 0.85, 0]);
+  rim.userData.interiorPulse = true;
+  const map = add(
     g,
-    new PlaneGeometry(2.6, 1.3),
-    screenMaterial(BASE_PALETTE.accent[role], role.toUpperCase()),
-    [0, ROOM_H * 0.62, -ROOM_D / 2 + WALL_T / 2 + 0.02],
+    TACTICAL_MAP,
+    screenMaterial(hex, "TACTICAL"),
+    [0, 0.86, 0],
+    [1, 1, 1],
+    [-Math.PI / 2, 0, 0],
   );
-  wallScreen.userData.interiorScreen = true;
+  map.userData.interiorScreen = true;
+  const beam = add(g, HOLO_BEAM, accent.beacon, [0, 1.85, 0], [1, 1.95, 1]);
+  beam.userData.interiorPulse = true;
 
-  // Accent work-light strip mounted high on the right wall + a floor beacon.
-  add(g, bevelBox(1.2, 0.14, 0.06, 0.02), accent.glow, [
+  // Three console desks arrayed in an arc facing the table (front, open side).
+  const arcZ = 1.35;
+  const arcOffsets: ReadonlyArray<readonly [number, number]> = [
+    [-1.55, 0.5],
+    [0, 0],
+    [1.55, 0.5],
+  ];
+  for (const [x, yaw] of arcOffsets) {
+    add(g, CONSOLE_DESK, MAT.panel, [x, 0.34, arcZ], [1, 1, 1], [0, yaw, 0]);
+    const screen = add(
+      g,
+      DESK_SCREEN,
+      screenMaterial(hex, "OPS"),
+      [x, 0.74, arcZ + 0.18],
+      [1, 1, 1],
+      [-0.5, yaw, 0],
+    );
+    screen.userData.interiorScreen = true;
+    // Stool tucked at each desk.
+    add(g, STOOL_SEAT, MAT.worn, [x, 0.46, arcZ + 0.62]);
+    add(g, STOOL_LEG, MAT.worn, [x, 0.23, arcZ + 0.62]);
+  }
+
+  // Large status wall display high on the back wall.
+  const wall = add(
+    g,
+    STATUS_WALL,
+    screenMaterial(hex, "STATUS"),
+    [0, ROOM_H * 0.72, -ROOM_D / 2 + WALL_T / 2 + 0.02],
+  );
+  wall.userData.interiorScreen = true;
+
+  // Commander podium at the back-left, facing the room.
+  add(g, PODIUM, MAT.panelDark, [-2.25, 0.5, -1.5]);
+  const podiumScreen = add(
+    g,
+    PODIUM_SCREEN,
+    screenMaterial(hex, "CMDR"),
+    [-2.25, 0.72, -1.29],
+    [1, 1, 1],
+    [-0.2, 0, 0],
+  );
+  podiumScreen.userData.interiorScreen = true;
+
+  // Overhead strip-light beams (exposed).
+  for (const sx of [-1, 1]) {
+    add(g, BEAM, MAT.panel, [sx * 2.0, ROOM_H - 0.12, 0]);
+    add(g, STRIP, MAT.stripLight, [sx * 2.0, ROOM_H - 0.2, 0]);
+  }
+  // Blue accent work-light on the right wall.
+  add(g, bevelBox(0.5, 0.16, 0.06, 0.02), accent.glow, [
     ROOM_W / 2 - WALL_T / 2 - 0.04,
-    ROOM_H - 0.55,
+    ROOM_H - 0.6,
     0.4,
   ]);
+
+  // Status beacons around the table rim + a floor beacon.
+  for (const sx of [-1, 0, 1]) {
+    add(g, DOT, accent.beacon, [sx * 0.6, 0.88, 0], [1, 1, 1], [0, 0, 0]);
+  }
   add(g, POST, accent.glow, [ROOM_W / 2 - 0.4, 0.75, -ROOM_D / 2 + 0.5], [1, 1.5, 1]);
   add(g, BEAD, accent.beacon, [ROOM_W / 2 - 0.4, 1.5, -ROOM_D / 2 + 0.5]);
 
-  // Console against the back-left corner — panel cabinet + small screen.
-  const consoleGeo = bevelBox(0.9, 0.92, 0.5, 0.025);
-  add(g, consoleGeo, MAT.panel, [-1.6, 0.46, -ROOM_D / 2 + 0.32]);
-  add(g, BENCH_SCREEN, screenMaterial(BASE_PALETTE.accent[role], "OPS"), [
-    -1.6,
-    0.86,
-    -ROOM_D / 2 + 0.58,
-  ]);
-
-  // Props — crates + corner pillar.
-  add(g, CRATE, MAT.worn, [1.7, 0.25, 1.5]);
-  add(g, CRATE, MAT.worn, [1.9, 0.75, 1.7], [0.9, 0.9, 0.9]);
+  // Props — crates + corner pillars.
+  add(g, CRATE, MAT.worn, [2.2, 0.25, 1.5]);
+  add(g, CRATE, MAT.worn, [2.35, 0.75, 1.7], [0.9, 0.9, 0.9]);
+  add(g, PILLAR, MAT.panel, [ROOM_W / 2 - 0.28, ROOM_H / 2, ROOM_D / 2 - 0.28], [1, ROOM_H, 1]);
   add(g, PILLAR, MAT.panel, [-ROOM_W / 2 + 0.28, ROOM_H / 2, ROOM_D / 2 - 0.28], [1, ROOM_H, 1]);
-
-  // Overhead strip light so the generic room isn't dark.
-  add(g, STRIP, MAT.stripLight, [0, ROOM_H - 0.2, 0]);
 
   return g;
 }
 
 /**
- * Build a facility INTERIOR diorama for the given role. The LAB is the dense
- * hero; every other role returns a solid generic textured room. The returned
- * Group is tagged `userData.facilityRole`; animated accents self-tag
- * (userData.interiorPulse / interiorBlink / interiorScreen) for the baseView
- * frame loop. Origin is at floor center (y = 0 is the floor surface); the front
- * wall is open toward +z for the camera.
+ * Build the WORKSHOP interior — amber fabrication bay. An overhead fabrication
+ * gantry carrying a robotic arm, a glowing forge/furnace with a chimney, a
+ * workbench with tools + readout, raw-material crates, hanging cable trays, and
+ * prop density.
+ */
+function buildWorkshopInterior(): Group {
+  const g = new Group();
+  const hex = BASE_PALETTE.accent.workshop;
+  const accent = ACCENT.workshop;
+  addShell(g);
+
+  // Fabrication gantry: four posts + overhead beam frame.
+  const gx = 1.05;
+  const gz = [-1.35, 0.5];
+  for (const sx of [-1, 1]) {
+    for (const z of gz) {
+      add(g, GANTRY_POST, MAT_PROPS.frame, [sx * gx, ROOM_H / 2, z], [1, ROOM_H, 1]);
+    }
+  }
+  for (const z of gz) {
+    add(g, GANTRY_BEAM_X, MAT.panel, [0, ROOM_H - 0.08, z]);
+  }
+  add(g, GANTRY_BEAM_Z, MAT.panel, [0, ROOM_H - 0.08, -0.42]);
+
+  // Robotic arm hanging from the gantry's center beam.
+  add(g, bevelBox(0.22, 0.1, 0.22, 0.02), MAT.worn, [0, ROOM_H - 0.18, -0.42]); // sled
+  add(g, BEAD, MAT.worn, [0, ROOM_H - 0.4, -0.42]); // shoulder
+  add(g, bevelBox(0.1, 0.5, 0.1, 0.015), MAT_PROPS.frame, [0, ROOM_H - 0.68, -0.42], [1, 1, 1], [0.3, 0, 0]);
+  add(g, BEAD, MAT.worn, [0, ROOM_H - 0.92, -0.42]); // elbow
+  add(g, bevelBox(0.08, 0.42, 0.08, 0.012), MAT_PROPS.frame, [0, ROOM_H - 1.15, -0.42], [1, 1, 1], [-0.4, 0, 0]);
+  add(g, bevelBox(0.14, 0.1, 0.14, 0.02), MAT.worn, [0, ROOM_H - 1.38, -0.42]); // effector
+  const torch = add(g, DOT, accent.beacon, [0, ROOM_H - 1.5, -0.42]); // welder tip
+  torch.userData.interiorPulse = true;
+
+  // Forge / furnace against the left wall — body, glowing mouth, chimney, beacon.
+  add(g, FORGE, MAT.panelDark, [-2.2, 0.475, -0.6]);
+  const glow = add(g, FORGE_GLOW, accentEmissive(hex, 2.5), [-2.2, 0.5, -0.275]);
+  glow.userData.interiorPulse = true;
+  add(g, FORGE_STACK, MAT.worn, [-2.2, 1.5, -0.6], [1, 1.9, 1]);
+  add(g, BEAD, accent.beacon, [-2.2, 1.95, -0.6]);
+  add(g, DISK, MAT_PROPS.dark, [-2.2, 0.04, -0.6], [1.4, 1, 1.6]);
+
+  // Workbench in the right-front quadrant — top, legs, amber screen, tools.
+  add(g, BENCH_TOP, MAT.panel, [1.9, 0.82, 0.7]);
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      add(g, BENCH_LEG, MAT.worn, [1.9 + sx * 0.52, 0.39, 0.7 + sz * 0.24]);
+    }
+  }
+  const benchScreen = add(
+    g,
+    BENCH_SCREEN,
+    screenMaterial(hex, "MFG"),
+    [1.6, 1.06, 0.7],
+    [1, 1, 1],
+    [0, 0.6, 0],
+  );
+  benchScreen.userData.interiorScreen = true;
+  // Tools on the bench (lathe-style instruments).
+  add(g, BEAD, MAT_PROPS.frame, [2.15, 0.92, 0.5]);
+  add(g, FORGE_TONGUE, MAT_PROPS.dark, [1.7, 0.94, 0.9], [1, 1, 1], [Math.PI / 2, 0, 0]);
+  add(g, bevelBox(0.18, 0.06, 0.12, 0.01), MAT.worn, [2.2, 0.89, 0.9]);
+
+  // Raw-material crates stacked at the front-left.
+  add(g, CRATE, MAT.worn, [-1.4, 0.25, 1.6]);
+  add(g, CRATE, MAT.worn, [-1.0, 0.25, 1.85]);
+  add(g, CRATE, MAT.worn, [-1.2, 0.75, 1.75], [0.9, 0.9, 0.9]);
+
+  // Hanging cable trays + drooping cables near the gantry.
+  for (const z of [-1.0, 0.2]) {
+    add(g, CABLE_TRAY, MAT.worn, [0, ROOM_H - 0.3, z], [1, 1, 1], [Math.PI / 2, 0, 0]);
+  }
+  for (let i = 0; i < 3; i++) {
+    const c = add(g, CABLE, MAT.panelDark, [-0.5 + i * 0.5, ROOM_H - 0.55, -0.4], [1, 1, 1], [0.2, 0, 0]);
+    c.scale.y = 0.6;
+  }
+
+  // Overhead strip light + amber wall work-light + status beacons.
+  add(g, STRIP, MAT.stripLight, [0, ROOM_H - 0.2, 1.6]);
+  add(g, bevelBox(0.5, 0.16, 0.06, 0.02), accent.glow, [
+    ROOM_W / 2 - WALL_T / 2 - 0.04,
+    ROOM_H - 0.6,
+    -0.8,
+  ]);
+  add(g, POST, accent.glow, [ROOM_W / 2 - 0.4, 0.75, -ROOM_D / 2 + 0.5], [1, 1.5, 1]);
+  add(g, BEAD, accent.beacon, [ROOM_W / 2 - 0.4, 1.5, -ROOM_D / 2 + 0.5]);
+  add(g, PILLAR, MAT.panel, [-ROOM_W / 2 + 0.28, ROOM_H / 2, ROOM_D / 2 - 0.28], [1, ROOM_H, 1]);
+
+  return g;
+}
+
+/**
+ * Build the BARRACKS interior — warm-white living quarters. Two stacked bunk
+ * beds (mattresses/pillows/blankets + ladders), footlockers, personal lockers
+ * against the back wall, warm standing lamps, personal items, and warm overhead
+ * lighting.
+ */
+function buildBarracksInterior(): Group {
+  const g = new Group();
+  const warm = accentEmissive(BASE_PALETTE.accent.barracks, 2.1);
+  addShell(g);
+
+  // Two bunk beds against the side walls, facing the room.
+  const bedL = buildBunkBed();
+  bedL.position.set(-2.0, 0, -0.3);
+  g.add(bedL);
+  const bedR = buildBunkBed();
+  bedR.position.set(2.0, 0, -0.3);
+  bedR.rotation.y = Math.PI;
+  g.add(bedR);
+
+  // Footlockers at the foot of each bed.
+  add(g, FOOTLOCKER, MAT_PROPS.frame, [-2.0, 0.2, 0.9]);
+  add(g, FOOTLOCKER, MAT_PROPS.frame, [2.0, 0.2, 0.9]);
+  // Personal items atop the footlockers.
+  add(g, bevelBox(0.16, 0.1, 0.16, 0.01), MAT_PROPS.pillow, [-1.75, 0.45, 0.9]);
+  add(g, bevelBox(0.14, 0.14, 0.14, 0.01), MAT_PROPS.blanket, [1.8, 0.47, 0.9]);
+
+  // Personal lockers along the back wall.
+  add(g, LOCKER, MAT_PROPS.frame, [-0.7, 0.9, -ROOM_D / 2 + 0.28]);
+  add(g, LOCKER, MAT_PROPS.frame, [0.7, 0.9, -ROOM_D / 2 + 0.28]);
+
+  // Warm standing lamps between the beds.
+  for (const x of [-0.6, 0.6]) {
+    add(g, POST, MAT_PROPS.frame, [x, 0.9, -0.3], [1, 1.8, 1]);
+    add(g, BEAD, warm, [x, 1.85, -0.3], [1.4, 1, 1.4]);
+  }
+
+  // Warm overhead strip lighting (not the cool strip) + a corner pillar.
+  add(g, STRIP, warm, [0, ROOM_H - 0.2, 0]);
+  add(g, PILLAR, MAT.panel, [ROOM_W / 2 - 0.28, ROOM_H / 2, ROOM_D / 2 - 0.28], [1, ROOM_H, 1]);
+
+  return g;
+}
+
+/**
+ * Build the HANGAR interior — green interceptor bay. A sculpted interceptor
+ * (fuselage + nose cone + swept wings + cockpit + twin engines + landing gear)
+ * parked on a marked pad, an overhead gantry crane with a hoist, a tool rack,
+ * horizontal fuel tanks with a feed line, bay-door posts, and prop density.
+ */
+function buildHangarInterior(): Group {
+  const g = new Group();
+  const hex = BASE_PALETTE.accent.hangar;
+  const accent = ACCENT.hangar;
+  addShell(g);
+
+  // Landing pad — concrete disk with a painted emissive ring.
+  add(g, PAD, MAT.concrete, [0, 0.02, -0.2]);
+  const ring = add(g, PAD_RING, accent.glow, [0, 0.05, -0.2]);
+  ring.userData.interiorPulse = true;
+
+  // Interceptor fuselage (cylinder laid along Z) + nose cone + tail fin.
+  const shipY = 0.75;
+  add(g, FUSELAGE, MAT.panel, [0, shipY, 0], [1, 1, 1], [Math.PI / 2, 0, 0]);
+  add(g, NOSE_CONE, MAT.panel, [0, shipY, 1.45], [1, 1, 1], [Math.PI / 2, 0, 0]);
+  add(g, TAIL_FIN, MAT_PROPS.frame, [0, shipY + 0.28, -1.15]);
+  // Swept wings.
+  add(g, WING, MAT.panel, [-1.05, shipY - 0.04, -0.15], [1, 1, 1], [0, -0.35, 0]);
+  add(g, WING, MAT.panel, [1.05, shipY - 0.04, -0.15], [1, 1, 1], [0, 0.35, 0]);
+  // Cockpit canopy.
+  add(g, COCKPIT, MAT_PROPS.dark, [0, shipY + 0.16, 0.55]);
+  // Twin engine nacelles + glowing exhausts.
+  for (const sx of [-1, 1]) {
+    add(g, ENGINE_NACELLE, MAT_PROPS.dark, [sx * 0.28, shipY, -1.2], [1, 1, 1], [Math.PI / 2, 0, 0]);
+    const exh = add(
+      g,
+      ENGINE_GLOW,
+      accentEmissive(hex, 2.6),
+      [sx * 0.28, shipY, -1.5],
+      [1, 1, 1],
+      [Math.PI / 2, 0, 0],
+    );
+    exh.userData.interiorPulse = true;
+  }
+  // Landing gear — three struts with foot pads.
+  for (const gear of [
+    [-0.5, 0.7],
+    [0.5, 0.7],
+    [0, -0.9],
+  ] as const) {
+    add(g, LANDING_STRUT, MAT_PROPS.frame, [gear[0], 0.36, gear[1]], [1, 0.72, 1]);
+    add(g, LANDING_FOOT, MAT_PROPS.dark, [gear[0], 0.04, gear[1]]);
+  }
+
+  // Overhead gantry crane along the left wall — posts + rail + hoist + hook.
+  for (const z of [-1.5, 1.0]) {
+    add(g, BAY_POST, MAT_PROPS.frame, [-2.3, ROOM_H / 2, z], [1, ROOM_H, 1]);
+  }
+  add(g, CRANE_BEAM, MAT.panel, [-2.3, ROOM_H - 0.1, -0.25], [1, 1, 1], [0, Math.PI / 2, 0]);
+  add(g, CRANE_HOIST, MAT.worn, [-1.4, ROOM_H - 0.45, -0.25]);
+  add(g, BEAD, MAT_PROPS.dark, [-1.4, ROOM_H - 0.75, -0.25]);
+
+  // Tool rack against the right wall + tools.
+  add(g, TOOL_RACK, MAT_PROPS.frame, [2.45, 0.65, -0.4]);
+  for (let i = 0; i < 3; i++) {
+    add(g, ANTENNA_MAST, MAT_PROPS.dark, [2.3, 0.5 + i * 0.32, -0.4 + i * 0.12], [1, 0.45, 1]);
+  }
+
+  // Horizontal fuel tanks in the back-right corner + feed pipe.
+  add(g, FUEL_TANK, MAT_PROPS.frame, [1.7, 0.65, -1.7], [1, 1, 1], [0, 0, Math.PI / 2]);
+  add(g, FUEL_TANK, MAT_PROPS.frame, [1.7, 1.15, -1.7], [0.8, 0.8, 0.8], [0, 0, Math.PI / 2]);
+  add(g, CONDUIT, MAT_PROPS.dark, [1.2, 0.65, -1.7], [1.2, 1, 1], [0, 0, Math.PI / 2]);
+  add(g, COOLING_CAP, accent.glow, [1.7, 1.45, -1.7], [0.9, 1, 0.9]);
+
+  // Bay-door frame posts at the front opening + green wall work-light.
+  add(g, BAY_POST, MAT_PROPS.frame, [-ROOM_W / 2 + 0.3, ROOM_H / 2, ROOM_D / 2 - 0.3], [1, ROOM_H, 1]);
+  add(g, BAY_POST, MAT_PROPS.frame, [ROOM_W / 2 - 0.3, ROOM_H / 2, ROOM_D / 2 - 0.3], [1, ROOM_H, 1]);
+  add(g, bevelBox(0.5, 0.16, 0.06, 0.02), accent.glow, [
+    ROOM_W / 2 - WALL_T / 2 - 0.04,
+    ROOM_H - 0.6,
+    1.4,
+  ]);
+
+  // Overhead strip + pad status beacons + a prop crate.
+  add(g, STRIP, MAT.stripLight, [0, ROOM_H - 0.2, 1.4]);
+  add(g, DOT, accent.beacon, [-1.6, 0.08, -1.8]);
+  add(g, DOT, accent.beacon, [1.6, 0.08, -1.8]);
+  add(g, CRATE, MAT.worn, [-2.3, 0.25, 1.6]);
+
+  return g;
+}
+
+/**
+ * Build the RADAR interior — purple sensor command. A large lathed radar dish on
+ * a mast (tilted to face the room, tagged for future rotation), antenna arrays
+ * along the walls, a server rack, a console with a sweeping display, and prop
+ * density.
+ */
+function buildRadarInterior(): Group {
+  const g = new Group();
+  const hex = BASE_PALETTE.accent.radar;
+  const accent = ACCENT.radar;
+  addShell(g);
+
+  // Radar mast + lathed dish (back-center), tilted to face the room.
+  const mx = 0;
+  const mz = -0.7;
+  add(g, MAST_BASE, MAT_PROPS.dark, [mx, 0.05, mz]);
+  add(g, RADAR_MAST, MAT.panelDark, [mx, 1.1, mz]);
+  const dish = add(
+    g,
+    RADAR_DISH,
+    MAT.panel,
+    [mx, 2.25, mz + 0.15],
+    [1, 1, 1],
+    [-0.85, 0, 0],
+  );
+  // Forward-compat rotation tag (baseView frame loop may spin the dish on Y).
+  dish.userData.interiorRotor = { axis: "y", speed: 0.4 };
+  // Emissive emitter at the dish's focal point.
+  const emitter = add(g, BEAD, accent.beacon, [mx, 2.32, mz + 0.35], [1.3, 1, 1.3]);
+  emitter.userData.interiorPulse = true;
+  // Support arm bracing the dish to the mast.
+  add(g, ANTENNA_ARM, MAT_PROPS.frame, [mx, 2.05, mz + 0.05], [1, 1, 1], [0.6, 0, 0]);
+
+  // Three antenna arrays along the walls (mast + two crossed arms).
+  const arraySpots: ReadonlyArray<readonly [number, number]> = [
+    [-2.3, -1.6],
+    [2.3, -1.6],
+    [-2.3, 1.4],
+  ];
+  for (const [x, z] of arraySpots) {
+    add(g, ANTENNA_MAST, MAT_PROPS.frame, [x, 1.0, z], [1, 1.7, 1]);
+    add(g, ANTENNA_ARM, MAT_PROPS.frame, [x, 1.55, z]);
+    add(g, ANTENNA_ARM, MAT_PROPS.frame, [x, 1.3, z], [1, 1, 1], [0, Math.PI / 2, 0]);
+    add(g, DOT, accent.beacon, [x, 1.78, z]);
+  }
+
+  // Server rack against the right wall (purple readouts).
+  const rack = buildRack("SRV-1", hex);
+  rack.position.set(ROOM_W / 2 - RACK_D / 2 - WALL_T / 2, 0, 0.3);
+  rack.rotation.y = -Math.PI / 2;
+  g.add(rack);
+
+  // Console with a sweeping display (front-left).
+  add(g, RADAR_CONSOLE, MAT.panel, [-1.9, 0.46, 1.1]);
+  const sweep = add(g, SWEEP_SCREEN, screenMaterial(hex, "SWEEP"), [-1.9, 0.96, 1.37]);
+  sweep.userData.interiorScreen = true;
+
+  // Overhead strip + purple wall work-light + floor beacon.
+  add(g, STRIP, MAT.stripLight, [0, ROOM_H - 0.2, 0]);
+  add(g, bevelBox(0.5, 0.16, 0.06, 0.02), accent.glow, [
+    ROOM_W / 2 - WALL_T / 2 - 0.04,
+    ROOM_H - 0.6,
+    -0.6,
+  ]);
+  add(g, POST, accent.glow, [-ROOM_W / 2 + 0.4, 0.75, -ROOM_D / 2 + 0.5], [1, 1.5, 1]);
+  add(g, BEAD, accent.beacon, [-ROOM_W / 2 + 0.4, 1.5, -ROOM_D / 2 + 0.5]);
+
+  // Cable tray + drooping cables + corner pillar.
+  add(g, CABLE_TRAY, MAT.worn, [0, ROOM_H - 0.35, -1.8], [1, 1, 1], [Math.PI / 2, 0, 0]);
+  for (let i = 0; i < 2; i++) {
+    const c = add(g, CABLE, MAT.panelDark, [-0.3 + i * 0.6, ROOM_H - 0.6, -1.8], [1, 1, 1], [0.2, 0, 0]);
+    c.scale.y = 0.6;
+  }
+  add(g, PILLAR, MAT.panel, [ROOM_W / 2 - 0.28, ROOM_H / 2, ROOM_D / 2 - 0.28], [1, ROOM_H, 1]);
+
+  return g;
+}
+
+/**
+ * Build the REACTOR interior — yellow power core. A large cylindrical reactor
+ * core (dark casing + pulsing emissive inner column), conduit pipes routing to
+ * the walls, cooling tanks in the corners, two control consoles, hazard
+ * warning-stripes along the wall base, and prop density.
+ */
+function buildReactorInterior(): Group {
+  const g = new Group();
+  const hex = BASE_PALETTE.accent.reactor;
+  const accent = ACCENT.reactor;
+  addShell(g);
+
+  // Reactor core — base ring, dark casing, pulsing inner column, cap, beacon.
+  add(g, CORE_BASE_RING, MAT_PROPS.dark, [0, 0.11, 0]);
+  add(g, CORE, MAT_PROPS.dark, [0, 1.05, 0]);
+  const inner = add(
+    g,
+    CORE,
+    accentEmissive(hex, 2.2),
+    [0, 1.05, 0],
+    [0.78, 0.96, 0.78],
+  );
+  inner.userData.interiorPulse = true;
+  add(g, CORE_TOP, MAT_PROPS.dark, [0, 2.0, 0]);
+  add(g, BEAD, accent.beacon, [0, 2.12, 0]);
+
+  // Hazard band around the core base.
+  add(g, DISK, accent.glow, [0, 0.24, 0], [1.5, 1, 1.5]);
+
+  // Conduit pipes routing from the core out toward the walls (horizontal).
+  add(g, CONDUIT, MAT_PROPS.frame, [-1.0, 1.1, 0], [1.4, 1, 1], [0, 0, Math.PI / 2]);
+  add(g, CONDUIT, MAT_PROPS.frame, [1.0, 1.1, 0], [1.4, 1, 1], [0, 0, Math.PI / 2]);
+  add(g, CONDUIT, MAT_PROPS.frame, [0, 1.1, -1.1], [1.4, 1, 1], [Math.PI / 2, 0, 0]);
+  add(g, CONDUIT, MAT_PROPS.frame, [-1.0, 1.5, 0], [1.4, 1, 1], [0, 0, Math.PI / 2]);
+
+  // Cooling tanks in the back corners + caps.
+  for (const sx of [-1, 1]) {
+    add(g, COOLING_TANK, MAT_PROPS.frame, [sx * 1.9, 0.75, -1.7]);
+    add(g, COOLING_CAP, accent.glow, [sx * 1.9, 1.55, -1.7], [0.95, 1, 0.95]);
+  }
+
+  // Two control consoles (front-left + front-right) facing the room.
+  for (const sx of [-1, 1]) {
+    add(g, REACTOR_CONSOLE, MAT.panel, [sx * 1.7, 0.45, 1.3], [1, 1, 1], [0, sx * 0.5, 0]);
+    const scr = add(
+      g,
+      BENCH_SCREEN,
+      screenMaterial(hex, "CORE"),
+      [sx * 1.7, 0.86, 1.56],
+      [1, 1, 1],
+      [-0.35, sx * 0.5, 0],
+    );
+    scr.userData.interiorScreen = true;
+  }
+
+  // Hazard warning-stripes along the back wall base (alternating yellow/dark).
+  for (let i = 0; i < 7; i++) {
+    const x = -1.8 + i * 0.6;
+    add(g, WARN_STRIPE, i % 2 === 0 ? accentEmissive(hex, 0.7) : MAT_PROPS.dark, [
+      x,
+      0.32,
+      -ROOM_D / 2 + 0.04,
+    ]);
+  }
+
+  // Overhead strip + yellow wall work-light + floor beacon + pillar.
+  add(g, STRIP, MAT.stripLight, [0, ROOM_H - 0.2, 1.6]);
+  add(g, bevelBox(0.5, 0.16, 0.06, 0.02), accent.glow, [
+    ROOM_W / 2 - WALL_T / 2 - 0.04,
+    ROOM_H - 0.6,
+    0.2,
+  ]);
+  add(g, POST, accent.glow, [-ROOM_W / 2 + 0.4, 0.75, ROOM_D / 2 - 0.6], [1, 1.5, 1]);
+  add(g, BEAD, accent.beacon, [-ROOM_W / 2 + 0.4, 1.5, ROOM_D / 2 - 0.6]);
+  add(g, PILLAR, MAT.panel, [ROOM_W / 2 - 0.28, ROOM_H / 2, ROOM_D / 2 - 0.28], [1, ROOM_H, 1]);
+
+  return g;
+}
+
+/**
+ * Build a facility INTERIOR diorama for the given role. Each of the seven roles
+ * gets its own dense, textured, sculpted diorama (the LAB remains the hero; the
+ * other six are detailed to the same quality). The returned Group is tagged
+ * `userData.facilityRole`; animated accents self-tag (userData.interiorPulse /
+ * interiorBlink / interiorScreen / interiorRotor) for the baseView frame loop.
+ * Origin is at floor center (y = 0 is the floor surface); the front wall is open
+ * toward +z for the camera.
  */
 export function buildFacilityInterior(role: FacilityRole): Group {
-  const group = role === "lab" ? buildLabInterior() : buildGenericInterior(role);
+  const group = (() => {
+    switch (role) {
+      case "lab":
+        return buildLabInterior();
+      case "command":
+        return buildCommandInterior();
+      case "workshop":
+        return buildWorkshopInterior();
+      case "barracks":
+        return buildBarracksInterior();
+      case "hangar":
+        return buildHangarInterior();
+      case "radar":
+        return buildRadarInterior();
+      case "reactor":
+        return buildReactorInterior();
+    }
+  })();
   group.userData.facilityRole = role;
   group.userData.interior = true;
   return group;

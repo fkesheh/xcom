@@ -47,6 +47,34 @@ export const WEAPONS: Record<string, Weapon> = {
       { kind: "aimed", tuPercent: 55, accuracy: 100, shots: 1 },
     ],
   },
+  cannon: {
+    id: "cannon",
+    name: "Assault Cannon",
+    // Heavy hitter: massive base damage in exchange for short range, low
+    // accuracy, and a steep TU cost. A single landed shot defines a turn.
+    damage: 50,
+    range: 7,
+    magazineSize: 6,
+    reloadTuPercent: 30,
+    modes: [
+      { kind: "snap", tuPercent: 45, accuracy: 45, shots: 1 },
+      { kind: "aimed", tuPercent: 70, accuracy: 80, shots: 1 },
+    ],
+  },
+  sniper: {
+    id: "sniper",
+    name: "Marksman Rifle",
+    // Precision tool: very high accuracy multiplier and long effective range,
+    // priced at a very high TU cost so it fires one deliberate shot per turn.
+    damage: 45,
+    range: 20,
+    magazineSize: 5,
+    reloadTuPercent: 28,
+    modes: [
+      { kind: "snap", tuPercent: 40, accuracy: 75, shots: 1 },
+      { kind: "aimed", tuPercent: 80, accuracy: 140, shots: 1 },
+    ],
+  },
 };
 
 /** Consumable item catalogue. Keyed by stable id. */
@@ -119,6 +147,61 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
     weaponId: "plasma",
     items: ["grenade"],
     sightRange: 18,
+    visionHalfAngleDeg: 45,
+  },
+  heavy: {
+    id: "heavy",
+    name: "Heavy",
+    faction: "enemy",
+    // Tank: soaks damage with the highest HP in the roster and brings the
+    // cannon to bear. Slow TUs mean it advances deliberately and fires once.
+    stats: {
+      timeUnits: 42,
+      health: 70,
+      reactions: 30,
+      firingAccuracy: 55,
+      strength: 60,
+      bravery: 70,
+    },
+    weaponId: "cannon",
+    sightRange: 16,
+    visionHalfAngleDeg: 45,
+  },
+  stalker: {
+    id: "stalker",
+    name: "Stalker",
+    faction: "enemy",
+    // Glass cannon: lowest enemy HP but fast TUs, sharp reactions, and a
+    // sniper rifle. Kills at range from cover, dies to a single burst.
+    stats: {
+      timeUnits: 75,
+      health: 24,
+      reactions: 70,
+      firingAccuracy: 80,
+      strength: 30,
+      bravery: 50,
+    },
+    weaponId: "sniper",
+    sightRange: 22,
+    visionHalfAngleDeg: 40,
+  },
+  commander: {
+    id: "commander",
+    name: "Commander",
+    faction: "enemy",
+    // Priority target: high reactions and the roster's top bravery make it a
+    // steady, panic-proof leader that presses the attack and carries a grenade.
+    stats: {
+      timeUnits: 58,
+      health: 50,
+      reactions: 75,
+      firingAccuracy: 62,
+      strength: 40,
+      bravery: 90,
+    },
+    weaponId: "plasma",
+    items: ["grenade"],
+    sightRange: 20,
     visionHalfAngleDeg: 45,
   },
   civilian: {

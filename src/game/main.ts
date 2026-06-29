@@ -111,6 +111,16 @@ let tacticalCleanup: (() => void) | null = null;
 let planeCombat: PlaneCombatView | null = null;
 
 /**
+ * Shared audio controller. A single Sfx backs the screen ambience beds and the
+ * tactical SFX so the AudioContext and mute state are shared across screens.
+ * The context is created lazily and starts suspended until the first gesture.
+ */
+const sfx = new Sfx();
+// Browsers block audio until a user gesture; unlock on the first pointerdown so
+// the geoscape/base ambience beds (mounted before any gesture) can start.
+window.addEventListener("pointerdown", () => { void sfx.resume(); }, { once: true });
+
+/**
  * In-memory source of truth for the live campaign. The geoscape's flowing-time
  * frame loop and every base callback advance from this rather than re-reading
  * localStorage — which returns the last *committed* state and so goes stale
@@ -274,6 +284,7 @@ function showGeoscape(): void {
   planeCombat?.dispose();
   planeCombat = null;
   mountGeoscape(currentCampaign);
+  sfx.startAmbience("geoscape");
 }
 
 function showBase(campaign: CampaignState): void {
@@ -389,6 +400,7 @@ function showBase(campaign: CampaignState): void {
     },
   });
   baseView.mount(appRoot);
+  sfx.startAmbience("base");
 }
 
 function startTactical(campaign: CampaignState, operation: OperationPlan = generateOperation(campaign)): void {
@@ -448,7 +460,9 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
   const renderer = new Renderer();
   renderer.mount(appRoot);
 
-  const sfx = new Sfx();
+  // Switch the shared ambience bed to the tactical wind/rumble. The same `sfx`
+  // instance backs all tactical SFX below, so mute carries over from the globe.
+  sfx.startAmbience("tactical");
 
   let selectedId: number | null = null;
   let currentMode: ShotKind = "snap";
