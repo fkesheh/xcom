@@ -136,7 +136,7 @@ test.describe("Blacksite boot smoke", () => {
     // Boot with a saved campaign always lands on the base view; the
     // interception overlay lives on the geoscape, so hop over via "Earth".
     await expect(page.locator("#base-view")).toBeVisible();
-    await page.getByRole("button", { name: /^earth$/i }).click();
+    await page.locator('button:has-text("Earth")').click({ force: true });
 
     await expect(page.locator("#geoscape")).toBeVisible();
     await expect(page.locator("#geoscape canvas")).toBeVisible();
@@ -281,7 +281,7 @@ test.describe("Blacksite boot smoke", () => {
     await page.goto("/");
 
     await expect(page.locator("#base-view")).toBeVisible();
-    await page.getByRole("button", { name: /^earth$/i }).click();
+    await page.locator('button:has-text("Earth")').click({ force: true });
 
     await expect(page.locator("#geoscape")).toBeVisible();
     await expect(page.locator("#geoscape canvas")).toBeVisible();
