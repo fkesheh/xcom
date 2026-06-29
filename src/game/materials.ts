@@ -325,6 +325,17 @@ const SPECS: Record<string, MatSpec> = {
     emissive: 0x0e1822, emissiveIntensity: 0.4, envIntensity: 1.2,
   },
 
+  // -- Additive theme pack (arctic / jungle / forest) -----------------------
+  // Slippery arctic ground (white-blue), slick ice, and a glacial block; deep
+  // jungle undergrowth and a fallen log; mixed woodland earth + a sunlit
+  // clearing. See src/sim/terrain.themes.extra.ts for the sim data.
+  snow: { color: 0xdfe7ef, roughness: 0.9, metalness: 0, detail: true, normalScale: 0.35 },
+  ice: { color: 0xa9c6d6, roughness: 0.28, metalness: 0, detail: true, normalScale: 0.2, envIntensity: 0.9 },
+  ice_block: { color: 0xb8c8d4, roughness: 0.45, metalness: 0.05, detail: true, normalScale: 0.6 },
+  jungle_floor: { color: 0x2f5a28, roughness: 0.95, metalness: 0, detail: true, normalScale: 0.6 },
+  log: { color: 0x6b4a2c, roughness: 0.85, metalness: 0.05, detail: true, normalScale: 0.5 },
+  forest_floor: { color: 0x4a5a32, roughness: 0.95, metalness: 0, detail: true, normalScale: 0.6 },
+  clearing: { color: 0x6f8a3e, roughness: 0.9, metalness: 0, detail: true, normalScale: 0.5 },
 };
 
 /** Fallback for an unknown category: a plain neutral surface. */

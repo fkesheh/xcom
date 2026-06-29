@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   STARTER_BASE_FACILITY_IDS,
@@ -9,6 +9,7 @@ import {
 import {
   advanceGeoscape,
   canLaunchInterceptor,
+  createUfoContact,
   CRASH_SITE_LIFETIME_HOURS,
   FUNDING_REPORT_INTERVAL_HOURS,
   interceptUfo,
@@ -24,7 +25,9 @@ import {
   availableBaseFacilities,
   availableWeaponCount,
   buildFacility,
+  CAMPAIGN_STORAGE_KEY,
   CAMPAIGN_VICTORY_OPERATIONS,
+  campaignInfiltration,
   campaignMissionSeed,
   canAssignSoldierWeapon,
   canBuildFacility,
@@ -34,10 +37,13 @@ import {
   canStartResearch,
   canStartManufacturing,
   campaignObjectiveProgress,
+  COUNCIL_REGIONS,
+  clearCampaign,
   completeFacilityConstruction,
   completeResearch,
   constructedFacilities,
   createCampaign,
+  defectedRegions,
   deploymentSoldiers,
   deploymentWeaponIds,
   campaignSoldierStatBonus,
@@ -45,6 +51,7 @@ import {
   hasResearch,
   highestRegionalPanic,
   livingSoldiers,
+  loadCampaign,
   manufacturingCost,
   manufacturingDuration,
   MEDBAY_FACILITY_ID,
@@ -54,16 +61,20 @@ import {
   researchCost,
   RECRUIT_COST,
   recruitSoldier,
+  regionalInfiltrationFor,
   regionalPanicFor,
   recordMissionResult,
+  saveCampaign,
   setSoldierDeployment,
   soldierStatBonus,
   soldierWeaponId,
   startManufacturing,
   startResearch,
+  STARTING_INFILTRATION,
   STARTING_REGIONAL_PANIC,
   updateCampaignBase,
 } from "../src/campaign/storage";
+import type { CampaignState, MissionType, UfoContact } from "../src/campaign/types";
 
 describe("campaign state", () => {
   it("creates a persistent campaign record from a base location", () => {
@@ -944,6 +955,58 @@ describe("campaign state", () => {
     expect(summary.staffAssigned).toBe(86);
     expect(summary.hangarSlots).toBe(4);
   });
+
+  it("spawns a base-defense contact at the base location and only under very high threat", () => {
+    const baseLocation = { lat: 48.8, lon: 2.3, region: "Europe" };
+    const campaign = createCampaign(baseLocation, 12345);
+
+    // A base-defense assault spawns already on the ground, on the player's own base.
+    const defense = createUfoContact(campaign, 18, "baseDefense");
+    expect(defense.missionType).toBe("baseDefense");
+    expect(defense.status).toBe("landed");
+    expect(defense.region).toBe("Europe");
+    expect(defense.lat).toBe(48.8);
+    expect(defense.lon).toBe(2.3);
+
+    // generateOperation turns that contact into a base-defense mission pinned to the base.
+    const operation = generateOperation({ ...campaign, ufoContact: defense });
+    expect(operation.missionType).toBe("baseDefense");
+    expect(operation.region).toBe("Europe");
+    expect(operation.objective).toBe("Repel the base assault.");
+    expect(operation.briefing).toContain("our base in Europe");
+    // The assault force scales with strategic threat.
+    const lowThreatOp = generateOperation({
+      ...campaign,
+      ufoContact: defense,
+      strategic: { ...campaign.strategic, threat: 30 },
+    });
+    const highThreatOp = generateOperation({
+      ...campaign,
+      ufoContact: defense,
+      strategic: { ...campaign.strategic, threat: 95 },
+    });
+    expect(highThreatOp.enemyCount).toBeGreaterThan(lowThreatOp.enemyCount);
+
+    // Held at low threat/panic, a campaign never rolls a baseDefense spawn (high-threat only).
+    for (let seed = 1; seed <= 25; seed++) {
+      let low = createCampaign(baseLocation, seed);
+      for (let step = 0; step < 10; step++) {
+        low = advanceGeoscape(low, 36);
+        expect(low.ufoContact?.missionType).not.toBe("baseDefense");
+        low = {
+          ...low,
+          strategic: {
+            ...low.strategic,
+            status: "active" as const,
+            threat: 25,
+            funding: 600,
+            score: 0,
+          },
+          regionalPanic: { ...STARTING_REGIONAL_PANIC },
+        };
+      }
+    }
+  });
 });
 
 describe("soldier bios", () => {
@@ -999,5 +1062,234 @@ describe("soldier bios", () => {
     const bios = new Set(campaign.soldiers.map((s) => s.bio));
 
     expect(bios.size).toBeGreaterThan(1);
+  });
+});
+
+describe("infiltration and defection", () => {
+  const BASE = { lat: 2, lon: 14.2, region: "Africa" } as const;
+
+  /** A minimal tracked contact in a council region that will expire at `expiresAtHour`. */
+  function stagedContact(region: string, missionType: MissionType, expiresAtHour: number): UfoContact {
+    return {
+      id: `UFO-STAGED-${region}-${missionType}`,
+      status: "tracked",
+      missionType,
+      lat: 0,
+      lon: 0,
+      region,
+      detectedAtHour: 0,
+      expiresAtHour,
+      missionSeed: 1,
+      strength: 1,
+    };
+  }
+
+  it("starts every council region at zero infiltration", () => {
+    const campaign = createCampaign(BASE, 12345);
+
+    expect(campaign.infiltration).toEqual(STARTING_INFILTRATION);
+    for (const region of COUNCIL_REGIONS) {
+      expect(campaign.infiltration![region]).toBe(0);
+    }
+    expect(defectedRegions(campaign)).toEqual([]);
+    expect(campaignInfiltration(campaign)).toEqual(STARTING_INFILTRATION);
+  });
+
+  it("raises regional infiltration when a UFO contact expires un-intercepted", () => {
+    const campaign = createCampaign(BASE, 12345);
+    const staged = { ...campaign, ufoContact: stagedContact("Europe", "crashSite", 6) };
+
+    const expired = advanceGeoscape(staged, 6);
+
+    expect(expired.ufoContact).toBeUndefined();
+    // crashSite baseline gain is 10 at the veteran panicMult of 1.0.
+    expect(regionalInfiltrationFor(expired, "Europe")).toBe(10);
+    // The ignored contact raises infiltration, not the fresh campaign.
+    expect(regionalInfiltrationFor(campaign, "Europe")).toBe(0);
+    expect(defectedRegions(expired)).toEqual([]);
+  });
+
+  it("scales infiltration by mission type (terror/landed worse than crashSite)", () => {
+    const run = (missionType: MissionType) =>
+      advanceGeoscape(
+        { ...createCampaign(BASE, 12345), ufoContact: stagedContact("Europe", missionType, 6) },
+        6,
+      );
+
+    const crash = run("crashSite");
+    const landed = run("landedUfo");
+    const terror = run("terror");
+
+    expect(regionalInfiltrationFor(crash, "Europe")).toBe(10);
+    expect(regionalInfiltrationFor(landed, "Europe")).toBe(20);
+    expect(regionalInfiltrationFor(terror, "Europe")).toBe(30);
+    expect(regionalInfiltrationFor(terror, "Europe")!).toBeGreaterThan(
+      regionalInfiltrationFor(crash, "Europe")!,
+    );
+  });
+
+  it("accumulates infiltration across successive ignored contacts in the same region", () => {
+    let state: CampaignState = {
+      ...createCampaign(BASE, 12345),
+      ufoContact: stagedContact("Europe", "crashSite", 6),
+    };
+    state = advanceGeoscape(state, 6);
+    expect(regionalInfiltrationFor(state, "Europe")).toBe(10);
+
+    // A second ignored crash-site contact deepens the same region's meter.
+    state = {
+      ...state,
+      ufoContact: stagedContact("Europe", "crashSite", state.clock.elapsedHours + 6),
+    };
+    state = advanceGeoscape(state, 6);
+    expect(regionalInfiltrationFor(state, "Europe")).toBe(20);
+  });
+
+  it("defects a nation when infiltration reaches 100, cutting funding permanently", () => {
+    const base = createCampaign(BASE, 12345);
+    // Veteran share: round(600 / 8) = 75 council credits withdrawn on defection.
+    const share = Math.round(base.strategic.funding / COUNCIL_REGIONS.length);
+
+    // Europe sits one terror contact (+30) away from maxing out.
+    const nearDefection = {
+      ...base,
+      infiltration: { ...STARTING_INFILTRATION, Europe: 80 },
+      ufoContact: stagedContact("Europe", "terror", 6),
+    };
+    // Same scenario, but Europe stays just short of 100 (no crossing).
+    const noDefect = {
+      ...base,
+      infiltration: { ...STARTING_INFILTRATION, Europe: 69 },
+      ufoContact: stagedContact("Europe", "terror", 6),
+    };
+
+    const afterDefect = advanceGeoscape(nearDefection, 6);
+    const afterNoDefect = advanceGeoscape(noDefect, 6);
+
+    expect(regionalInfiltrationFor(afterDefect, "Europe")).toBe(100);
+    expect(defectedRegions(afterDefect)).toContain("Europe");
+    expect(defectedRegions(afterNoDefect)).toEqual([]);
+    // The defected scenario's funding is exactly one share lower than the control;
+    // the shared baseline ignore penalty cancels out in the difference.
+    expect(afterNoDefect.strategic.funding - afterDefect.strategic.funding).toBe(share);
+
+    const pact = afterDefect.projectReports.find((report) => report.title === "Europe defects");
+    expect(pact).toBeDefined();
+    expect(pact?.summary).toContain("signed a pact with the aliens");
+    expect(pact?.summary).toContain(`${share}c`);
+
+    // Defection is exactly-once: another ignored contact in a maxed-out region does
+    // not withdraw funding again and does not log a second pact.
+    const second = advanceGeoscape(
+      { ...afterDefect, ufoContact: stagedContact("Europe", "terror", afterDefect.clock.elapsedHours + 6) },
+      6,
+    );
+    expect(regionalInfiltrationFor(second, "Europe")).toBe(100);
+    expect(second.projectReports.filter((report) => report.title === "Europe defects")).toHaveLength(1);
+  });
+
+  it("reflects defections in the monthly funding report (reduced income)", () => {
+    const base = createCampaign(BASE, 12345);
+    const share = Math.round(base.strategic.funding / COUNCIL_REGIONS.length);
+    // Europe has already defected: its share is withdrawn and the meter is pinned at 100.
+    const defected = {
+      ...base,
+      strategic: { ...base.strategic, funding: base.strategic.funding - share },
+      infiltration: { ...STARTING_INFILTRATION, Europe: 100 },
+      // Suppress UFO spawns so no contacts interfere with the monthly report.
+      clock: { ...base.clock, lastContactHour: Number.MAX_SAFE_INTEGER },
+    };
+
+    const after = advanceGeoscape(defected, FUNDING_REPORT_INTERVAL_HOURS);
+
+    expect(after.lastFundingReport?.income).toBe(base.strategic.funding - share);
+    expect(after.lastFundingReport?.summary).toContain("1 nation defected");
+    expect(defectedRegions(after)).toContain("Europe");
+  });
+});
+
+describe("infiltration save/load normalization", () => {
+  const BASE = { lat: 2, lon: 14.2, region: "Africa" } as const;
+
+  /** The node test environment has no localStorage; install a minimal shim. */
+  function installLocalStorageShim(): void {
+    const store = new Map<string, string>();
+    const shim: Storage = {
+      get length(): number {
+        return store.size;
+      },
+      clear(): void {
+        store.clear();
+      },
+      getItem(key: string): string | null {
+        return store.has(key) ? store.get(key)! : null;
+      },
+      key(index: number): string | null {
+        return Array.from(store.keys())[index] ?? null;
+      },
+      removeItem(key: string): void {
+        store.delete(key);
+      },
+      setItem(key: string, value: string): void {
+        store.set(key, String(value));
+      },
+    };
+    Object.defineProperty(globalThis, "localStorage", { value: shim, configurable: true, writable: true });
+  }
+
+  beforeEach(() => {
+    installLocalStorageShim();
+  });
+
+  afterEach(() => {
+    clearCampaign();
+    // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+    delete (globalThis as { localStorage?: Storage }).localStorage;
+  });
+
+  it("persists and reloads per-region infiltration", () => {
+    const campaign = createCampaign(BASE, 12345);
+    saveCampaign({
+      ...campaign,
+      infiltration: { ...STARTING_INFILTRATION, Europe: 42, Africa: 7 },
+    });
+    const loaded = loadCampaign();
+
+    expect(loaded).not.toBeNull();
+    expect(loaded!.infiltration).toBeDefined();
+    expect(loaded!.infiltration!.Europe).toBe(42);
+    expect(loaded!.infiltration!.Africa).toBe(7);
+    // Regions not mentioned in the meter default to zero.
+    expect(loaded!.infiltration!.Oceania).toBe(0);
+  });
+
+  it("clamps out-of-range infiltration on load and flags the maxed region as defected", () => {
+    expect(CAMPAIGN_STORAGE_KEY).toBeTruthy();
+    const campaign = createCampaign(BASE, 12345);
+    saveCampaign({
+      ...campaign,
+      infiltration: { ...STARTING_INFILTRATION, Europe: 150, Africa: -5 },
+    });
+    const loaded = loadCampaign();
+
+    expect(loaded!.infiltration!.Europe).toBe(100);
+    expect(loaded!.infiltration!.Africa).toBe(0);
+    expect(loaded!.infiltration!.Oceania).toBe(0);
+    expect(defectedRegions(loaded!)).toContain("Europe");
+    expect(defectedRegions(loaded!)).not.toContain("Africa");
+  });
+
+  it("backfills zero infiltration for legacy saves that predate the meter", () => {
+    const campaign = createCampaign(BASE, 12345);
+    const { infiltration: _infiltration, ...legacy } = campaign;
+    expect(_infiltration).toBeDefined();
+    saveCampaign(legacy);
+
+    const loaded = loadCampaign();
+    expect(loaded!.infiltration).toBeDefined();
+    for (const region of COUNCIL_REGIONS) {
+      expect(loaded!.infiltration![region]).toBe(0);
+    }
+    expect(defectedRegions(loaded!)).toEqual([]);
   });
 });

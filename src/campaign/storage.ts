@@ -244,6 +244,18 @@ export const STARTING_REGIONAL_PANIC: Record<CouncilRegion, number> = {
   Oceania: 20,
 };
 
+/** Infiltration starts at zero in every council region; it only rises as UFOs slip through. */
+export const STARTING_INFILTRATION: Record<CouncilRegion, number> = {
+  "North America": 0,
+  "South America": 0,
+  Europe: 0,
+  Africa: 0,
+  "Middle East": 0,
+  "South Asia": 0,
+  "East Asia": 0,
+  Oceania: 0,
+};
+
 export const STARTING_CLOCK: CampaignClock = {
   day: 1,
   hour: 0,
@@ -816,6 +828,7 @@ export function createCampaign(
     base,
     strategic,
     regionalPanic: { ...STARTING_REGIONAL_PANIC },
+    infiltration: { ...STARTING_INFILTRATION },
     clock: { ...STARTING_CLOCK },
     lastFundingReport: undefined,
     interceptor: { ...STARTING_INTERCEPTOR },
@@ -934,6 +947,52 @@ export function adjustRegionalPanic(
     next[one] = Math.max(0, Math.min(100, Math.round((next[one] ?? STARTING_REGIONAL_PANIC[one]) + delta)));
   }
   return next;
+}
+
+/**
+ * The full per-region infiltration map for a campaign. Stored values (which may be
+ * sparse) are folded over an all-zero base so callers always see a complete record.
+ */
+export function campaignInfiltration(campaign: CampaignState): Record<CouncilRegion, number> {
+  const stored = campaign.infiltration;
+  if (!stored) return { ...STARTING_INFILTRATION };
+  const result = { ...STARTING_INFILTRATION };
+  for (const region of COUNCIL_REGIONS) {
+    const value = stored[region];
+    if (typeof value === "number") result[region] = value;
+  }
+  return result;
+}
+
+/** Infiltration level of a contact's region, or undefined when the region is not a council region. */
+export function regionalInfiltrationFor(campaign: CampaignState, region: string): number | undefined {
+  const councilRegion = councilRegionFor(region);
+  return councilRegion ? campaignInfiltration(campaign)[councilRegion] : undefined;
+}
+
+/**
+ * Raises (or lowers) one region's alien infiltration. Unlike panic, infiltration
+ * is targeted — there is no spillover to neighbouring regions. The meter is
+ * clamped to [0, 100]; a region pinned at 100 is permanently defected.
+ */
+export function adjustRegionalInfiltration(
+  infiltration: Record<CouncilRegion, number>,
+  region: string,
+  delta: number,
+  mult = 1,
+): Record<CouncilRegion, number> {
+  const councilRegion = councilRegionFor(region);
+  if (!councilRegion) return infiltration;
+  const next = { ...infiltration };
+  const scaled = Math.round(delta * mult);
+  next[councilRegion] = Math.max(0, Math.min(100, Math.round((next[councilRegion] ?? 0) + scaled)));
+  return next;
+}
+
+/** Council regions whose infiltration has maxed out and signed a pact with the aliens. */
+export function defectedRegions(campaign: CampaignState): CouncilRegion[] {
+  const infiltration = campaignInfiltration(campaign);
+  return COUNCIL_REGIONS.filter((region) => infiltration[region] >= 100);
 }
 
 export function livingSoldiers(campaign: CampaignState): CampaignSoldier[] {
@@ -1976,6 +2035,7 @@ export function loadCampaign(): CampaignState | null {
     const resources = normalizeResources(parsed.resources);
     const soldiers = normalizeSoldiers(parsed.soldiers, parsed.seed);
     const regionalPanic = normalizeRegionalPanic(parsed.regionalPanic);
+    const infiltration = normalizeInfiltration(parsed.infiltration);
     const strategic = normalizeCampaignStatus(normalizeStrategic(parsed.strategic), resources, soldiers, regionalPanic);
     const clock = normalizeClock(parsed.clock);
     const completedResearch = normalizeResearch(parsed.completedResearch);
@@ -1989,6 +2049,7 @@ export function loadCampaign(): CampaignState | null {
       base: parsed.base,
       strategic,
       regionalPanic,
+      infiltration,
       clock,
       lastFundingReport: normalizeFundingReport(parsed.lastFundingReport),
       interceptor,
@@ -2075,6 +2136,19 @@ function normalizeRegionalPanic(value: unknown): Record<CouncilRegion, number> {
     result[region] = typeof panic === "number"
       ? Math.max(0, Math.min(100, Math.round(panic)))
       : STARTING_REGIONAL_PANIC[region];
+  }
+  return result;
+}
+
+/** Per-region infiltration on load: clamps each value to [0, 100], defaulting to 0. */
+function normalizeInfiltration(value: unknown): Record<CouncilRegion, number> {
+  if (!value || typeof value !== "object") return { ...STARTING_INFILTRATION };
+  const maybe = value as Partial<Record<CouncilRegion, unknown>>;
+  const result = { ...STARTING_INFILTRATION };
+  for (const region of COUNCIL_REGIONS) {
+    const infiltration = maybe[region];
+    result[region] =
+      typeof infiltration === "number" ? Math.max(0, Math.min(100, Math.round(infiltration))) : 0;
   }
   return result;
 }

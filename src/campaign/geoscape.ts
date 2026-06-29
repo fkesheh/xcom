@@ -3,6 +3,7 @@ import type {
   CampaignClock,
   CampaignResources,
   CampaignState,
+  CouncilRegion,
   Craft,
   FundingReport,
   InterceptionEncounter,
@@ -17,14 +18,19 @@ import { summarizeBaseFacilities } from "./base";
 import { isLand } from "./landMask";
 import {
   activeSoldiers,
+  adjustRegionalInfiltration,
   adjustRegionalPanic,
+  campaignInfiltration,
   canRecruitSoldier,
   chooseInterceptor,
+  COUNCIL_REGIONS,
+  councilRegionFor,
   completeFinishedConstruction,
   completeFinishedResearch,
   completeFinishedManufacturing,
   constructedFacilities,
   damageCraft,
+  defectedRegions,
   difficultyConfig,
   hasBaseFacility,
   highestRegionalPanic,
@@ -201,9 +207,16 @@ export function createUfoContact(
 ): UfoContact {
   const seed = hash(campaign.seed ^ (campaign.missionsAttempted * 0x9e3779b9) ^ detectedAtHour);
   const zone = CONTACT_ZONES[seed % CONTACT_ZONES.length]!;
-  const lat = Math.max(-56, Math.min(68, zone.lat + offset(hash(seed ^ 0xa511e9b3), 7)));
+  // A base-defense assault strikes the player's base directly, so it spawns at the
+  // base's own lat/lon and is attributed to the base's region. Every other contact
+  // spawns at a deterministically chosen contact zone.
+  const atBase = missionType === "baseDefense";
+  const zoneLat = Math.max(-56, Math.min(68, zone.lat + offset(hash(seed ^ 0xa511e9b3), 7)));
   const lonRaw = zone.lon + offset(hash(seed ^ 0x63d83595), 11);
-  const lon = lonRaw > 180 ? lonRaw - 360 : lonRaw < -180 ? lonRaw + 360 : lonRaw;
+  const zoneLon = lonRaw > 180 ? lonRaw - 360 : lonRaw < -180 ? lonRaw + 360 : lonRaw;
+  const lat = atBase ? campaign.base.lat : zoneLat;
+  const lon = atBase ? campaign.base.lon : zoneLon;
+  const region = atBase ? campaign.base.region : zone.region;
   // Ground assaults (landed UFO, terror, base defense) spawn already on the ground;
   // only crash-site contacts begin tracked for an air-to-air shoot-down.
   const groundAssault = missionType !== "crashSite";
@@ -217,7 +230,7 @@ export function createUfoContact(
     missionType,
     lat: Math.round(lat * 10) / 10,
     lon: Math.round(lon * 10) / 10,
-    region: zone.region,
+    region,
     detectedAtHour,
     expiresAtHour: detectedAtHour + UFO_CONTACT_LIFETIME_HOURS,
     missionSeed: hash(seed ^ 0x85ebca6b),
@@ -608,13 +621,70 @@ function contactTerrorHeadline(missionType: MissionType): string {
 }
 
 /**
+ * Infiltration deepened by an un-addressed UFO, per mission type. Terror and landed
+ * assaults advance a region toward defection fastest; a crash-site recon that slips
+ * away after detection is the slower baseline. Scaled by the difficulty panicMult
+ * at apply time so harder campaigns infiltrate faster.
+ */
+function contactInfiltrationGain(missionType: MissionType): number {
+  switch (missionType) {
+    case "terror":
+      return 30;
+    case "baseDefense":
+      return 25;
+    case "landedUfo":
+      return 20;
+    case "crashSite":
+    default:
+      return 10;
+  }
+}
+
+/** Per-nation share of council funding, withdrawn for good when that nation defects. */
+function regionalFundingShare(campaign: CampaignState): number {
+  return Math.round(difficultyConfig(campaign).startingFunding / COUNCIL_REGIONS.length);
+}
+
+/**
+ * If the region's infiltration has just crossed 100, the nation signs a pact with
+ * the aliens: its council funding share is permanently withdrawn and a pact report
+ * is logged. Crossing-detection (before < 100, after >= 100) makes the cut
+ * exactly-once — a region pinned at 100 never re-defects, so the funding hit and
+ * report fire only the first time it maxes out.
+ */
+function applyDefection(
+  campaign: CampaignState,
+  region: string,
+  before: Record<CouncilRegion, number>,
+  after: Record<CouncilRegion, number>,
+): CampaignState {
+  const councilRegion = councilRegionFor(region);
+  if (!councilRegion) return campaign;
+  if ((before[councilRegion] ?? 0) >= 100 || (after[councilRegion] ?? 0) < 100) return campaign;
+  const share = regionalFundingShare(campaign);
+  const report: ProjectReport = {
+    kind: "construction",
+    id: `defection-${councilRegion}-${campaign.clock.elapsedHours}`,
+    title: `${councilRegion} defects`,
+    summary: `${councilRegion} has signed a pact with the aliens. Council funding reduced by ${share}c permanently.`,
+    completedAtHour: campaign.clock.elapsedHours,
+  };
+  return {
+    ...campaign,
+    strategic: { ...campaign.strategic, funding: Math.max(0, campaign.strategic.funding - share) },
+    projectReports: [report, ...campaign.projectReports].slice(0, PROJECT_REPORT_LIMIT),
+  };
+}
+
+/**
  * Resolves the consequence of a UFO contact that expired while still an active threat
  * (tracked or landed — never shot down). Its mission is carried out: regional panic rises
- * by the baseline ignore penalty plus a mission-type bonus (difficulty-scaled), and a
- * project report is logged. Only the incremental bonus panic is applied here — the
- * baseline was already applied by penalizeIgnoredContact. The report kind reuses an
- * existing ProjectReportKind value (the kind union is frozen); the title/summary carry
- * the alien-activity meaning for the feed.
+ * by the baseline ignore penalty plus a mission-type bonus (difficulty-scaled), alien
+ * infiltration of the region deepens (scaled by mission type), and a project report is
+ * logged. Only the incremental bonus panic is applied here — the baseline was already
+ * applied by penalizeIgnoredContact. If infiltration tops out at 100 the nation defects
+ * (funding cut, pact report). The report kind reuses an existing ProjectReportKind value
+ * (the kind union is frozen); the title/summary carry the alien-activity meaning.
  */
 function applyContactTerror(campaign: CampaignState, contact: UfoContact): CampaignState {
   const missionType = contactMissionType(contact);
@@ -638,6 +708,18 @@ function applyContactTerror(campaign: CampaignState, contact: UfoContact): Campa
     };
   }
 
+  // An un-addressed UFO deepens alien infiltration of its region, scaled by how brazen
+  // the mission was. Infiltration is a one-way ratchet here — only ignored contacts
+  // raise it, so a commander who keeps intercepting never loses a nation.
+  const infiltrationBefore = campaignInfiltration(next);
+  const infiltrationAfter = adjustRegionalInfiltration(
+    infiltrationBefore,
+    contact.region,
+    contactInfiltrationGain(missionType),
+    panicMult,
+  );
+  next = { ...next, infiltration: infiltrationAfter };
+
   const headline = contactTerrorHeadline(missionType);
   const report: ProjectReport = {
     kind: "construction",
@@ -650,6 +732,10 @@ function applyContactTerror(campaign: CampaignState, contact: UfoContact): Campa
     ...next,
     projectReports: [report, ...next.projectReports].slice(0, PROJECT_REPORT_LIMIT),
   };
+
+  // A region whose infiltration maxes out signs a pact with the aliens. Evaluated
+  // after the alien-activity report so the pact surfaces alongside it.
+  next = applyDefection(next, contact.region, infiltrationBefore, infiltrationAfter);
   return { ...next, strategic: statusAfterStrategicChange(next, next.strategic) };
 }
 
@@ -703,12 +789,21 @@ function makeFundingReport(
   const reportNumber = Math.floor(reportHour / FUNDING_REPORT_INTERVAL_HOURS);
   const pressure = threatPressure + panicPressure;
   const panic = highestRegionalPanic(campaign);
+  const defected = defectedRegions(campaign);
+  // Each defected nation's funding share has already been withdrawn from `income`
+  // (the strategic funding it derives from), so the reduced transfer is the visible
+  // cost of defection; the note names how many nations are lost so far.
+  const defectionNote =
+    defected.length > 0
+      ? ` ${defected.length} nation${defected.length === 1 ? "" : "s"} defected.`
+      : "";
   const summary =
-    pressure > 0
+    (pressure > 0
       ? `Council transfer ${income}c, upkeep ${upkeep}c, net ${net}c. ` +
         `High threat cut future funding by ${threatPressure}c; regional panic cut ${panicPressure}c ` +
         `(${panic.region} ${panic.panic}%).`
-      : `Council transfer ${income}c, upkeep ${upkeep}c, net ${net}c. Sponsor confidence is stable.`;
+      : `Council transfer ${income}c, upkeep ${upkeep}c, net ${net}c. Sponsor confidence is stable.`) +
+    defectionNote;
   return {
     reportNumber,
     completedAtHour: reportHour,

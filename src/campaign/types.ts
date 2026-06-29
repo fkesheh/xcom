@@ -282,6 +282,14 @@ export interface CampaignState {
   base: BaseLocation;
   strategic: StrategicState;
   regionalPanic: Record<CouncilRegion, number>;
+  /**
+   * Per-council-region alien infiltration meter (0..100). Each UFO contact that
+   * expires un-intercepted raises its region's infiltration (scaled by mission
+   * type). When a region reaches 100 that nation signs a pact with the aliens:
+   * its council funding is permanently withdrawn and it counts as defected.
+   * Defaults to 0 everywhere on a fresh campaign; loadCampaign normalizes it.
+   */
+  infiltration?: Partial<Record<CouncilRegion, number>>;
   clock: CampaignClock;
   lastFundingReport?: FundingReport;
   interceptor: InterceptorState;

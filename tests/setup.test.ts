@@ -46,7 +46,7 @@ describe("createSkirmish", () => {
 
   it("records the generated terrain theme", () => {
     const state = createSkirmish({ seed: 1234 });
-    expect(["farmland", "urban", "desert"]).toContain(state.themeId);
+    expect(["farmland", "urban", "desert", "arctic", "jungle", "forest"]).toContain(state.themeId);
   });
 
   it("creates a recoverable objective at the UFO power source", () => {

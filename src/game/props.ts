@@ -290,7 +290,12 @@ function buildRubble(variant: number): Group {
 }
 
 /** A noise-deformed icosahedron boulder, flat-shaded (per-face normals). */
-function buildRock(variant: number): Group {
+/**
+ * A deformed icosahedral boulder (flat-shaded). Shared by rock and the arctic
+ * ice_block so a glacial block reuses the proven boulder silhouette and only the
+ * material (category) differs. `variant` seeds deterministic per-tile jitter.
+ */
+function buildBoulder(variant: number, category: string): Group {
   const group = new Group();
   const geo = new IcosahedronGeometry(0.42, 1);
   const pos = geo.attributes.position;
@@ -315,7 +320,26 @@ function buildRock(variant: number): Group {
   // Non-indexed geometry -> these become per-face normals = flat-shaded look.
   geo.computeVertexNormals();
   geo.computeBoundingSphere();
-  group.add(solid(geo, getTerrainMaterial("rock")));
+  group.add(solid(geo, getTerrainMaterial(category)));
+  return group;
+}
+
+function buildRock(variant: number): Group {
+  return buildBoulder(variant, "rock");
+}
+
+/** A solid glacial block (arctic full cover): the boulder silhouette in ice. */
+function buildIceBlock(variant: number): Group {
+  return buildBoulder(variant, "ice_block");
+}
+
+/** A fallen log (jungle/forest half cover): a short trunk laid on its side. */
+function buildLog(): Group {
+  const group = new Group();
+  const geo = new CylinderGeometry(0.22, 0.22, 0.9, 10);
+  geo.rotateZ(HALF_PI); // lay the length along X
+  geo.translate(0, 0.22, 0); // rest the curve on the ground
+  group.add(solid(geo, getTerrainMaterial("log")));
   return group;
 }
 
@@ -340,6 +364,10 @@ export function createFeature(category: string, opts?: { variant?: number }): Ob
       return buildTree(variant);
     case "rock":
       return buildRock(variant);
+    case "ice_block":
+      return buildIceBlock(variant);
+    case "log":
+      return buildLog();
     case "hedge":
       return buildHedge();
     case "bush":

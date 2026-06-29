@@ -23,6 +23,10 @@ import { refillTU, revealFor } from "./battle";
 import { blocksMove, inBounds, tileTypeAt } from "./grid";
 import { generateMap } from "./mapgen";
 import { CIVILIAN_NAMES, ENEMY_NAMES, ITEMS, PLAYER_NAMES, TEMPLATES, WEAPONS } from "./content";
+// Side-effect import: registers the arctic/jungle/forest theme pack into the
+// live THEMES/CHAR_TO_ID registries so a real mission's seeded theme pick spans
+// all six zones. Runs once (ES module body); see terrain.themes.extra.ts.
+import "./terrain.themes.extra";
 
 export interface SkirmishOptions {
   seed: number;
@@ -36,7 +40,7 @@ export interface SkirmishOptions {
   playerStatBonuses?: readonly Partial<UnitStats>[];
   /** Per-player-index item ids to ADD on top of the template's loadout. */
   playerItems?: string[][];
-  /** Force a terrain theme ("farmland" | "urban" | "desert"); seeded when omitted. */
+  /** Force a terrain theme ("farmland" | "urban" | "desert" | "arctic" | "jungle" | "forest"); seeded when omitted. */
   themeId?: string;
   /** Hour of day (0..23) from the campaign clock; drives battlescape day/dusk/night lighting. */
   hourOfDay?: number;

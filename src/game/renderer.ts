@@ -264,6 +264,14 @@ const GROUND_TONES: Record<string, number> = {
   ufo_hull: 0x224844,
   dropship_hull: 0x454f59,
   low_wall: 0x5c574e,
+  // Additive theme pack (arctic / jungle / forest).
+  snow: 0xc4d2de,
+  ice: 0x8fb4c8,
+  ice_block: 0x96a8b6,
+  jungle_floor: 0x2f5a28,
+  log: 0x6b4a2c,
+  forest_floor: 0x475a36,
+  clearing: 0x6a8a3e,
 };
 
 /** Ground tone when a tile has no (or an unknown) render category. */
