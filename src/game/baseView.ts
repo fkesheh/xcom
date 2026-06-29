@@ -806,6 +806,19 @@ const CSS = `
 #base-view .soldier-row.wounded { color: #fbbf24; }
 #base-view .soldier-row .s-name { color: #e7f7ff; }
 #base-view .soldier-row .s-rank { color: #9db5c5; }
+#base-view .s-name-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+#base-view .s-bio {
+  color: #8aa7b8;
+  font: 500 10px/1.35 Inter, sans-serif;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: normal;
+}
 #base-view .deploy-toggle {
   display: inline-flex;
   align-items: center;
@@ -883,6 +896,90 @@ const CSS = `
   border-top: 1px dashed rgba(103,232,249,.2);
   color: #9db5c5;
   font: 500 12px/1.4 Inter, sans-serif;
+  letter-spacing: 0;
+  text-transform: none;
+}
+/* Memorial — a somber, muted panel (desaturated slate, no neon) so the fallen
+   read with gravity alongside the otherwise luminous cyan base UI. */
+#base-view .memorial-panel {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(148,163,184,.18);
+  border-radius: 10px;
+  background: rgba(2,8,14,.5);
+}
+#base-view .memorial-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid rgba(148,163,184,.14);
+}
+#base-view .memorial-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid rgba(148,163,184,.3);
+  border-radius: 6px;
+  color: #94a3b8;
+  background: rgba(15,23,42,.4);
+  font-size: 13px;
+  flex: none;
+}
+#base-view .memorial-title {
+  color: #cbd5e1;
+  font: 700 12px/1 ui-monospace, monospace;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+#base-view .memorial-subtitle {
+  margin: 7px 0 0;
+  color: #64748b;
+  font: 500 11px/1.4 Inter, sans-serif;
+  letter-spacing: 0;
+  text-transform: none;
+  font-style: italic;
+}
+#base-view .memorial-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+#base-view .memorial-entry {
+  padding: 9px 10px;
+  border-left: 2px solid rgba(148,163,184,.25);
+  border-radius: 0 6px 6px 0;
+  background: rgba(15,23,42,.28);
+}
+#base-view .memorial-name-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+#base-view .memorial-name {
+  color: #e2e8f0;
+  font: 700 13px/1.2 ui-monospace, monospace;
+  letter-spacing: .02em;
+}
+#base-view .memorial-rank {
+  color: #94a3b8;
+  font: 600 11px/1 ui-monospace, monospace;
+  text-transform: capitalize;
+}
+#base-view .memorial-detail {
+  margin-top: 4px;
+  color: #94a3b8;
+  font: 500 11px/1.4 Inter, sans-serif;
+  letter-spacing: 0;
+  text-transform: none;
+}
+#base-view .memorial-bio {
+  margin-top: 4px;
+  color: #64748b;
+  font: 400 italic 11px/1.4 Inter, sans-serif;
   letter-spacing: 0;
   text-transform: none;
 }
@@ -2795,7 +2892,59 @@ export class BaseView {
       table.appendChild(this.renderSoldierRow(campaign, soldier, deployedIds));
     }
     wrap.append(head, table);
+    const fallen = campaign.soldiers.filter((soldier) => soldier.status === "kia");
+    if (fallen.length > 0) wrap.appendChild(this.renderMemorial(campaign, fallen));
     return wrap;
+  }
+
+  /** Memorial panel — a somber roll of the KIA. Each entry honours the operative
+   *  with name, rank, missions survived, how they fell (when the last mission
+   *  report records it), and their background. Muted slate palette by design. */
+  private renderMemorial(campaign: CampaignState, fallen: readonly CampaignSoldier[]): HTMLElement {
+    const panel = el("section", "memorial-panel");
+    const head = el("div", "memorial-head");
+    const icon = el("span", "memorial-icon");
+    icon.textContent = "✚";
+    const title = el("span", "memorial-title");
+    title.textContent = `In Memoriam · ${fallen.length} fallen`;
+    head.append(icon, title);
+    const subtitle = el("p", "memorial-subtitle");
+    subtitle.textContent = "We honour those who gave everything in defence of Earth.";
+    const list = el("div", "memorial-list");
+    for (const soldier of fallen) {
+      list.appendChild(this.renderMemorialEntry(campaign, soldier));
+    }
+    panel.append(head, subtitle, list);
+    return panel;
+  }
+
+  private renderMemorialEntry(campaign: CampaignState, soldier: CampaignSoldier): HTMLElement {
+    const entry = el("div", "memorial-entry");
+    const nameRow = el("div", "memorial-name-row");
+    nameRow.append(span(soldier.name, "memorial-name"), span(soldier.rank, "memorial-rank"));
+    const detailParts = [
+      `${soldier.survivedMissions} mission${soldier.survivedMissions === 1 ? "" : "s"} survived`,
+    ];
+    const death = this.soldierDeathContext(campaign, soldier.id);
+    if (death) detailParts.push(death);
+    const detail = el("div", "memorial-detail");
+    detail.textContent = detailParts.join(" · ");
+    entry.append(nameRow, detail);
+    if (soldier.bio) {
+      const bioEl = el("div", "memorial-bio");
+      bioEl.textContent = soldier.bio;
+      entry.appendChild(bioEl);
+    }
+    return entry;
+  }
+
+  /** Resolves how a fallen operative died from the most recent mission report.
+   *  Only `lastMission` is persisted, so this is authoritative for the latest
+   *  losses and falls back to a generic honourable mention for older casualties. */
+  private soldierDeathContext(campaign: CampaignState, soldierId: string): string | null {
+    const last = campaign.lastMission;
+    if (!last || !last.kiaSoldierIds.includes(soldierId)) return null;
+    return `Killed in action during Operation ${last.codename} (${last.region})`;
   }
 
   private renderSoldierRow(
@@ -2821,8 +2970,15 @@ export class BaseView {
     });
     deployToggle.append(deployCheckbox, document.createTextNode(deployed ? "DROP" : "ADD"));
 
+    const nameCell = el("div", "s-name-cell");
     const nameEl = el("span", "s-name");
     nameEl.textContent = soldier.name;
+    nameCell.append(nameEl);
+    if (soldier.bio) {
+      const bioEl = el("span", "s-bio");
+      bioEl.textContent = soldier.bio;
+      nameCell.append(bioEl);
+    }
     const rankEl = el("span", "s-rank");
     rankEl.textContent = soldier.rank;
 
@@ -2847,7 +3003,7 @@ export class BaseView {
 
     row.append(
       deployToggle,
-      nameEl,
+      nameCell,
       rankEl,
       this.renderSoldierStatus(campaign, soldier),
       weaponSelect,

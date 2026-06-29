@@ -19,6 +19,7 @@ import type {
   DifficultyLevel,
   EquipmentMarket,
   ManufacturingProjectId,
+  ResearchUnlocks,
   SoldierRank,
   SoldierStatBonus,
   SoldierStatGrowth,
@@ -307,14 +308,36 @@ export function difficultyConfig(campaign: CampaignState): DifficultyConfig {
   return DIFFICULTY_CONFIGS[campaign.strategic.difficulty ?? "veteran"];
 }
 
-export const MARKET_CONFIG: Record<
-  CampaignWeaponId,
-  { price: number; maxStock: number; restockHours: number }
-> = {
+/** Pricing + restock cadence for a weapon offered by the council market. */
+export interface WeaponMarketEntry {
+  price: number;
+  maxStock: number;
+  restockHours: number;
+}
+
+/** Weapons the council sells from the start — no research clearance required. */
+export const BASE_MARKET_WEAPONS: readonly CampaignWeaponId[] = ["rifle", "pistol"];
+
+export const MARKET_CONFIG: Record<CampaignWeaponId, WeaponMarketEntry> = {
   rifle: { price: 400, maxStock: 6, restockHours: 48 },
   pistol: { price: 250, maxStock: 6, restockHours: 48 },
   plasma: { price: 1200, maxStock: 6, restockHours: 48 },
 };
+
+/**
+ * Pricing + stock for weapons that are NOT base council inventory and can only
+ * enter the market once their unlocking research completes (e.g. the heavy
+ * plasma "cannon"). Looked up through {@link weaponMarketEntry}.
+ */
+const RESEARCH_WEAPON_MARKET: Record<string, WeaponMarketEntry> = {
+  cannon: { price: 1800, maxStock: 4, restockHours: 60 },
+};
+
+/** Unified market-entry lookup for any weapon id (base or research-unlocked). */
+export function weaponMarketEntry(weaponId: string): WeaponMarketEntry | undefined {
+  if (isCampaignWeaponId(weaponId)) return MARKET_CONFIG[weaponId];
+  return RESEARCH_WEAPON_MARKET[weaponId];
+}
 
 export const STARTING_MARKET: EquipmentMarket = {
   stock: {
@@ -403,6 +426,8 @@ export interface ResearchProject {
   cost: CampaignResources;
   /** Prerequisite research that must be completed before this project can start. */
   requires: ResearchId[];
+  /** Gear unlocked for market purchase / armory stock when this project completes. */
+  unlocks?: ResearchUnlocks;
 }
 
 export interface ManufacturingProject {
@@ -434,6 +459,7 @@ export const RESEARCH_PROJECTS: readonly ResearchProject[] = [
     durationHours: 24,
     cost: RESEARCH_COSTS.plasmaWeapons,
     requires: [],
+    unlocks: { weapons: ["plasma"] },
   },
   {
     id: "alloyArmor",
@@ -443,6 +469,7 @@ export const RESEARCH_PROJECTS: readonly ResearchProject[] = [
     durationHours: 18,
     cost: RESEARCH_COSTS.alloyArmor,
     requires: [],
+    unlocks: { items: ["grenade"] },
   },
   {
     id: "alienBiotech",
@@ -452,6 +479,7 @@ export const RESEARCH_PROJECTS: readonly ResearchProject[] = [
     durationHours: 20,
     cost: RESEARCH_COSTS.alienBiotech,
     requires: [],
+    unlocks: { items: ["medkit"] },
   },
   {
     id: "heavyPlasma",
@@ -461,6 +489,7 @@ export const RESEARCH_PROJECTS: readonly ResearchProject[] = [
     durationHours: 30,
     cost: RESEARCH_COSTS.heavyPlasma,
     requires: ["plasmaWeapons"],
+    unlocks: { weapons: ["cannon"] },
   },
   {
     id: "advancedMetallurgy",
@@ -470,6 +499,7 @@ export const RESEARCH_PROJECTS: readonly ResearchProject[] = [
     durationHours: 28,
     cost: RESEARCH_COSTS.advancedMetallurgy,
     requires: ["alloyArmor"],
+    unlocks: { items: ["grenade"] },
   },
   {
     id: "improvedMedikit",
@@ -479,6 +509,7 @@ export const RESEARCH_PROJECTS: readonly ResearchProject[] = [
     durationHours: 22,
     cost: RESEARCH_COSTS.improvedMedikit,
     requires: ["alienBiotech"],
+    unlocks: { items: ["medkit"] },
   },
   {
     id: "poweredArmor",
@@ -488,6 +519,7 @@ export const RESEARCH_PROJECTS: readonly ResearchProject[] = [
     durationHours: 36,
     cost: RESEARCH_COSTS.poweredArmor,
     requires: ["advancedMetallurgy"],
+    unlocks: { items: ["smoke"] },
   },
   {
     id: "eleriumPowerSource",
@@ -497,6 +529,7 @@ export const RESEARCH_PROJECTS: readonly ResearchProject[] = [
     durationHours: 40,
     cost: RESEARCH_COSTS.eleriumPowerSource,
     requires: ["advancedMetallurgy", "heavyPlasma"],
+    unlocks: { items: ["grenade"] },
   },
   {
     id: "mindShield",
@@ -506,10 +539,38 @@ export const RESEARCH_PROJECTS: readonly ResearchProject[] = [
     durationHours: 44,
     cost: RESEARCH_COSTS.mindShield,
     requires: ["alienBiotech", "eleriumPowerSource"],
+    unlocks: { items: ["smoke"] },
   },
 ] as const;
 
 export const RESEARCH_IDS: readonly ResearchId[] = RESEARCH_PROJECTS.map((project) => project.id);
+
+/**
+ * Reverse index from a weapon id to the research project whose completion
+ * unlocks it for market purchase. Derived from each project's `unlocks.weapons`,
+ * so adding a new weapon unlock is purely a data change in RESEARCH_PROJECTS.
+ */
+const WEAPON_UNLOCK_RESEARCH: ReadonlyMap<string, ResearchId> = (() => {
+  const map = new Map<string, ResearchId>();
+  for (const project of RESEARCH_PROJECTS) {
+    for (const weapon of project.unlocks?.weapons ?? []) {
+      if (!map.has(weapon)) map.set(weapon, project.id);
+    }
+  }
+  return map;
+})();
+
+/**
+ * Whether the council market offers `weaponId` for sale in this campaign. Base
+ * weapons (rifle, pistol) are always available; every other weapon requires the
+ * research project that unlocks it to be complete. Used to gate purchases and to
+ * let the market panel show only gear the commander can actually buy.
+ */
+export function isWeaponAvailable(campaign: CampaignState, weaponId: string): boolean {
+  if ((BASE_MARKET_WEAPONS as readonly string[]).includes(weaponId)) return true;
+  const required = WEAPON_UNLOCK_RESEARCH.get(weaponId);
+  return required !== undefined && hasResearch(campaign, required);
+}
 
 export type ResearchStatus = "completed" | "available" | "locked";
 
@@ -627,6 +688,80 @@ function addStatGrowth(a: SoldierStatGrowth, b: SoldierStatGrowth): SoldierStatG
   };
 }
 
+/** Cities referenced in bio backgrounds (terror-site flavour). */
+const BIO_CITIES = [
+  "Berlin",
+  "Tokyo",
+  "São Paulo",
+  "Cairo",
+  "Sydney",
+  "Toronto",
+  "Mumbai",
+  "Lagos",
+  "Mexico City",
+  "Seoul",
+] as const;
+
+/** Prior service branches for ex-military backgrounds. */
+const BIO_BRANCHES = [
+  "special forces",
+  "infantry",
+  "recon",
+  "combat engineering",
+  "mountain warfare",
+  "airborne",
+] as const;
+
+interface BioContext {
+  city: string;
+  years: number;
+  branch: string;
+}
+
+/**
+ * Bio background templates. Each produces one self-contained sentence (no
+ * internal periods) so a bio always reads as a single beat. Some templates
+ * ignore the rolled context, which is how "civilian volunteer" backgrounds
+ * surface alongside professional ones.
+ */
+const BIO_TEMPLATES: ReadonlyArray<(ctx: BioContext) => string> = [
+  (ctx) => `Former paramedic, enlisted after the ${ctx.city} attack.`,
+  (ctx) => `Ex-military, ${ctx.years} years ${ctx.branch}.`,
+  () => `Civilian volunteer, quick learner.`,
+  (ctx) => `Former ${ctx.city} police officer, volunteered for the program.`,
+  (ctx) => `Retired from ${ctx.years} years of search-and-rescue work.`,
+  () => `Off-duty firefighter who witnessed the first landings.`,
+  (ctx) => `Field medic with ${ctx.years} combat tours overseas.`,
+  (ctx) => `Former ${ctx.branch} NCO, recalled to active duty.`,
+  () => `Gliding instructor turned quiet under fire.`,
+  (ctx) => `Coast guard swimmer, reassigned from the ${ctx.city} coastline.`,
+];
+
+/** Distinct salt from statGrowthSeed so the bio stream never overlaps it. */
+function bioSeed(campaignSeed: number, soldierId: string): number {
+  let h = (campaignSeed ^ 0x85ebca77) >>> 0;
+  for (let i = 0; i < soldierId.length; i++) {
+    h = Math.imul(h ^ soldierId.charCodeAt(i), 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+
+/**
+ * Rolls a one-sentence operative background. Deterministic in (campaign seed,
+ * soldier id): the same operative in the same campaign always reads the same
+ * bio, for stable saves and replays.
+ */
+function generateBio(campaignSeed: number, soldierId: string): string {
+  const rng = mulberry32(bioSeed(campaignSeed, soldierId));
+  const template = BIO_TEMPLATES[Math.floor(rng() * BIO_TEMPLATES.length)]!;
+  const ctx: BioContext = {
+    city: BIO_CITIES[Math.floor(rng() * BIO_CITIES.length)]!,
+    years: 3 + Math.floor(rng() * 18),
+    branch: BIO_BRANCHES[Math.floor(rng() * BIO_BRANCHES.length)]!,
+  };
+  return template(ctx);
+}
+
 function campaignId(seed: number): string {
   return `campaign-${seed.toString(16).padStart(8, "0")}`;
 }
@@ -635,7 +770,7 @@ function soldierId(index: number): string {
   return `soldier-${String(index + 1).padStart(2, "0")}`;
 }
 
-function makeSoldier(id: string, name: string): CampaignSoldier {
+function makeSoldier(id: string, name: string, seed: number): CampaignSoldier {
   return {
     id,
     name,
@@ -644,11 +779,12 @@ function makeSoldier(id: string, name: string): CampaignSoldier {
     missions: 0,
     survivedMissions: 0,
     statGrowth: { ...STAT_GROWTH_ZERO },
+    bio: generateBio(seed, id),
   };
 }
 
-function startingSoldiers(): CampaignSoldier[] {
-  return STARTING_SOLDIER_NAMES.map((name, index) => makeSoldier(soldierId(index), name));
+function startingSoldiers(seed: number): CampaignSoldier[] {
+  return STARTING_SOLDIER_NAMES.map((name, index) => makeSoldier(soldierId(index), name, seed));
 }
 
 function startingLoadouts(soldiers: readonly CampaignSoldier[]): Record<string, CampaignWeaponId> {
@@ -665,7 +801,7 @@ export function createCampaign(
   difficulty: DifficultyLevel = "veteran",
 ): CampaignState {
   const config = DIFFICULTY_CONFIGS[difficulty];
-  const soldiers = startingSoldiers();
+  const soldiers = startingSoldiers(seed);
   const strategic: StrategicState = {
     status: STARTING_STRATEGIC.status,
     threat: config.startingThreat,
@@ -930,7 +1066,7 @@ export function recruitSoldier(campaign: CampaignState): CampaignState {
   const name =
     RECRUIT_NAMES.find((candidate) => !usedNames.has(candidate)) ??
     `Operative-${campaign.soldiers.length + 1}`;
-  const recruit = makeSoldier(soldierId(campaign.soldiers.length), name);
+  const recruit = makeSoldier(soldierId(campaign.soldiers.length), name, campaign.seed);
   return {
     ...campaign,
     armory: addWeapon(campaign.armory, "rifle", 1),
@@ -1071,6 +1207,9 @@ export function canPurchaseWeapon(
   campaign: CampaignState,
   weaponId: CampaignWeaponId,
 ): { ok: boolean; reason?: string } {
+  if (!isWeaponAvailable(campaign, weaponId)) {
+    return { ok: false, reason: `${WEAPON_LABELS[weaponId]} is not yet available` };
+  }
   const stock = campaign.market?.stock[weaponId] ?? 0;
   if (stock <= 0) {
     return { ok: false, reason: `${WEAPON_LABELS[weaponId]} is out of stock` };
@@ -1753,12 +1892,62 @@ function addWeapon(armory: CampaignArmory, weaponId: CampaignWeaponId, count: nu
   };
 }
 
+/**
+ * Stock added to the armory for each item id a completed project unlocks. Items
+ * are consumables (medkits, grenades, smoke), so a research dividend is a small
+ * one-time resupply rather than a permanent unlock.
+ */
+const UNLOCK_ITEM_STOCK = 4;
+
 function applyResearchReward(campaign: CampaignState, id: ResearchId): CampaignState {
-  if (id !== "plasmaWeapons") return campaign;
-  return {
-    ...campaign,
-    armory: addWeapon(campaign.armory, "plasma", 1),
-  };
+  const project = RESEARCH_PROJECTS.find((candidate) => candidate.id === id);
+  const unlocks = project?.unlocks;
+  if (id !== "plasmaWeapons" && !unlocks) return campaign;
+
+  let next = campaign;
+  // plasmaWeapons still grants one prototype plasma caster to the armory (the
+  // reverse-engineered unit), on top of unlocking the weapon for market purchase.
+  if (id === "plasmaWeapons") {
+    next = { ...next, armory: addWeapon(next.armory, "plasma", 1) };
+  }
+  if (unlocks?.weapons?.length) {
+    next = { ...next, market: seedMarketWeapons(next, unlocks.weapons) };
+  }
+  if (unlocks?.items?.length) {
+    next = { ...next, armory: addUnlockedItems(next.armory, unlocks.items) };
+  }
+  return next;
+}
+
+/**
+ * Adds newly-offered weapons to market stock at full capacity. Weapons already
+ * present in the market (e.g. pre-positioned council inventory) are left
+ * untouched; weapons with no configured market entry are skipped.
+ */
+function seedMarketWeapons(
+  campaign: CampaignState,
+  weaponIds: readonly string[],
+): EquipmentMarket {
+  const market = campaign.market ?? cloneMarket(STARTING_MARKET);
+  const stock = { ...market.stock };
+  for (const weaponId of weaponIds) {
+    const entry = weaponMarketEntry(weaponId);
+    if (!entry) continue;
+    const current = stock[weaponId];
+    if (typeof current !== "number" || current <= 0) {
+      stock[weaponId] = entry.maxStock;
+    }
+  }
+  return { stock, restockTimerHours: { ...market.restockTimerHours } };
+}
+
+/** Grants a one-time consumable resupply for each unlocked item id. */
+function addUnlockedItems(armory: CampaignArmory, itemIds: readonly string[]): CampaignArmory {
+  let next = armory;
+  for (const itemId of itemIds) {
+    next = addItemStock(next, itemId, UNLOCK_ITEM_STOCK);
+  }
+  return next;
 }
 
 function completeResearchProject(campaign: CampaignState, id: ResearchId): CampaignState {
@@ -1787,7 +1976,7 @@ export function loadCampaign(): CampaignState | null {
       return null;
     }
     const resources = normalizeResources(parsed.resources);
-    const soldiers = normalizeSoldiers(parsed.soldiers);
+    const soldiers = normalizeSoldiers(parsed.soldiers, parsed.seed);
     const regionalPanic = normalizeRegionalPanic(parsed.regionalPanic);
     const strategic = normalizeCampaignStatus(normalizeStrategic(parsed.strategic), resources, soldiers, regionalPanic);
     const clock = normalizeClock(parsed.clock);
@@ -2199,6 +2388,15 @@ function normalizeMarket(value: unknown): EquipmentMarket {
     const storedTimer = rawTimers[id];
     restockTimerHours[id] = typeof storedTimer === "number" ? Math.max(0, Math.floor(storedTimer)) : 0;
   }
+  // Preserve research-unlocked weapon stock beyond the base council inventory
+  // (e.g. "cannon") so completed-research gear survives a save/load cycle.
+  const knownBase = CAMPAIGN_WEAPON_IDS as readonly string[];
+  for (const [key, value] of Object.entries(rawStock)) {
+    if (knownBase.includes(key)) continue;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      stock[key] = Math.max(0, Math.floor(value));
+    }
+  }
   return { stock, restockTimerHours };
 }
 
@@ -2314,8 +2512,8 @@ function normalizeDeploymentSoldierIds(
   });
 }
 
-function normalizeSoldiers(value: unknown): CampaignSoldier[] {
-  if (!Array.isArray(value)) return startingSoldiers();
+function normalizeSoldiers(value: unknown, seed: number): CampaignSoldier[] {
+  if (!Array.isArray(value)) return startingSoldiers(seed);
   const seen = new Set<string>();
   const soldiers = value.flatMap((item, index): CampaignSoldier[] => {
     if (!item || typeof item !== "object") return [];
@@ -2356,10 +2554,11 @@ function normalizeSoldiers(value: unknown): CampaignSoldier[] {
             : undefined,
         loadoutItems: normalizeLoadoutItems(maybe.loadoutItems),
         statGrowth: normalizeStatGrowth(maybe.statGrowth),
+        bio: typeof maybe.bio === "string" && maybe.bio.length > 0 ? maybe.bio : undefined,
       },
     ];
   });
-  return soldiers.length > 0 ? soldiers : startingSoldiers();
+  return soldiers.length > 0 ? soldiers : startingSoldiers(seed);
 }
 
 function normalizeLoadoutItems(value: unknown): string[] {

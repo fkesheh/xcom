@@ -29,7 +29,7 @@ import type {
   Vec2,
 } from "./types";
 import { DIR8_VECTORS, MORALE, SMOKE, STANCE, TU_COST } from "./types";
-import { cellIndex, moveCost } from "./grid";
+import { cellIndex, destroyCoverAt, moveCost } from "./grid";
 import { blocksMove, inBounds } from "./grid";
 import { canSee, dir8Towards, lineOfFire, visibleEnemyIds, visibleTiles } from "./los";
 import { findPath } from "./pathfinding";
@@ -535,6 +535,31 @@ function consumeItem(unit: Unit, inst: ItemInstance): void {
 }
 
 /**
+ * Destroy every destructible cover tile within `radius` (Chebyshev) of `center`.
+ * The blast runs AFTER unit damage ({@link resolveBlast}) so the explosion is
+ * resolved against the original map; each destroyed tile then becomes a
+ * walkable, no-cover debris pile (see {@link destroyCoverAt}), opening both
+ * movement and sight through the former obstacle — the classic X-COM "blow up
+ * their cover with a grenade" tactic. Indestructible terrain (rock, hulls) and
+ * plain ground are left intact. Deterministic: row-major (y, then x) iteration.
+ * Returns the destroyed tile positions in iteration order.
+ */
+function destroyCoverInBlast(state: BattleState, center: Vec2, radius: number): Vec2[] {
+  const destroyed: Vec2[] = [];
+  const { grid } = state;
+  const x0 = Math.max(0, center.x - radius);
+  const x1 = Math.min(grid.width - 1, center.x + radius);
+  const y0 = Math.max(0, center.y - radius);
+  const y1 = Math.min(grid.height - 1, center.y + radius);
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      if (destroyCoverAt(grid, x, y)) destroyed.push({ x, y });
+    }
+  }
+  return destroyed;
+}
+
+/**
  * Throw a grenade or smoke grenade at `target` and resolve its effect. Performs
  * no faction check: the same path serves the player command and the enemy AI
  * executor (mirroring how executeMove/executeShoot back the AiExecutor
@@ -588,6 +613,13 @@ function performThrow(state: BattleState, unit: Unit, target: Vec2, itemId: stri
 
   const radius = def.blastRadius ?? 1;
   const { hits } = resolveBlast(state, target, radius, def.damage ?? 0);
+  // A frag grenade chews through cover: destructible tiles in the blast become
+  // walkable debris. Resolved after unit damage so the explosion sees the map
+  // as it was when the grenade landed.
+  const destroyed = destroyCoverInBlast(state, target, radius);
+  state.log.push(
+    `${unit.name} throws a ${def.name}${destroyed.length > 0 ? `, destroying ${destroyed.length} cover tile${destroyed.length > 1 ? "s" : ""}` : ""}.`,
+  );
   events.push({
     type: "blastDetonated",
     itemId,
@@ -705,6 +737,9 @@ function detonatePrimedGrenades(state: BattleState, faction: Faction): GameEvent
       const radius = def?.blastRadius ?? 1;
       const damage = def?.damage ?? 0;
       const { hits } = resolveBlast(state, carrier.pos, radius, damage);
+      // A primed grenade detonating on its carrier chews through nearby cover
+      // just like a thrown one (resolved after unit damage, same rule).
+      destroyCoverInBlast(state, carrier.pos, radius);
       events.push({
         type: "blastDetonated",
         itemId: inst.itemId,

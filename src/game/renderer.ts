@@ -350,6 +350,8 @@ interface FeaturePart {
 interface TileFeature {
   object: Object3D;
   parts: FeaturePart[];
+  /** Render category this feature was built for, so sync can detect drift. */
+  category: string | undefined;
 }
 
 const HP_BAR_W = 0.8;
@@ -970,7 +972,7 @@ export class Renderer {
     const obj = createFeature(category, { variant });
     if (!obj) return null;
     obj.position.set(wx, 0, wz);
-    return { object: obj, parts: cloneFeatureMaterials(obj) };
+    return { object: obj, parts: cloneFeatureMaterials(obj), category };
   }
 
   /**
@@ -985,7 +987,7 @@ export class Renderer {
     if (category === "sandbags") obj = buildSandbags(variant);
     else if (category === "low_wall") obj = buildLowWall(variant);
     if (!obj) return null;
-    return { object: obj, parts: cloneFeatureMaterials(obj) };
+    return { object: obj, parts: cloneFeatureMaterials(obj), category };
   }
 
   /**
@@ -1034,7 +1036,7 @@ export class Renderer {
 
     const obj = buildWall(family, neighbors, opening, { variant });
     obj.position.set(wx, 0, wz);
-    return { object: obj, parts: cloneFeatureMaterials(obj) };
+    return { object: obj, parts: cloneFeatureMaterials(obj), category };
   }
 
   /**
@@ -1058,6 +1060,47 @@ export class Renderer {
       if (f !== null) return f;
     }
     return null;
+  }
+
+  /**
+   * Rebuild a single tile's raised feature + floor colour from the current sim
+   * state. Disposes the previously built feature (its per-tile cloned materials
+   * are owned here) and constructs a fresh one when the tile now has one, so a
+   * mid-battle terrain change reads immediately — notably cover destroyed by a
+   * grenade (sandbags/low_wall/crate -> a low debris pile via the "rubble"
+   * category). Called from {@link syncFromState} when a tile's render category
+   * drifts from what it was built for.
+   */
+  private rebuildTileFeature(x: number, y: number): void {
+    const grid = this.grid;
+    if (!grid) return;
+    const idx = cellIndex(grid, x, y);
+
+    const old = this.featureMeshes.get(idx);
+    if (old) {
+      this.tileGroup.remove(old.object);
+      old.object.traverse((o) => {
+        if (o instanceof Mesh) {
+          o.geometry.dispose();
+          const m = o.material;
+          if (Array.isArray(m)) m.forEach((mm) => mm.dispose());
+          else m.dispose();
+        }
+      });
+      this.featureMeshes.delete(idx);
+    }
+
+    const category = categoryFor(tileTypeAt(grid, x, y));
+    const base = new Color(groundToneFor(category));
+    this.floorBase[idx] = base;
+    if (this.floorMesh) this.floorMesh.setColorAt(idx, base);
+
+    const w = tileToWorld(x, y, 0);
+    const feature = this.buildTileFeature(category, idx, w.x, w.z, x, y);
+    if (feature) {
+      this.tileGroup.add(feature.object);
+      this.featureMeshes.set(idx, feature);
+    }
   }
 
   private buildHelpers(): void {
@@ -1345,6 +1388,21 @@ export class Renderer {
 
     const visibleCells = this.computeVisibleCells(state);
     const cellCount = state.grid.width * state.grid.height;
+
+    // A blast may have destroyed cover since the last sync (a sandbags / low_wall
+    // / crate tile swapped to a walkable debris pile). Detect any tile whose
+    // render category drifted from the feature we built for it and rebuild that
+    // tile's feature + floor colour BEFORE fog dimming, so the new look (a low
+    // rubble pile where the obstacle was) reads immediately.
+    for (let y = 0; y < state.grid.height; y++) {
+      for (let x = 0; x < state.grid.width; x++) {
+        const built = this.featureMeshes.get(cellIndex(state.grid, x, y));
+        const builtCat = built?.category ?? null;
+        const curCat = categoryFor(tileTypeAt(state.grid, x, y)) ?? null;
+        if (builtCat !== curCat) this.rebuildTileFeature(x, y);
+      }
+    }
+
     for (let i = 0; i < cellCount; i++) {
       this.applyTileVisibility(i, classifyTile(i, visibleCells, state.explored));
     }

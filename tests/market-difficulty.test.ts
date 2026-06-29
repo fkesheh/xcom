@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { CampaignState, CampaignWeaponId } from "../src/campaign/types";
 import {
   canPurchaseWeapon,
+  completeResearch,
   createCampaign,
   difficultyConfig,
   DIFFICULTY_CONFIGS,
@@ -76,7 +77,7 @@ describe("equipment market", () => {
     }
   });
 
-  it.each(WEAPON_IDS)("canPurchaseWeapon requires credits and stock for %s", (weaponId) => {
+  it.each(["rifle", "pistol"] as const)("canPurchaseWeapon requires credits and stock for %s", (weaponId) => {
     const price = MARKET_CONFIG[weaponId].price;
     const funded = withOverrides({
       resources: { credits: price, alloys: 0, elerium: 0, alienData: 0 },
@@ -89,6 +90,26 @@ describe("equipment market", () => {
     const check = canPurchaseWeapon(broke, weaponId);
     expect(check.ok).toBe(false);
     expect(check.reason).toMatch(/credits/i);
+  });
+
+  it("plasma is locked behind the plasmaWeapons research project", () => {
+    const price = MARKET_CONFIG.plasma.price;
+    // Fully funded but no plasmaWeapons research: plasma is in council stock but
+    // not cleared for sale, so the purchase is blocked at the availability gate.
+    const funded = withOverrides({
+      resources: { credits: price, alloys: 0, elerium: 0, alienData: 0 },
+    });
+    expect(canPurchaseWeapon(funded, "plasma").ok).toBe(false);
+
+    // Once plasmaWeapons completes (resources topped up to afford its cost), the
+    // gate opens and a funded commander can buy the plasma caster.
+    const unlocked = completeResearch(
+      withOverrides({
+        resources: { credits: 5000, alloys: 50, elerium: 50, alienData: 50 },
+      }),
+      "plasmaWeapons",
+    );
+    expect(canPurchaseWeapon(unlocked, "plasma")).toEqual({ ok: true });
   });
 
   it("blocks purchase when stock is empty even with ample credits", () => {

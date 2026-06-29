@@ -945,3 +945,59 @@ describe("campaign state", () => {
     expect(summary.hangarSlots).toBe(4);
   });
 });
+
+describe("soldier bios", () => {
+  const BASE = { lat: 2, lon: 14.2, region: "Africa" } as const;
+
+  /** A single sentence: one leading capital, exactly one terminal period, no
+   *  internal periods (so the background reads as one beat, not a paragraph). */
+  function isSingleSentence(text: string): boolean {
+    return (
+      text.length > 0 &&
+      text[0] === text[0]!.toUpperCase() &&
+      text.endsWith(".") &&
+      !text.slice(0, -1).includes(".")
+    );
+  }
+
+  it("rolls a single-sentence background for every starting operative", () => {
+    const campaign = createCampaign(BASE, 12345);
+
+    expect(campaign.soldiers.length).toBeGreaterThan(0);
+    for (const soldier of campaign.soldiers) {
+      expect(typeof soldier.bio).toBe("string");
+      expect(isSingleSentence(soldier.bio!)).toBe(true);
+    }
+  });
+
+  it("generates a bio on recruit", () => {
+    const campaign = createCampaign(BASE, 12345);
+    const recruit = recruitSoldier(campaign);
+    const recruited = recruit.soldiers.at(-1)!;
+
+    expect(recruited.bio).toBeDefined();
+    expect(isSingleSentence(recruited.bio!)).toBe(true);
+  });
+
+  it("is deterministic in the campaign seed and soldier id", () => {
+    const a = createCampaign(BASE, 12345);
+    const b = createCampaign(BASE, 12345);
+    const other = createCampaign(BASE, 99999);
+
+    // Same seed => identical bios across the whole roster.
+    expect(a.soldiers.map((s) => s.bio)).toEqual(b.soldiers.map((s) => s.bio));
+    // A different seed rolls a different background for the same operative id.
+    expect(a.soldiers[0]!.bio).not.toBe(other.soldiers[0]!.bio);
+    // The recruited operative keeps the same bio when re-rolled under the same seed.
+    expect(recruitSoldier(a).soldiers.at(-1)!.bio).toBe(
+      recruitSoldier(b).soldiers.at(-1)!.bio,
+    );
+  });
+
+  it("varies the background across the roster", () => {
+    const campaign = createCampaign(BASE, 12345);
+    const bios = new Set(campaign.soldiers.map((s) => s.bio));
+
+    expect(bios.size).toBeGreaterThan(1);
+  });
+});

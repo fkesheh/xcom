@@ -7,7 +7,7 @@ import {
   startInterceptionEncounter,
 } from "../src/campaign/geoscape";
 import { createCampaign, loadCampaign, saveCampaign } from "../src/campaign/storage";
-import type { CampaignState } from "../src/campaign/types";
+import type { CampaignSoldier, CampaignState } from "../src/campaign/types";
 
 const BASE = { lat: 2, lon: 14.2, region: "Africa" } as const;
 const SEED = 12345;
@@ -116,5 +116,45 @@ describe("campaign save/load normalization", () => {
     expect(loaded!.interception).toBeDefined();
     expect(loaded!.interception!.contactId).toBe(started.ufoContact!.id);
     expect(canResolveInterception(loaded!)).toBe(true);
+  });
+
+  it("preserves a soldier bio string across a save/load round-trip", () => {
+    const campaign = freshCampaign();
+    const first = campaign.soldiers[0]!;
+    saveCampaign({
+      ...campaign,
+      soldiers: campaign.soldiers.map((s) =>
+        s.id === first.id ? { ...s, bio: "Former paramedic, enlisted after the Berlin attack." } : s,
+      ),
+    });
+
+    const loaded = loadCampaign();
+
+    expect(loaded!.soldiers[0]!.bio).toBe("Former paramedic, enlisted after the Berlin attack.");
+  });
+
+  it("drops a malformed non-string bio on load (undefined OK)", () => {
+    const campaign = freshCampaign();
+    const first = campaign.soldiers[0]!;
+    const malformed = campaign.soldiers.map((s) =>
+      s.id === first.id ? { ...s, bio: { not: "a string" } } : s,
+    ) as unknown as CampaignSoldier[];
+    saveCampaign({ ...campaign, soldiers: malformed });
+
+    const loaded = loadCampaign();
+
+    expect(loaded!.soldiers[0]!.bio).toBeUndefined();
+  });
+
+  it("leaves a missing bio undefined for legacy saves", () => {
+    const campaign = freshCampaign();
+    saveCampaign({
+      ...campaign,
+      soldiers: campaign.soldiers.map(({ bio: _bio, ...rest }) => rest),
+    });
+
+    const loaded = loadCampaign();
+
+    expect(loaded!.soldiers.every((s) => s.bio === undefined)).toBe(true);
   });
 });

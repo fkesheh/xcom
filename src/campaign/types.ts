@@ -45,6 +45,14 @@ export interface CampaignArmory {
   items?: Record<string, number>;
 }
 
+/** Gear a completed research project unlocks for purchase at the council market. */
+export interface ResearchUnlocks {
+  /** Weapon ids made available for market purchase (e.g. "plasma", "cannon"). */
+  weapons?: string[];
+  /** Consumable item ids granted as armory stock when the project completes. */
+  items?: string[];
+}
+
 export interface StrategicState {
   status: CampaignStatus;
   threat: number;
@@ -190,6 +198,8 @@ export interface CampaignSoldier {
   loadoutItems?: string[];
   /** Accumulated per-stat growth granted for surviving missions. Starts at zero. */
   statGrowth?: SoldierStatGrowth;
+  /** Short procedurally-generated background, rolled deterministically on recruit. */
+  bio?: string;
 }
 
 /** Per-stat growth a soldier has accumulated over a career of survived missions. */
