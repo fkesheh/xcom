@@ -172,7 +172,7 @@ function makeExec(state: BattleState): AiExecutor {
 describe("new weapons", () => {
   it("cannon is a short-range, low-accuracy, high-TU heavy hitter", () => {
     const cannon = weapon("cannon");
-    expect(cannon.damage).toBe(50);
+    expect(cannon.damage).toBe(45);
     expect(cannon.range).toBeLessThanOrEqual(8); // short range
     expect(cannon.magazineSize).toBeGreaterThanOrEqual(1);
 
@@ -207,7 +207,7 @@ describe("new enemy templates", () => {
   it("heavy is a high-HP, slow tank carrying the cannon", () => {
     const heavy = template("heavy");
     expect(heavy.faction).toBe("enemy");
-    expect(heavy.stats.health).toBe(70);
+    expect(heavy.stats.health).toBe(80);
     expect(heavy.stats.timeUnits).toBeLessThan(50); // slow
     expect(heavy.weaponId).toBe("cannon");
     expect(WEAPONS[heavy.weaponId]).toBeDefined();
@@ -216,7 +216,7 @@ describe("new enemy templates", () => {
   it("stalker is a fast, fragile glass cannon with high reactions and the sniper", () => {
     const stalker = template("stalker");
     expect(stalker.faction).toBe("enemy");
-    expect(stalker.stats.health).toBe(24); // lowest enemy HP
+    expect(stalker.stats.health).toBe(20); // lowest enemy HP
     expect(stalker.stats.timeUnits).toBeGreaterThan(65); // fast
     expect(stalker.stats.reactions).toBeGreaterThan(60); // sharp reactions
     expect(stalker.weaponId).toBe("sniper");

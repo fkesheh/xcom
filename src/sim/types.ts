@@ -418,7 +418,7 @@ export const COMBAT = {
   /** Target tile half-width in tile units (for the subtended angle). */
   TARGET_HALF_WIDTH: 0.5,
   /** Hit chance is never below this when a shot is possible. */
-  MIN_HIT_CHANCE: 0.0,
+  MIN_HIT_CHANCE: 0.05,
   /** Hit chance is capped here so nothing is a literal certainty. */
   MAX_HIT_CHANCE: 0.99,
   /** Accuracy multiplier once the target is beyond a weapon's effective range (per tile over). */
@@ -472,7 +472,7 @@ export const STANCE = {
  */
 export const COVER = {
   /** Hit-chance reduction against a defender in HALF cover (tile.cover === 1). */
-  HALF_DEFENSE: 0.25,
+  HALF_DEFENSE: 0.3,
   /** Hit-chance reduction against a defender in FULL cover (tile.cover === 2). */
-  FULL_DEFENSE: 0.45,
+  FULL_DEFENSE: 0.55,
 } as const;

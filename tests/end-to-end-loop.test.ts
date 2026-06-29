@@ -220,7 +220,7 @@ const FIRE_MODES: readonly ShotKind[] = ["auto", "snap", "aimed"];
  * Tactics-aware auto-player. The cover-aware, survival-first alien AI plus
  * scattered cover made the old greedy "snap the nearest visible target, else
  * close along the cheapest path" driver lose the squad almost every seed: the
- * plasma hostiles out-range (14 vs 12) and out-damage (40 vs 26) the rifles, so
+ * plasma hostiles out-range (14 vs 12) and out-damage (34 vs 26) the rifles, so
  * a straight attrition race is lost. This driver instead wins the exchange by
  * leaning on the squad's actual advantages:
  *   - GRENADES first: a frag (56 dmg, radius 2) thrown into a cluster or at a

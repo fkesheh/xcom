@@ -764,6 +764,7 @@ export class Hud {
     this.seedChip = el("span", "chip");
     const ironman = el("span", "chip");
     ironman.textContent = "Live intel";
+    ironman.title = "Ironman mode — a single auto-save, no save-scumming";
     missionMeta.append(this.themeChip, this.seedChip, ironman);
     mission.append(missionRow, missionMeta);
     this.root.appendChild(mission);
@@ -1147,9 +1148,11 @@ export class Hud {
       }),
     );
     this.themeChip.textContent = titleCase(state.themeId ?? "unknown zone");
+    this.themeChip.title = "Mission terrain — shapes cover, lighting, and tile types";
     this.themeChip.classList.toggle("enemy", enemyTurn);
     this.themeChip.classList.toggle("live", !enemyTurn);
     this.seedChip.textContent = `Seed ${runtime.seed}`;
+    this.seedChip.title = `Deterministic battle seed (${runtime.seed}) — same seed reproduces this map`;
     this.missionTitle.textContent = runtime.missionName;
     this.objectiveTitle.textContent = state.objective?.recovered && !state.objective.extracted
       ? "Return the UFO core to the dropship extraction zone"
@@ -1802,7 +1805,8 @@ export class Hud {
 
     const actions = el("div", "briefing-actions");
     const keys = el("span");
-    keys.textContent = "WASD PAN / Q E ROTATE / WHEEL ZOOM / TAB CYCLE / H HELP";
+    keys.textContent =
+      "1/2/3 MODE · K KNEEL · R RESERVE · L RELOAD · ENTER END TURN · TAB CYCLE · WASD PAN · Q/E ROTATE · WHEEL ZOOM · H HELP · M MUTE";
     const begin = el("button");
     begin.textContent = "Deploy squad";
     begin.addEventListener("click", () => this.toggleBriefing(false));

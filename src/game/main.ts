@@ -72,13 +72,17 @@ import {
   unassignSoldierItem,
 } from "../campaign/storage";
 
-import { Renderer } from "./renderer";
 import { Sfx } from "./audio";
 import type { ProjectileKind } from "./effects";
+// The 3D view classes (Geoscape/Base/PlaneCombat) are imported only as types
+// here; their values are dynamically imported inside the screen-mount functions
+// below so three.js stays out of the initial bundle and loads lazily on first
+// mount. Renderer and Hud are not referenced as types, so they are fetched
+// purely via dynamic import() in startTactical.
 import { BaseView } from "./baseView";
-import { GeoscapeView } from "./geoscape";
-import { PlaneCombatView } from "./planeCombatView";
-import { Hud, type HudDebrief, type HudHover, type HudSoldierDetail } from "./hud";
+import type { GeoscapeView } from "./geoscape";
+import type { PlaneCombatView } from "./planeCombatView";
+import type { HudDebrief, HudHover, HudSoldierDetail } from "./hud";
 
 function urlSeed(): number | null {
   const raw = new URLSearchParams(window.location.search).get("seed");
@@ -102,6 +106,39 @@ const LOG_CAP = 60;
 const app = document.getElementById("app");
 if (!app) throw new Error("#app container missing");
 const appRoot: HTMLElement = app;
+
+/**
+ * Lightweight full-viewport "Loading…" overlay shown while a 3D view's chunk
+ * downloads. The 3D views (geoscape/base/tactical/plane-combat) are dynamically
+ * imported, so three.js + the view module fetch on first mount; this covers the
+ * gap between disposing the old screen and mounting the new one so the player
+ * never stares at a blank #app. Returns a function that removes the overlay
+ * once the view has mounted.
+ */
+function showScreenLoader(label: string): () => void {
+  const el = document.createElement("div");
+  el.className = "screen-loader";
+  el.setAttribute("aria-busy", "true");
+  el.setAttribute("role", "status");
+  el.textContent = label;
+  Object.assign(el.style, {
+    position: "absolute",
+    inset: "0",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "#05060a",
+    color: "#7fd3ff",
+    font: "600 13px/1 ui-monospace, SFMono-Regular, monospace",
+    letterSpacing: "0.25em",
+    textTransform: "uppercase",
+    zIndex: "9999",
+  });
+  appRoot.appendChild(el);
+  return () => {
+    el.remove();
+  };
+}
 
 let geoscape: GeoscapeView | null = null;
 let baseView: BaseView | null = null;
@@ -194,14 +231,14 @@ function buildGeoscapeCallbacks(campaign: CampaignState | null) {
       if (existing) {
         geoscape?.dispose();
         geoscape = null;
-        showBase(existing);
+        void showBase(existing);
         return;
       }
       const created = createCampaign(base, newCampaignSeed(), difficulty ?? "veteran");
       saveCampaign(created);
       geoscape?.dispose();
       geoscape = null;
-      showBase(created);
+      void showBase(created);
     },
     onAdvanceTime: (hours: number) => {
       // The geoscape's own frame loop drives this; refresh in place instead of
@@ -225,24 +262,31 @@ function buildGeoscapeCallbacks(campaign: CampaignState | null) {
         geoscape?.update(currentCampaign);
         return;
       }
-      mountPlaneCombat(currentCampaign);
+      void mountPlaneCombat(currentCampaign);
     },
     onResetCampaign: () => {
       // Flush before clearing so a pending debounced save can't resurrect it.
       flushSave();
       clearCampaign();
       currentCampaign = null;
-      showGeoscape();
+      void showGeoscape();
     },
   };
 }
 
 /** Dispose any prior geoscape, build + mount a fresh one bound to `campaign`. */
-function mountGeoscape(campaign: CampaignState | null): GeoscapeView {
+async function mountGeoscape(campaign: CampaignState | null): Promise<GeoscapeView> {
+  const hideLoader = showScreenLoader("Loading…");
   geoscape?.dispose();
-  geoscape = new GeoscapeView(buildGeoscapeCallbacks(campaign));
-  geoscape.mount(appRoot);
-  return geoscape;
+  try {
+    // three.js + the geoscape module load lazily here, on first screen mount.
+    const { GeoscapeView: GeoscapeCtor } = await import("./geoscape");
+    geoscape = new GeoscapeCtor(buildGeoscapeCallbacks(campaign));
+    geoscape.mount(appRoot);
+    return geoscape;
+  } finally {
+    hideLoader();
+  }
 }
 
 /**
@@ -251,28 +295,34 @@ function mountGeoscape(campaign: CampaignState | null): GeoscapeView {
  * re-renders; onResolve fires once the encounter clears (UFO down, interceptor
  * lost, or disengage), tearing the screen down and returning to the globe.
  */
-function mountPlaneCombat(campaign: CampaignState): void {
+async function mountPlaneCombat(campaign: CampaignState): Promise<void> {
   geoscape?.dispose();
   geoscape = null;
   planeCombat?.dispose();
-  planeCombat = new PlaneCombatView({
-    campaign,
-    onAction: (action: InterceptionAction) => {
-      if (!currentCampaign) return;
-      currentCampaign = executeInterceptionAction(currentCampaign, action);
-      debouncedSave(currentCampaign);
-      planeCombat?.update(currentCampaign);
-    },
-    onResolve: () => {
-      planeCombat?.dispose();
-      planeCombat = null;
-      showGeoscape();
-    },
-  });
-  planeCombat.mount(appRoot);
+  const hideLoader = showScreenLoader("Loading…");
+  try {
+    const { PlaneCombatView: PlaneCombatCtor } = await import("./planeCombatView");
+    planeCombat = new PlaneCombatCtor({
+      campaign,
+      onAction: (action: InterceptionAction) => {
+        if (!currentCampaign) return;
+        currentCampaign = executeInterceptionAction(currentCampaign, action);
+        debouncedSave(currentCampaign);
+        planeCombat?.update(currentCampaign);
+      },
+      onResolve: () => {
+        planeCombat?.dispose();
+        planeCombat = null;
+        void showGeoscape();
+      },
+    });
+    planeCombat.mount(appRoot);
+  } finally {
+    hideLoader();
+  }
 }
 
-function showGeoscape(): void {
+async function showGeoscape(): Promise<void> {
   flushSave();
   // Seed the in-memory campaign once from storage; every geoscape callback then
   // advances from `currentCampaign` instead of re-reading localStorage (which
@@ -283,7 +333,7 @@ function showGeoscape(): void {
   baseView = null;
   planeCombat?.dispose();
   planeCombat = null;
-  mountGeoscape(currentCampaign);
+  await mountGeoscape(currentCampaign);
   sfx.startAmbience("geoscape");
 }
 
@@ -303,7 +353,7 @@ function showBase(campaign: CampaignState): void {
   baseView = new BaseView({
     campaign,
     operation,
-    onLaunchMission: () => {
+    onLaunchMission: async () => {
       // In-place updates keep the closed-over `campaign`/`operation` stale; read
       // the live in-memory state so deployment, weapons, and the generated
       // operation match the current squad before handing off to the tactical
@@ -314,7 +364,7 @@ function showBase(campaign: CampaignState): void {
       // Without a staged mission site there is nowhere to fly to — preserve the
       // prior direct handoff (startTactical no-ops without a valid contact).
       if (contactStatus !== "crashed" && contactStatus !== "landed") {
-        startTactical(current);
+        void startTactical(current);
         return;
       }
       // Stage the fleet's Skyranger transport deployment flight on the globe, then
@@ -325,9 +375,9 @@ function showBase(campaign: CampaignState): void {
       disposeTacticalIfExists();
       baseView?.dispose();
       baseView = null;
-      const view = mountGeoscape(current);
+      const view = await mountGeoscape(current);
       view.playDeploymentFlight(current, () => {
-        startTactical(currentCampaign ?? current);
+        void startTactical(currentCampaign ?? current);
       });
     },
     onStartResearch: (id) => {
@@ -390,20 +440,22 @@ function showBase(campaign: CampaignState): void {
       debouncedSave(updated);
       baseView?.update(updated);
     },
-    onOpenGeoscape: () => showGeoscape(),
+    onOpenGeoscape: () => {
+      void showGeoscape();
+    },
     onResetCampaign: () => {
       // Flush before clearing so a pending debounced save can't resurrect it.
       flushSave();
       clearCampaign();
       currentCampaign = null;
-      showGeoscape();
+      void showGeoscape();
     },
   });
   baseView.mount(appRoot);
   sfx.startAmbience("base");
 }
 
-function startTactical(campaign: CampaignState, operation: OperationPlan = generateOperation(campaign)): void {
+async function startTactical(campaign: CampaignState, operation: OperationPlan = generateOperation(campaign)): Promise<void> {
   flushSave();
   const deployment = deploymentSoldiers(campaign);
   const contactStatus = campaign.ufoContact?.status;
@@ -457,7 +509,14 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
     ...missionObjective,
   });
 
-  const renderer = new Renderer();
+  const hideLoader = showScreenLoader("Deploying…");
+  // three.js, the tactical renderer, and the HUD load lazily here on first
+  // battlescape mount. Fetch both chunks in parallel while the loader shows.
+  const [{ Renderer: RendererCtor }, { Hud: HudCtor }] = await Promise.all([
+    import("./renderer"),
+    import("./hud"),
+  ]);
+  const renderer = new RendererCtor();
   renderer.mount(appRoot);
 
   // Switch the shared ambience bed to the tactical wind/rumble. The same `sfx`
@@ -483,7 +542,7 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
   const tacticalAbort = new AbortController();
   const tacticalSignal = tacticalAbort.signal;
 
-  const hud = new Hud({
+  const hud = new HudCtor({
     onEndTurn: () => void dispatch({ type: "endTurn" }),
     onSelectMode: (kind) => setMode(kind),
     onSetReserve: (mode) => setReserve(mode),
@@ -503,6 +562,7 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
     onNewCampaign: () => startNewCampaign(),
   });
   hud.mount(appRoot);
+  hideLoader();
 
   // ---------------------------------------------------------------------------
   // Tactical teardown (cancels rAF, aborts all listeners, disposes GPU + HUD)
@@ -868,15 +928,15 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
   function abortMissionToGeoscape(): void {
     if (state.status === "playing") completeMission("failure");
     disposeTactical();
-    showGeoscape();
+    void showGeoscape();
   }
 
   /** Leave the tactical view after mission completion and return to base. */
   function returnToBase(): void {
     const updated = completedCampaign ?? currentCampaign ?? loadCampaign();
     disposeTactical();
-    if (updated) showBase(updated);
-    else showGeoscape();
+    if (updated) void showBase(updated);
+    else void showGeoscape();
   }
 
   /** Clear the campaign and present the new-game geoscape. */
@@ -885,7 +945,7 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
     // Flush before clearing so a pending debounced save can't resurrect it.
     flushSave();
     clearCampaign();
-    showGeoscape();
+    void showGeoscape();
   }
 
   /** Is `pos` currently inside any living player's vision? (players are static on the enemy turn) */
@@ -1513,5 +1573,5 @@ function startTactical(campaign: CampaignState, operation: OperationPlan = gener
 // ---------------------------------------------------------------------------
 
 const existingCampaign = loadCampaign();
-if (existingCampaign) showBase(existingCampaign);
-else showGeoscape();
+if (existingCampaign) void showBase(existingCampaign);
+else void showGeoscape();

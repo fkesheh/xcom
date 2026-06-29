@@ -38,7 +38,7 @@ export const WEAPONS: Record<string, Weapon> = {
   plasma: {
     id: "plasma",
     name: "Plasma Caster",
-    damage: 40,
+    damage: 34,
     range: 14,
     magazineSize: 8,
     reloadTuPercent: 24,
@@ -50,9 +50,9 @@ export const WEAPONS: Record<string, Weapon> = {
   cannon: {
     id: "cannon",
     name: "Assault Cannon",
-    // Heavy hitter: massive base damage in exchange for short range, low
+    // Heavy hitter: high base damage in exchange for short range, low
     // accuracy, and a steep TU cost. A single landed shot defines a turn.
-    damage: 50,
+    damage: 45,
     range: 7,
     magazineSize: 6,
     reloadTuPercent: 30,
@@ -157,7 +157,7 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
     // cannon to bear. Slow TUs mean it advances deliberately and fires once.
     stats: {
       timeUnits: 42,
-      health: 70,
+      health: 80,
       reactions: 30,
       firingAccuracy: 55,
       strength: 60,
@@ -175,7 +175,7 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
     // sniper rifle. Kills at range from cover, dies to a single burst.
     stats: {
       timeUnits: 75,
-      health: 24,
+      health: 20,
       reactions: 70,
       firingAccuracy: 80,
       strength: 30,

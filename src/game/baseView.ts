@@ -280,6 +280,20 @@ const CSS = `
   justify-content: flex-end;
   gap: 7px;
 }
+#base-view .topbar-right { display: flex; align-items: center; gap: 10px; }
+#base-view .topbar-tools { display: flex; gap: 8px; }
+#base-view .help-btn {
+  min-width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 7px;
+  border: 1px solid rgba(103,232,249,.4);
+  color: #67e8f9;
+  background: rgba(8,28,40,.7);
+  font: 800 15px/1 ui-monospace, monospace;
+  cursor: pointer;
+}
+#base-view .help-btn:hover { border-color: rgba(103,232,249,.9); background: rgba(14,52,67,.9); }
 #base-view .top-chip {
   display: inline-flex;
   align-items: center;
@@ -1070,6 +1084,58 @@ const CSS = `
   color: #fecaca;
   background: rgba(45,11,18,.92);
 }
+#base-view .base-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
+  pointer-events: auto;
+  background: radial-gradient(circle at center, rgba(10,25,35,.78), rgba(2,5,8,.95));
+  backdrop-filter: blur(8px);
+}
+#base-view .base-overlay.show { display: flex; }
+#base-view .base-help-card {
+  position: relative;
+  width: min(620px, 100%);
+  overflow: hidden auto;
+  max-height: calc(100vh - 44px);
+  padding: clamp(22px, 4vw, 38px);
+  border: 1px solid rgba(103,232,249,.32);
+  border-radius: 14px;
+  background:
+    linear-gradient(135deg, rgba(19,42,55,.96), rgba(5,11,17,.98) 62%),
+    rgba(5,11,17,.98);
+  box-shadow: 0 30px 100px rgba(0,0,0,.55);
+}
+#base-view .base-help-card::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0;
+  width: 42%; height: 3px;
+  background: linear-gradient(90deg, #67e8f9, transparent);
+}
+#base-view .base-help-card .eyebrow { color: #67e8f9; font: 700 9px/1.2 ui-monospace, monospace; letter-spacing: .18em; text-transform: uppercase; }
+#base-view .base-help-card h2 { margin: 7px 0 8px; font-size: 26px; line-height: 1; letter-spacing: .04em; text-transform: uppercase; }
+#base-view .base-help-card p.lede { margin: 0; max-width: 520px; color: #a9bdcb; font-size: 13px; }
+#base-view .base-help-card ul { margin: 18px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+#base-view .base-help-card li { padding: 9px 12px; border: 1px solid rgba(255,255,255,.07); border-radius: 8px; background: rgba(0,0,0,.18); color: #cfe2ee; font: 600 12px/1.4 ui-monospace, monospace; }
+#base-view .base-help-card li b { color: #67e8f9; font-weight: 800; }
+#base-view .base-help-actions { display: flex; justify-content: flex-end; margin-top: 18px; }
+#base-view .base-help-actions button {
+  min-width: 130px;
+  min-height: 38px;
+  border-radius: 7px;
+  border: 1px solid rgba(103,232,249,.7);
+  color: #ecfeff;
+  background: linear-gradient(180deg, rgba(17,94,117,.96), rgba(8,49,65,.98));
+  font: 800 11px/1 ui-monospace, monospace;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
 @media (max-width: 900px) {
   #base-view .base-sidebar {
     top: auto;
@@ -1481,6 +1547,12 @@ export class BaseView {
   private primaryHost: HTMLElement | null = null;
   private objectiveHost: HTMLElement | null = null;
   private roomHost: HTMLElement | null = null;
+  private helpOverlay: HTMLDivElement | null = null;
+  private readonly onKeydown = (e: KeyboardEvent): void => {
+    if (e.key === "Escape" && this.helpOverlay?.classList.contains("show")) {
+      this.toggleHelp(false);
+    }
+  };
 
   constructor(private readonly opts: BaseViewOptions) {
     injectStyle();
@@ -1512,6 +1584,7 @@ export class BaseView {
     window.addEventListener("resize", this.resize);
     dom.addEventListener("pointermove", this.onPointerMove);
     dom.addEventListener("click", this.onCanvasClick);
+    window.addEventListener("keydown", this.onKeydown);
     this.resize();
     this.frame();
   }
@@ -1524,6 +1597,7 @@ export class BaseView {
     const dom = this.renderer.domElement;
     dom.removeEventListener("pointermove", this.onPointerMove);
     dom.removeEventListener("click", this.onCanvasClick);
+    window.removeEventListener("keydown", this.onKeydown);
     window.removeEventListener("resize", this.resize);
     // CrewSystem owns its pooled meshes/materials; tear it down before the scene
     // walk so its internal dispose() is the single owner of those resources.
@@ -2211,7 +2285,17 @@ export class BaseView {
     const clock = el("span", "brand-clock");
     brand.append(brandName, brandRegion, clock);
     const chips = el("div", "topbar-chips");
-    topbar.append(brand, chips);
+    const tools = el("div", "topbar-tools");
+    const help = el("button", "help-btn");
+    help.type = "button";
+    help.textContent = "?";
+    help.title = "Base controls — click for help";
+    help.setAttribute("aria-label", "Open base help");
+    help.addEventListener("click", () => this.toggleHelp(true));
+    tools.appendChild(help);
+    const topRight = el("div", "topbar-right");
+    topRight.append(chips, tools);
+    topbar.append(brand, topRight);
 
     const sidebar = el("aside", "base-sidebar");
     const primaryHost = el("div");
@@ -2241,9 +2325,57 @@ export class BaseView {
     this.roomHost = roomHost;
     this.tooltipEl = tooltip;
     this.noticeEl = notice;
+    this.helpOverlay = this.buildHelpOverlay();
 
-    this.root.append(topbar, sidebar, footer, tooltip, notice);
+    this.root.append(topbar, sidebar, footer, tooltip, notice, this.helpOverlay);
     this.refreshHud();
+  }
+
+  /** Toggle the base HELP overlay (concise controls + mechanics reference). */
+  toggleHelp(force?: boolean): void {
+    if (!this.helpOverlay) return;
+    const show = force ?? !this.helpOverlay.classList.contains("show");
+    this.helpOverlay.classList.toggle("show", show);
+  }
+
+  private buildHelpOverlay(): HTMLDivElement {
+    const overlay = el("div", "base-overlay");
+    const card = el("div", "base-help-card");
+    const eye = el("div", "eyebrow");
+    eye.textContent = "Base controls";
+    const title = el("h2");
+    title.textContent = "Blacksite command";
+    const lede = el("p", "lede");
+    lede.textContent =
+      "Your underground headquarters. Expand facilities, research alien tech, equip your squad, and launch assaults from here.";
+    const list = el("ul");
+    const tips: Array<[string, string]> = [
+      ["Click a facility", "to dive in and manage its room, staff, and projects."],
+      ["Armory / Market", "buy weapons and gear from Council suppliers."],
+      ["Barracks", "assign weapons & items, then deploy soldiers to the squad."],
+      ["Lab / Workshop", "research alien tech and manufacture captured equipment."],
+      ["Earth (footer)", "open the geoscape to scan, intercept, and launch assaults."],
+      ["Resources", "$ buys gear & recruits; alloys, elerium, and alien data fuel research and manufacturing."],
+    ];
+    for (const [head, copy] of tips) {
+      const li = el("li");
+      const b = el("b");
+      b.textContent = `${head} — `;
+      li.append(b, document.createTextNode(copy));
+      list.appendChild(li);
+    }
+    const actions = el("div", "base-help-actions");
+    const close = el("button");
+    close.type = "button";
+    close.textContent = "Got it [ESC]";
+    close.addEventListener("click", () => this.toggleHelp(false));
+    actions.appendChild(close);
+    card.append(eye, title, lede, list, actions);
+    overlay.append(card);
+    overlay.addEventListener("click", (e: MouseEvent) => {
+      if (e.target === overlay) this.toggleHelp(false);
+    });
+    return overlay;
   }
 
   /** Re-render every dynamic region (top-bar chips/clock, primary CTA, objective
@@ -2284,22 +2416,22 @@ export class BaseView {
     const threat = campaign.strategic.threat;
     const threatCls = threat >= 70 ? "danger" : threat >= 40 ? "warn" : "";
     this.topbarChips.replaceChildren(
-      this.topChip("$", "Credits", `${campaign.resources.credits}`),
-      this.topChip("⬢", "Alloys", `${campaign.resources.alloys}`),
-      this.topChip("✦", "Elerium", `${campaign.resources.elerium}`),
-      this.topChip("◈", "Alien Data", `${campaign.resources.alienData}`),
-      this.topChip("⚗", "Scientists", `${scientists}`),
-      this.topChip("⚙", "Engineers", `${engineers}`),
-      this.topChip("▲", "Threat", `${threat}%`, threatCls),
-      this.topChip("◆", "Difficulty", difficultyConfig(campaign).label),
+      this.topChip("$", "Credits", `${campaign.resources.credits}`, undefined, "currency — buys weapons, recruits, and construction"),
+      this.topChip("⬢", "Alloys", `${campaign.resources.alloys}`, undefined, "alien alloys — manufacture advanced gear"),
+      this.topChip("✦", "Elerium", `${campaign.resources.elerium}`, undefined, "elerium-115 — powers advanced research and manufacturing"),
+      this.topChip("◈", "Alien Data", `${campaign.resources.alienData}`, undefined, "recovered data — unlocks and accelerates research"),
+      this.topChip("⚗", "Scientists", `${scientists}`, undefined, "staffed lab researchers — more = faster research"),
+      this.topChip("⚙", "Engineers", `${engineers}`, undefined, "staffed workshop engineers — more = faster manufacturing"),
+      this.topChip("▲", "Threat", `${threat}%`, threatCls, "global X-COM threat — high threat raises council panic"),
+      this.topChip("◆", "Difficulty", difficultyConfig(campaign).label, undefined, "campaign difficulty — affects enemy counts and starting threat"),
     );
   }
 
   /** Compact top-bar chip: icon + value with a hover tooltip carrying the full
    *  label, so the threat color class is never the sole signal. */
-  private topChip(icon: string, label: string, value: string, cls?: string): HTMLSpanElement {
+  private topChip(icon: string, label: string, value: string, cls?: string, hint?: string): HTMLSpanElement {
     const node = el("span", `top-chip${cls ? ` ${cls}` : ""}`);
-    node.title = `${label}: ${value}`;
+    node.title = hint ? `${label} — ${hint} (${value})` : `${label}: ${value}`;
     const iconEl = el("span", "chip-icon");
     iconEl.textContent = icon;
     const valEl = el("span", "chip-val");

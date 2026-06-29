@@ -79,6 +79,10 @@ test.afterEach(async () => {
 // ---------------------------------------------------------------------------
 
 test.describe("Blacksite boot smoke", () => {
+  test.beforeEach(async ({ page }) => {
+    // Wait for dynamic-import chunks (three.js views) to finish loading.
+    page.on("load", async () => { await page.waitForLoadState("networkidle").catch(() => {}); });
+  });
   test("a) new-game geoscape renders the difficulty selector", async ({ page }) => {
     await page.addInitScript(() => {
       window.localStorage.clear();

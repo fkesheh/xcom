@@ -76,6 +76,27 @@ export interface GeoscapeTimeAction {
 }
 
 const STYLE_ID = "blacksite-geoscape-style";
+
+/** localStorage key for the one-time first-run hints flag ("1" = already shown). */
+const SEEN_HINTS_KEY = "xcom-seen-hints";
+
+/** True when the first-run welcome tip has already been dismissed/suppressed.
+ *  Defaults to "seen" if localStorage is unreachable so a sandbox never crashes
+ *  the geoscape mount and the tip never recurs. */
+function hintsSeen(): boolean {
+  try {
+    return localStorage.getItem(SEEN_HINTS_KEY) === "1";
+  } catch {
+    return true;
+  }
+}
+function markHintsSeen(): void {
+  try {
+    localStorage.setItem(SEEN_HINTS_KEY, "1");
+  } catch {
+    /* localStorage unavailable — treat as already seen. */
+  }
+}
 const EARTH_RADIUS = 1.5;
 const UP = new Vector3(0, 1, 0);
 const MAP_WIDTH = 2048;
@@ -538,6 +559,64 @@ const CSS = `
   pointer-events: none;
 }
 #geoscape .geo-overlay-host .geo-overlay { pointer-events: auto; }
+#geoscape .geo-help {
+  position: absolute;
+  top: max(18px, env(safe-area-inset-top));
+  right: max(18px, env(safe-area-inset-right));
+  z-index: 6;
+  min-width: 42px;
+  min-height: 42px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid rgba(103,232,249,.5);
+  color: #67e8f9;
+  background: rgba(2,12,20,.82);
+  font: 800 16px/1 ui-monospace, monospace;
+  cursor: pointer;
+  box-shadow: 0 10px 30px rgba(0,0,0,.4);
+}
+#geoscape .geo-help:hover { border-color: rgba(103,232,249,.95); background: rgba(14,52,67,.95); }
+/* The HELP overlay lives permanently in the DOM (toggled via .show), so override
+   the always-on display:flex of .geo-overlay and gate it on .show. */
+#geoscape .geo-help-overlay { display: none; }
+#geoscape .geo-help-overlay.show { display: flex; }
+#geoscape .geo-help-card {
+  width: min(560px, 100%);
+  padding: clamp(22px, 4vw, 36px);
+  border: 1px solid rgba(103,232,249,.32);
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(19,42,55,.96), rgba(5,11,17,.98) 62%);
+  box-shadow: 0 30px 100px rgba(0,0,0,.55);
+}
+#geoscape .geo-help-card .eyebrow { color: #67e8f9; font: 700 9px/1.2 ui-monospace, monospace; letter-spacing: .18em; text-transform: uppercase; }
+#geoscape .geo-help-card h2 { margin: 7px 0 8px; color: #e8fbff; font-size: 24px; letter-spacing: .04em; text-transform: uppercase; }
+#geoscape .geo-help-card p.lede { margin: 0; max-width: 480px; color: #a9c8d7; font-size: 12px; }
+#geoscape .geo-help-card ul { margin: 16px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+#geoscape .geo-help-card li { padding: 9px 12px; border: 1px solid rgba(255,255,255,.07); border-radius: 8px; background: rgba(0,0,0,.18); color: #cfe2ee; font: 600 11px/1.4 ui-monospace, monospace; }
+#geoscape .geo-help-card li b { color: #67e8f9; font-weight: 800; }
+#geoscape .geo-help-actions { display: flex; justify-content: flex-end; margin-top: 16px; }
+#geoscape .geo-help-actions button { min-width: 130px; min-height: 38px; }
+#geoscape .geo-welcome {
+  position: absolute;
+  top: max(68px, calc(env(safe-area-inset-top) + 56px));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: none;
+  width: min(440px, calc(100vw - 36px));
+  padding: 13px 15px;
+  border: 1px solid rgba(103,232,249,.5);
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(12,30,43,.96), rgba(3,9,15,.97));
+  box-shadow: 0 24px 70px rgba(0,0,0,.55);
+}
+#geoscape .geo-welcome.show { display: block; }
+#geoscape .geo-welcome .eyebrow { color: #67e8f9; font: 700 9px/1.2 ui-monospace, monospace; letter-spacing: .18em; text-transform: uppercase; }
+#geoscape .geo-welcome b { display: block; margin: 5px 0 7px; color: #e8fbff; font: 800 13px/1.2 ui-monospace, monospace; letter-spacing: .04em; }
+#geoscape .geo-welcome ol { margin: 0; padding-left: 18px; color: #cfe2ee; font: 600 11px/1.5 ui-monospace, monospace; }
+#geoscape .geo-welcome ol li { margin-bottom: 3px; }
+#geoscape .geo-welcome-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+#geoscape .geo-welcome-actions button { min-height: 32px; min-width: 96px; padding: 0 12px; }
 #geoscape .geo-speed {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -1113,6 +1192,15 @@ export class GeoscapeView {
   private readonly actionsSlot: HTMLDivElement;
   private readonly overlaySlot: HTMLDivElement;
   private readonly toast: HTMLDivElement;
+  /** Concise HELP overlay (controls + mechanics reference). */
+  private helpOverlay: HTMLDivElement | null = null;
+  /** One-time first-run welcome banner; shown only until dismissed. */
+  private welcomeBanner: HTMLDivElement | null = null;
+  private readonly onKeydown = (e: KeyboardEvent): void => {
+    if (e.key === "Escape" && this.helpOverlay?.classList.contains("show")) {
+      this.toggleHelp(false);
+    }
+  };
 
   // Reusable scratch objects for the interceptor animation (no per-frame allocation).
   private readonly scratchA = new Vector3();
@@ -1252,6 +1340,8 @@ export class GeoscapeView {
     // First render populates every panel/marker and seeds the event snapshot
     // (without firing an auto-pause toast for the already-known campaign).
     this.refresh();
+    // One-time first-run welcome tip (only the very first campaign, never twice).
+    this.maybeShowWelcome();
   }
 
   /**
@@ -1279,6 +1369,7 @@ export class GeoscapeView {
     this.renderer.domElement.addEventListener("pointerdown", this.onPointerDown);
     this.renderer.domElement.addEventListener("pointerup", this.onPointerUp);
     window.addEventListener("resize", this.resize);
+    window.addEventListener("keydown", this.onKeydown);
     this.resize();
     this.frame();
   }
@@ -1290,6 +1381,7 @@ export class GeoscapeView {
     if (this.toastTimer !== undefined) window.clearTimeout(this.toastTimer);
     if (this.threatFlashTimer !== undefined) window.clearTimeout(this.threatFlashTimer);
     window.removeEventListener("resize", this.resize);
+    window.removeEventListener("keydown", this.onKeydown);
     this.renderer.domElement.removeEventListener("pointerdown", this.onPointerDown);
     this.renderer.domElement.removeEventListener("pointerup", this.onPointerUp);
     this.controls.dispose();
@@ -1795,6 +1887,19 @@ export class GeoscapeView {
     toast.setAttribute("role", "status");
     toast.setAttribute("aria-live", "polite");
     this.root.appendChild(toast);
+
+    const help = el("button", "geo-help");
+    help.type = "button";
+    help.textContent = "?";
+    help.title = "Geoscape controls — click for help";
+    help.setAttribute("aria-label", "Open geoscape help");
+    help.addEventListener("click", () => this.toggleHelp(true));
+    this.root.appendChild(help);
+    this.helpOverlay = this.buildHelpOverlay();
+    this.root.appendChild(this.helpOverlay);
+    this.welcomeBanner = this.buildWelcomeBanner();
+    this.root.appendChild(this.welcomeBanner);
+
     return { region, coords, confirm, statsGrid, noticeSlot, cardsSlot, actionsSlot, overlaySlot, toast };
   }
 
@@ -1878,6 +1983,97 @@ export class GeoscapeView {
     }, 3600);
   }
 
+  /** Toggle the concise geoscape HELP overlay (controls + mechanics reference). */
+  toggleHelp(force?: boolean): void {
+    if (!this.helpOverlay) return;
+    const show = force ?? !this.helpOverlay.classList.contains("show");
+    this.helpOverlay.classList.toggle("show", show);
+  }
+
+  private buildHelpOverlay(): HTMLDivElement {
+    const overlay = el("div", "geo-overlay geo-help-overlay");
+    const card = el("div", "geo-help-card");
+    const eye = el("div", "eyebrow");
+    eye.textContent = "Global controls";
+    const title = el("h2");
+    title.textContent = "Earth Command";
+    const lede = el("p", "lede");
+    lede.textContent =
+      "The geoscape. Time flows here — detect UFO contacts, intercept them, and launch assault missions from your base.";
+    const list = el("ul");
+    const tips: Array<[string, string]> = [
+      ["Time", "flows at Pause / 1× / 5× / 30× — advance it to detect UFOs and trigger events."],
+      ["Globe", "drag to rotate, wheel to zoom (click Earth to place your base in a new game)."],
+      ["Airborne UFO", "Intercept to scramble your fighter and shoot it down."],
+      ["Crash / terror sites", "become assault missions — return to Base to launch your squad."],
+      ["Threat & Panic", "rise as aliens act — lose enough regions and the council defunds X-COM."],
+    ];
+    for (const [head, copy] of tips) {
+      const li = el("li");
+      const b = el("b");
+      b.textContent = `${head} `;
+      li.append(b, document.createTextNode(copy));
+      list.appendChild(li);
+    }
+    const actions = el("div", "geo-help-actions");
+    const close = el("button");
+    close.type = "button";
+    close.textContent = "Got it [ESC]";
+    close.addEventListener("click", () => this.toggleHelp(false));
+    actions.appendChild(close);
+    card.append(eye, title, lede, list, actions);
+    overlay.append(card);
+    overlay.addEventListener("click", (e: MouseEvent) => {
+      if (e.target === overlay) this.toggleHelp(false);
+    });
+    return overlay;
+  }
+
+  /**
+   * First-run welcome tip. Shown once, only when there is no saved campaign
+   * (the new-game geoscape) and the seen-hints flag is unset. The flag is set the
+   * moment it shows, so the tip never recurs on subsequent loads.
+   */
+  private maybeShowWelcome(): void {
+    if (!this.welcomeBanner || this.opts.campaign !== null) return;
+    if (hintsSeen()) return;
+    markHintsSeen();
+    this.welcomeBanner.classList.add("show");
+  }
+
+  private dismissWelcome(): void {
+    if (!this.welcomeBanner) return;
+    this.welcomeBanner.classList.remove("show");
+    markHintsSeen();
+  }
+
+  private buildWelcomeBanner(): HTMLDivElement {
+    const banner = el("div", "geo-welcome");
+    const eye = el("div", "eyebrow");
+    eye.textContent = "Welcome, Commander";
+    const heading = el("b");
+    heading.textContent = "New to X-COM? Here's the loop:";
+    const steps = el("ol");
+    const items = [
+      "Pick a base site — click anywhere on land to place your headquarters.",
+      "Advance time (1× / 5× / 30×) to scan for UFO contacts and events.",
+      "Intercept airborne UFOs, then return to base to launch a recovery assault.",
+    ];
+    for (const text of items) {
+      const li = el("li");
+      li.textContent = text;
+      steps.appendChild(li);
+    }
+    const actions = el("div", "geo-welcome-actions");
+    const dismiss = el("button");
+    dismiss.type = "button";
+    dismiss.textContent = "Got it";
+    dismiss.addEventListener("click", () => this.dismissWelcome());
+    actions.appendChild(dismiss);
+    banner.append(eye, heading, steps, actions);
+    return banner;
+  }
+
   private refreshStats(): void {
     this.statsGrid.replaceChildren();
     const c = this.campaign;
@@ -1892,11 +2088,11 @@ export class GeoscapeView {
     const panic = highestRegionalPanic(c);
     const objective = campaignObjectiveProgress(c);
     this.statsGrid.append(
-      this.stat("Clock", formatCampaignClock(c.clock)),
-      this.stat("Threat", `${c.strategic.threat}%`),
-      this.stat("Funding", `${c.strategic.funding}`),
-      this.stat("Cores", `${objective.completed}/${objective.required}`),
-      this.stat("Panic", `${panic.region} ${panic.panic}%`),
+      this.stat("Clock", formatCampaignClock(c.clock), "in-world date and time of day"),
+      this.stat("Threat", `${c.strategic.threat}%`, "global X-COM threat — drives council panic"),
+      this.stat("Funding", `${c.strategic.funding}`, "monthly council funding index"),
+      this.stat("Cores", `${objective.completed}/${objective.required}`, "recovered UFO cores — campaign objective"),
+      this.stat("Panic", `${panic.region} ${panic.panic}%`, "highest regional panic — a region at 100% defects"),
     );
   }
 
@@ -1947,6 +2143,12 @@ export class GeoscapeView {
       const label = el("span");
       label.textContent = option.label;
       btn.append(icon, label);
+      const hint = option.speed === 0
+        ? "time frozen — no events advance"
+        : option.speed === 1
+          ? "near real-time pace"
+          : "faster flow — events still auto-pause";
+      btn.title = `${option.label} — ${hint}`;
       btn.setAttribute("aria-pressed", String(this.timeSpeed === option.speed));
       btn.addEventListener("click", () => this.setTimeSpeed(option.speed));
       speedGroup.append(btn);
@@ -3276,12 +3478,13 @@ export class GeoscapeView {
     return card;
   }
 
-  private stat(label: string, value: string): HTMLElement {
+  private stat(label: string, value: string, hint?: string): HTMLElement {
     const node = el("div", "geo-stat");
     const span = el("span");
     span.textContent = label;
     const b = el("b");
     b.textContent = value;
+    if (hint) node.title = `${label}: ${value} — ${hint}`;
     node.append(span, b);
     return node;
   }
