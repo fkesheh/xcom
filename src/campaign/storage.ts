@@ -554,7 +554,7 @@ export const STARTING_ARMORY: CampaignArmory = {
     pistol: 2,
     plasma: 0,
   },
-  items: { grenade: 8, medkit: 4 },
+  items: { grenade: 8, medkit: 4, smoke: 4 },
 };
 
 const RANKS: readonly { rank: SoldierRank; minSurvived: number; bonus: SoldierStatBonus }[] = [

@@ -55,6 +55,7 @@ import {
   canRecruitSoldier,
   canStartResearch,
   campaignObjectiveProgress,
+  campaignSoldierStatBonus,
   constructedFacilities,
   DEPLOYMENT_SIZE,
   deploymentSoldiers,
@@ -2854,9 +2855,14 @@ export class BaseView {
     );
     if (this.expandedSoldierId === soldier.id) {
       const detail = el("div", "soldier-detail");
-      detail.textContent =
-        `${soldier.missions} missions · ${soldier.survivedMissions} survived · rank ${soldier.rank}` +
-        (soldier.status === "wounded" ? " · wounded" : "") + ".";
+      const growth = soldier.statGrowth ? this.formatStatDeltas(soldier.statGrowth) : "";
+      const effective = this.formatStatDeltas(campaignSoldierStatBonus(campaign, soldier));
+      let detailText =
+        `${soldier.missions} missions · ${soldier.survivedMissions} survived · rank ${soldier.rank}`;
+      if (soldier.status === "wounded") detailText += " · wounded";
+      if (growth) detailText += ` · growth ${growth}`;
+      if (effective) detailText += ` · effective ${effective}`;
+      detail.textContent = `${detailText}.`;
       row.appendChild(detail);
     }
     row.addEventListener("click", () => {
@@ -2864,6 +2870,24 @@ export class BaseView {
       this.refreshHud();
     });
     return row;
+  }
+
+  /** Format a stat delta block as `+N acc/+M rea/...`, omitting zero entries and
+   *  following the acc/rea/hp/TU order. Returns "" when every entry is zero.
+   *  Works for both accumulated {@link SoldierStatGrowth} and the effective
+   *  {@link SoldierStatBonus} since they share the same four numeric fields. */
+  private formatStatDeltas(delta: {
+    firingAccuracy: number;
+    reactions: number;
+    health: number;
+    timeUnits: number;
+  }): string {
+    const segments: string[] = [];
+    if (delta.firingAccuracy !== 0) segments.push(`+${delta.firingAccuracy} acc`);
+    if (delta.reactions !== 0) segments.push(`+${delta.reactions} rea`);
+    if (delta.health !== 0) segments.push(`+${delta.health} hp`);
+    if (delta.timeUnits !== 0) segments.push(`+${delta.timeUnits} TU`);
+    return segments.join("/");
   }
 
   /** Compact per-soldier backpack: for each consumable item type, show how many

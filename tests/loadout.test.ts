@@ -61,17 +61,17 @@ describe("soldier loadout items", () => {
     delete (globalThis as { localStorage?: Storage }).localStorage;
   });
 
-  it("stocks the starting armory with grenades and medkits", () => {
-    expect(STARTING_ARMORY.items).toEqual({ grenade: 8, medkit: 4 });
+  it("stocks the starting armory with grenades, medkits, and smoke", () => {
+    expect(STARTING_ARMORY.items).toEqual({ grenade: 8, medkit: 4, smoke: 4 });
     const campaign = freshCampaign();
-    expect(campaign.armory.items).toEqual({ grenade: 8, medkit: 4 });
+    expect(campaign.armory.items).toEqual({ grenade: 8, medkit: 4, smoke: 4 });
   });
 
   it("reports the full starting stock as available before any assignment", () => {
     const campaign = freshCampaign();
     expect(availableItemCount(campaign, "grenade")).toBe(8);
     expect(availableItemCount(campaign, "medkit")).toBe(4);
-    expect(availableItemCount(campaign, "smoke")).toBe(0);
+    expect(availableItemCount(campaign, "smoke")).toBe(4);
   });
 
   it("assigns an item to a soldier and decrements armory stock without mutating the input", () => {
@@ -207,7 +207,7 @@ describe("soldier loadout items", () => {
     const loaded = loadCampaign();
 
     expect(loaded).not.toBeNull();
-    expect(loaded!.armory.items).toEqual({ grenade: 8, medkit: 4 });
+    expect(loaded!.armory.items).toEqual({ grenade: 8, medkit: 4, smoke: 4 });
     expect(loaded!.soldiers[0]!.loadoutItems).toEqual([]);
   });
 
