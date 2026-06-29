@@ -52,7 +52,7 @@ export const MEDBAY_WOUND_RECOVERY_MULTIPLIER = 0.75;
 export const WOUND_RECOVERY_MIN_HOURS = 12;
 export const WOUND_RECOVERY_MAX_HOURS = 72;
 export const PROJECT_REPORT_LIMIT = 6;
-export const CAMPAIGN_WEAPON_IDS = ["rifle", "pistol", "plasma"] as const satisfies readonly CampaignWeaponId[];
+export const CAMPAIGN_WEAPON_IDS = ["rifle", "pistol", "plasma", "cannon"] as const satisfies readonly CampaignWeaponId[];
 export const STARTING_INTERCEPTOR: InterceptorState = {
   damage: 0,
   sorties: 0,
@@ -318,33 +318,29 @@ export interface WeaponMarketEntry {
 /** Weapons the council sells from the start — no research clearance required. */
 export const BASE_MARKET_WEAPONS: readonly CampaignWeaponId[] = ["rifle", "pistol"];
 
+/**
+ * Weapon ids the council stocks from day one. Each is seeded into the market at
+ * full capacity on a fresh campaign and on load; purchase is still clearance-gated
+ * by {@link isWeaponAvailable} (plasma sits in stock until plasmaWeapons clears).
+ * Research-only weapons such as "cannon" are stocked only once their unlocking
+ * project completes, so they are intentionally excluded from this set.
+ */
+const STOCKED_WEAPON_IDS: readonly CampaignWeaponId[] = ["rifle", "pistol", "plasma"];
+
 export const MARKET_CONFIG: Record<CampaignWeaponId, WeaponMarketEntry> = {
   rifle: { price: 400, maxStock: 6, restockHours: 48 },
   pistol: { price: 250, maxStock: 6, restockHours: 48 },
   plasma: { price: 1200, maxStock: 6, restockHours: 48 },
-};
-
-/**
- * Pricing + stock for weapons that are NOT base council inventory and can only
- * enter the market once their unlocking research completes (e.g. the heavy
- * plasma "cannon"). Looked up through {@link weaponMarketEntry}.
- */
-const RESEARCH_WEAPON_MARKET: Record<string, WeaponMarketEntry> = {
   cannon: { price: 1800, maxStock: 4, restockHours: 60 },
 };
 
-/** Unified market-entry lookup for any weapon id (base or research-unlocked). */
+/** Market-entry lookup for any campaign weapon id. */
 export function weaponMarketEntry(weaponId: string): WeaponMarketEntry | undefined {
-  if (isCampaignWeaponId(weaponId)) return MARKET_CONFIG[weaponId];
-  return RESEARCH_WEAPON_MARKET[weaponId];
+  return isCampaignWeaponId(weaponId) ? MARKET_CONFIG[weaponId] : undefined;
 }
 
 export const STARTING_MARKET: EquipmentMarket = {
-  stock: {
-    rifle: MARKET_CONFIG.rifle.maxStock,
-    pistol: MARKET_CONFIG.pistol.maxStock,
-    plasma: MARKET_CONFIG.plasma.maxStock,
-  },
+  stock: Object.fromEntries(STOCKED_WEAPON_IDS.map((id) => [id, MARKET_CONFIG[id].maxStock])),
   restockTimerHours: {},
 };
 
@@ -352,6 +348,7 @@ const WEAPON_LABELS: Record<CampaignWeaponId, string> = {
   rifle: "Service rifle",
   pistol: "Sidearm",
   plasma: "Plasma caster",
+  cannon: "Heavy plasma cannon",
 };
 
 const TERROR_EXTRA_PANIC_LOCAL = 14;
@@ -614,6 +611,7 @@ export const STARTING_ARMORY: CampaignArmory = {
     rifle: STARTING_SOLDIER_NAMES.length,
     pistol: 2,
     plasma: 0,
+    cannon: 0,
   },
   items: { grenade: 8, medkit: 4, smoke: 4 },
 };
@@ -1853,7 +1851,7 @@ export function researchCost(campaign: CampaignState, id: ResearchId): CampaignR
 }
 
 function emptyWeaponCounts(): Record<CampaignWeaponId, number> {
-  return { rifle: 0, pistol: 0, plasma: 0 };
+  return { rifle: 0, pistol: 0, plasma: 0, cannon: 0 };
 }
 
 function cloneArmory(armory: CampaignArmory): CampaignArmory {
@@ -1871,7 +1869,7 @@ function cloneMarket(market: EquipmentMarket): EquipmentMarket {
 }
 
 function isCampaignWeaponId(value: unknown): value is CampaignWeaponId {
-  return value === "rifle" || value === "pistol" || value === "plasma";
+  return value === "rifle" || value === "pistol" || value === "plasma" || value === "cannon";
 }
 
 function isResearchId(value: unknown): value is ResearchId {
@@ -2379,7 +2377,7 @@ function normalizeMarket(value: unknown): EquipmentMarket {
       : {};
   const stock: Record<string, number> = {};
   const restockTimerHours: Record<string, number> = {};
-  for (const id of CAMPAIGN_WEAPON_IDS) {
+  for (const id of STOCKED_WEAPON_IDS) {
     const storedStock = rawStock[id];
     stock[id] =
       typeof storedStock === "number"
@@ -2388,11 +2386,12 @@ function normalizeMarket(value: unknown): EquipmentMarket {
     const storedTimer = rawTimers[id];
     restockTimerHours[id] = typeof storedTimer === "number" ? Math.max(0, Math.floor(storedTimer)) : 0;
   }
-  // Preserve research-unlocked weapon stock beyond the base council inventory
-  // (e.g. "cannon") so completed-research gear survives a save/load cycle.
-  const knownBase = CAMPAIGN_WEAPON_IDS as readonly string[];
+  // Preserve any other market stock verbatim (e.g. the research-unlocked "cannon"
+  // once heavyPlasma completes) so completed-research gear survives a save/load
+  // cycle without being seeded onto fresh campaigns.
+  const stocked = STOCKED_WEAPON_IDS as readonly string[];
   for (const [key, value] of Object.entries(rawStock)) {
-    if (knownBase.includes(key)) continue;
+    if (stocked.includes(key)) continue;
     if (typeof value === "number" && Number.isFinite(value)) {
       stock[key] = Math.max(0, Math.floor(value));
     }
@@ -2454,6 +2453,10 @@ function normalizeArmory(
       plasma: Math.max(
         completedResearch.includes("plasmaWeapons") ? 1 : 0,
         typeof weapons.plasma === "number" ? Math.floor(weapons.plasma) : defaultArmory.weapons.plasma,
+      ),
+      cannon: Math.max(
+        0,
+        typeof weapons.cannon === "number" ? Math.floor(weapons.cannon) : defaultArmory.weapons.cannon,
       ),
     },
     items: normalizeItemStock(maybe.items, defaultArmory.items ?? {}),

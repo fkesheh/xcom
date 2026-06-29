@@ -88,7 +88,7 @@ describe("campaign state", () => {
     expect(campaign.lastInterceptionReport).toBeUndefined();
     expect(campaign.ufoContact).toBeUndefined();
     expect(campaign.resources).toEqual({ credits: 650, alloys: 0, elerium: 0, alienData: 0 });
-    expect(campaign.armory.weapons).toEqual({ rifle: 6, pistol: 2, plasma: 0 });
+    expect(campaign.armory.weapons).toEqual({ rifle: 6, pistol: 2, plasma: 0, cannon: 0 });
     expect(campaign.facilities).toEqual([...STARTER_BASE_FACILITY_IDS]);
     expect(campaign.soldiers).toHaveLength(6);
     expect(Object.values(campaign.soldierLoadouts)).toEqual(["rifle", "rifle", "rifle", "rifle", "rifle", "rifle"]);

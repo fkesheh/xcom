@@ -11,6 +11,7 @@ import {
   MARKET_CONFIG,
   purchaseWeapon,
   RESEARCH_PROJECTS,
+  restockMarket,
   saveCampaign,
   STARTING_MARKET,
   weaponMarketEntry,
@@ -171,6 +172,43 @@ describe("heavyPlasma -> cannon market entry", () => {
     expect(isWeaponAvailable(withHeavy, "cannon")).toBe(true);
     expect(withHeavy.market?.stock.cannon).toBe(entry.maxStock);
     expect(entry).toEqual({ price: 1800, maxStock: 4, restockHours: 60 });
+  });
+
+  it("cannon is purchasable end-to-end once heavyPlasma completes", () => {
+    // Previously a phantom: stock was seeded but purchaseWeapon("cannon") could
+    // neither typecheck nor find a price. It is now a real campaign weapon.
+    const withHeavy = completeResearch(
+      completeResearch(stock(createCampaign(BASE, SEED)), "plasmaWeapons"),
+      "heavyPlasma",
+    );
+
+    // stock() funds 5000c; plasmaWeapons (200c) + heavyPlasma (260c) still leave
+    // ample for the 1800c cannon.
+    expect(canPurchaseWeapon(withHeavy, "cannon")).toEqual({ ok: true });
+
+    const creditsBefore = withHeavy.resources.credits;
+    const stockBefore = withHeavy.market!.stock.cannon!;
+    const armoryBefore = withHeavy.armory.weapons.cannon;
+
+    const bought = purchaseWeapon(withHeavy, "cannon");
+    expect(bought).not.toBe(withHeavy);
+    expect(bought.resources.credits).toBe(creditsBefore - MARKET_CONFIG.cannon.price);
+    expect(bought.market!.stock.cannon).toBe(stockBefore - 1);
+    expect(bought.armory.weapons.cannon).toBe(armoryBefore + 1);
+  });
+
+  it("cannon restocks toward max over time once seeded", () => {
+    const withHeavy = completeResearch(
+      completeResearch(stock(createCampaign(BASE, SEED)), "plasmaWeapons"),
+      "heavyPlasma",
+    );
+    const entry = weaponMarketEntry("cannon")!;
+
+    const bought = purchaseWeapon(withHeavy, "cannon");
+    expect(bought.market!.stock.cannon).toBe(entry.maxStock - 1);
+
+    const restocked = restockMarket(bought, entry.restockHours);
+    expect(restocked.market!.stock.cannon).toBe(entry.maxStock);
   });
 });
 

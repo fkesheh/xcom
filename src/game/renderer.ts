@@ -1390,16 +1390,23 @@ export class Renderer {
     const cellCount = state.grid.width * state.grid.height;
 
     // A blast may have destroyed cover since the last sync (a sandbags / low_wall
-    // / crate tile swapped to a walkable debris pile). Detect any tile whose
-    // render category drifted from the feature we built for it and rebuild that
-    // tile's feature + floor colour BEFORE fog dimming, so the new look (a low
-    // rubble pile where the obstacle was) reads immediately.
+    // / crate tile swapped to a walkable debris pile). Detect any feature-bearing
+    // tile whose render category drifted from the feature we built for it and
+    // rebuild that tile's feature + floor colour BEFORE fog dimming, so the new
+    // look (a low rubble pile where the obstacle was) reads immediately. Floor
+    // tiles never have a featureMeshes entry, so requiring `built` skips them —
+    // otherwise every floor tile (grass/road/… all carry a render category) would
+    // mismatch null-vs-category and rebuild every sync (O(map) wasted work + a
+    // per-tile Color allocation each).
     for (let y = 0; y < state.grid.height; y++) {
       for (let x = 0; x < state.grid.width; x++) {
         const built = this.featureMeshes.get(cellIndex(state.grid, x, y));
-        const builtCat = built?.category ?? null;
-        const curCat = categoryFor(tileTypeAt(state.grid, x, y)) ?? null;
-        if (builtCat !== curCat) this.rebuildTileFeature(x, y);
+        if (
+          built &&
+          built.category !== (categoryFor(tileTypeAt(state.grid, x, y)) ?? undefined)
+        ) {
+          this.rebuildTileFeature(x, y);
+        }
       }
     }
 
