@@ -188,6 +188,16 @@ export interface CampaignSoldier {
   woundedUntilHour?: number;
   /** Consumable items this soldier is carrying into battle (grenades, medkits). */
   loadoutItems?: string[];
+  /** Accumulated per-stat growth granted for surviving missions. Starts at zero. */
+  statGrowth?: SoldierStatGrowth;
+}
+
+/** Per-stat growth a soldier has accumulated over a career of survived missions. */
+export interface SoldierStatGrowth {
+  timeUnits: number;
+  health: number;
+  reactions: number;
+  firingAccuracy: number;
 }
 
 export interface SoldierStatBonus {

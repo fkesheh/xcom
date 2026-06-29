@@ -1198,6 +1198,29 @@ const CSS = `
   letter-spacing: .03em;
 }
 #base-view .craft-body .card-copy { margin: 3px 0 0; }
+/* Keyboard focus indicators (only for keyboard users — :focus-visible never
+   fires on mouse click, so this never shows up in mouse-driven screenshots). */
+#base-view button:focus-visible,
+#base-view .help-btn:focus-visible,
+#base-view select:focus-visible,
+#base-view input:focus-visible,
+#base-view .facility-row:focus-visible {
+  outline: 2px solid #67e8f9;
+  outline-offset: 2px;
+}
+/* Respect prefers-reduced-motion: collapse every CSS transition/animation on
+   the base screen. The ambient 3D motion (rotators, glow pulses, camera drift)
+   is additionally frozen from JS via BaseView.reducedMotion. */
+@media (prefers-reduced-motion: reduce) {
+  #base-view *,
+  #base-view *::before,
+  #base-view *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
 `;
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -1532,6 +1555,13 @@ export class BaseView {
   private camAnimating = false;
   private raf = 0;
   private disposed = false;
+  /** Captured once at construction: true when the OS/browser asks for reduced
+   *  motion. Gates the ambient frame() FX (rotators, glow + reactor pulses,
+   *  idle camera/yaw drift) so those non-essential loops freeze for those users.
+   *  Essential transitions (the dive-in/out camera tween) keep running. */
+  private readonly reducedMotion: boolean =
+    typeof matchMedia !== "undefined" &&
+    matchMedia("(prefers-reduced-motion: reduce)").matches;
   private noticeEl: HTMLDivElement | null = null;
   private noticeTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly raycaster = new Raycaster();
@@ -2306,9 +2336,11 @@ export class BaseView {
     const footer = el("div", "base-footer");
     const earth = el("button");
     earth.textContent = "Earth";
+    earth.setAttribute("aria-label", "Return to Earth Command (geoscape)");
     earth.addEventListener("click", () => this.opts.onOpenGeoscape());
     const reset = el("button");
     reset.textContent = "New campaign";
+    reset.setAttribute("aria-label", "Abandon this campaign and start a new one");
     reset.addEventListener("click", () => this.opts.onResetCampaign());
     footer.append(earth, reset);
 
@@ -2940,7 +2972,20 @@ export class BaseView {
       const state = el("span", "fr-state");
       state.textContent = "Open";
       row.append(name, state);
-      row.addEventListener("click", () => this.selectFacility(facility.id));
+      // The facility row is a click target but a <div>; promote it to a real
+      // button role so Tab reaches it and Enter/Space activates it (mirrors the
+      // on-canvas facility click + the overview room-cards, which are buttons).
+      row.setAttribute("role", "button");
+      row.tabIndex = 0;
+      row.setAttribute("aria-label", `Open ${facility.label} facility room`);
+      const open = (): void => this.selectFacility(facility.id);
+      row.addEventListener("click", open);
+      row.addEventListener("keydown", (event: KeyboardEvent) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          open();
+        }
+      });
       installed.appendChild(row);
     }
 
@@ -3439,7 +3484,7 @@ export class BaseView {
     // tab / first frame can't catapult actors; no per-frame allocation.
     const dt = this.prevTimeMs === 0 ? 16 : Math.min(50, now - this.prevTimeMs);
     this.prevTimeMs = now;
-    this.baseGroup.rotation.y = BASE_VIEW_YAW + Math.sin(elapsed * 0.16) * 0.028;
+    this.baseGroup.rotation.y = BASE_VIEW_YAW + (this.reducedMotion ? 0 : Math.sin(elapsed * 0.16) * 0.028);
     // Camera direction is one of: an in-progress dive/back tween (priority),
     // a resting interior hero frame (when a diorama is mounted), or the hub
     // idle drift. All branches write position + currentLookAt in place — no
@@ -3454,25 +3499,39 @@ export class BaseView {
     } else if (this.interiorRoot) {
       // Subtle idle drift around the interior hero frame — reuses the resting
       // position/target (allocation-free) so the diorama feels alive up close.
-      this.camera.position.x = this.interiorCamPos.x + Math.sin(elapsed * 0.18) * 0.05;
-      this.camera.position.y = this.interiorCamPos.y + Math.sin(elapsed * 0.13 + 0.7) * 0.03;
-      this.camera.position.z = this.interiorCamPos.z + Math.cos(elapsed * 0.15) * 0.05;
+      if (this.reducedMotion) {
+        this.camera.position.copy(this.interiorCamPos);
+      } else {
+        this.camera.position.x = this.interiorCamPos.x + Math.sin(elapsed * 0.18) * 0.05;
+        this.camera.position.y = this.interiorCamPos.y + Math.sin(elapsed * 0.13 + 0.7) * 0.03;
+        this.camera.position.z = this.interiorCamPos.z + Math.cos(elapsed * 0.15) * 0.05;
+      }
       this.currentLookAt.copy(this.interiorCamTarget);
     } else {
       // Hub idle drift — reuses camHome (no per-frame allocation).
-      this.camera.position.x = this.camHome.x + Math.sin(elapsed * 0.12) * 0.14;
-      this.camera.position.y = this.camHome.y + Math.sin(elapsed * 0.09 + 1.1) * 0.1;
-      this.camera.position.z = this.camHome.z + Math.cos(elapsed * 0.1) * 0.12;
+      if (this.reducedMotion) {
+        this.camera.position.copy(this.camHome);
+      } else {
+        this.camera.position.x = this.camHome.x + Math.sin(elapsed * 0.12) * 0.14;
+        this.camera.position.y = this.camHome.y + Math.sin(elapsed * 0.09 + 1.1) * 0.1;
+        this.camera.position.z = this.camHome.z + Math.cos(elapsed * 0.1) * 0.12;
+      }
       this.currentLookAt.set(0, 0, 0);
     }
     this.camera.lookAt(this.currentLookAt);
-    const pulse = 0.82 + Math.sin(elapsed * 3) * 0.18;
-    for (const item of this.pulseMaterials) item.material.opacity = item.opacity * pulse;
-    // Reactor cores visibly pulse — mutates the pre-collected materials (no
-    // per-frame allocation/traversal).
-    const reactorPulse = 1.4 + Math.sin(elapsed * 2.2) * 0.7;
-    for (const mat of this.reactorCores) mat.emissiveIntensity = reactorPulse;
-    this.updateRotators(elapsed);
+    if (this.reducedMotion) {
+      // Hold glow strips + reactor cores at their resting values; skip rotators.
+      for (const item of this.pulseMaterials) item.material.opacity = item.opacity;
+      for (const mat of this.reactorCores) mat.emissiveIntensity = 1.4;
+    } else {
+      const pulse = 0.82 + Math.sin(elapsed * 3) * 0.18;
+      for (const item of this.pulseMaterials) item.material.opacity = item.opacity * pulse;
+      // Reactor cores visibly pulse — mutates the pre-collected materials (no
+      // per-frame allocation/traversal).
+      const reactorPulse = 1.4 + Math.sin(elapsed * 2.2) * 0.7;
+      for (const mat of this.reactorCores) mat.emissiveIntensity = reactorPulse;
+      this.updateRotators(elapsed);
+    }
     this.crewSystem?.tick(dt);
     this.crewSystemLeft?.tick(dt);
     this.crewSystemRight?.tick(dt);

@@ -771,6 +771,31 @@ const CSS = `
   #geoscape .geo-actions { flex-wrap: wrap; }
   #geoscape .geo-speed-btn { min-height: 36px; }
 }
+/* Keyboard focus indicators — :focus-visible only fires for keyboard users, so
+   mouse-driven screenshots are unaffected. Covers speed buttons, the difficulty
+   radio options, and every generic geoscape button. */
+#geoscape button:focus-visible,
+#geoscape .geo-help:focus-visible,
+#geoscape .geo-diff-option:focus-visible,
+#geoscape select:focus-visible {
+  outline: 2px solid #67e8f9;
+  outline-offset: 2px;
+}
+/* Respect prefers-reduced-motion: stop the floating damage numbers and the
+   threat pulse, and collapse transitions. The 3D marker throb + camera shake
+   are additionally frozen from JS via Geoscape.reducedMotion. */
+@media (prefers-reduced-motion: reduce) {
+  #geoscape .geo-dmg { animation: none !important; }
+  #geoscape .geo-threat-tag.active { animation: none !important; }
+  #geoscape *,
+  #geoscape *::before,
+  #geoscape *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
 `;
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -1196,6 +1221,13 @@ export class GeoscapeView {
   private helpOverlay: HTMLDivElement | null = null;
   /** One-time first-run welcome banner; shown only until dismissed. */
   private welcomeBanner: HTMLDivElement | null = null;
+  /** Captured once at construction: true when the OS/browser asks for reduced
+   *  motion. Freezes the non-essential 3D loops (marker throb, camera shake) so
+   *  those users get a steady globe. Essential feedback (tracers, explosions,
+   *  the time-combat tick) still plays. */
+  private readonly reducedMotion: boolean =
+    typeof matchMedia !== "undefined" &&
+    matchMedia("(prefers-reduced-motion: reduce)").matches;
   private readonly onKeydown = (e: KeyboardEvent): void => {
     if (e.key === "Escape" && this.helpOverlay?.classList.contains("show")) {
       this.toggleHelp(false);
@@ -2531,7 +2563,7 @@ export class GeoscapeView {
       posN, // z = up
     );
     this.interceptorMarker.quaternion.setFromRotationMatrix(this.scratchBasis);
-    this.interceptorMarker.scale.setScalar(1 + Math.sin(now * 0.012) * 0.18);
+    this.interceptorMarker.scale.setScalar(1 + (this.reducedMotion ? 0 : Math.sin(now * 0.012) * 0.18));
   }
 
   /** Crisp DOM layer above the canvas for floating "-N" damage numbers. */
@@ -2898,6 +2930,8 @@ export class GeoscapeView {
     }
     const decay = 1 - t;
     // Deterministic sin-based jitter reads as a hit bump without per-frame randomness.
+    // Skipped entirely under prefers-reduced-motion (screen shake is a classic trigger).
+    if (this.reducedMotion) return;
     this.scratchA
       .set(Math.sin(now * 0.13), Math.sin(now * 0.091), Math.cos(now * 0.117))
       .normalize();
@@ -3146,7 +3180,7 @@ export class GeoscapeView {
       slerpUnit(dep.baseN, dep.siteN, t, this.scratchA); // unit surface direction
       this.skyrangerMarker.position.copy(this.scratchA).multiplyScalar(EARTH_RADIUS + 0.16);
       this.orientMarker(this.skyrangerMarker, this.scratchA, dep.siteN);
-      this.skyrangerMarker.scale.setScalar(1 + Math.sin(now * 0.01) * 0.12);
+      this.skyrangerMarker.scale.setScalar(1 + (this.reducedMotion ? 0 : Math.sin(now * 0.01) * 0.12));
       if (t >= 1) {
         this.deploying = false;
         this.showDeployChoice();
@@ -3161,7 +3195,7 @@ export class GeoscapeView {
       }
       // Hold at the site with a gentle hover; time flows so fuel burns / dawn breaks.
       this.skyrangerMarker.position.copy(dep.siteN).multiplyScalar(EARTH_RADIUS + 0.16);
-      this.skyrangerMarker.scale.setScalar(1 + Math.sin(now * 0.008) * 0.1);
+      this.skyrangerMarker.scale.setScalar(1 + (this.reducedMotion ? 0 : Math.sin(now * 0.008) * 0.1));
     }
   }
 
@@ -3560,12 +3594,14 @@ export class GeoscapeView {
     if (this.disposed) return;
     this.raf = requestAnimationFrame(this.frame);
     const now = performance.now();
-    this.baseMarker.scale.setScalar(1 + Math.sin(now * 0.004) * 0.08);
+    this.baseMarker.scale.setScalar(1 + (this.reducedMotion ? 0 : Math.sin(now * 0.004) * 0.08));
     const contact = this.campaign?.ufoContact;
     const urgent = contact ? missionTypeInfo(contact.missionType).urgent : false;
     // Urgent contacts (terror / base defense) pulse faster and harder so they
     // read as higher priority against the steady crash-site markers.
-    this.ufoMarker.scale.setScalar(1 + Math.sin(now * (urgent ? 0.012 : 0.006)) * (urgent ? 0.2 : 0.14));
+    this.ufoMarker.scale.setScalar(
+      1 + (this.reducedMotion ? 0 : Math.sin(now * (urgent ? 0.012 : 0.006)) * (urgent ? 0.2 : 0.14)),
+    );
     this.animateInterceptor(now);
     this.advanceFlowingTime(now);
     // onAdvanceTime may synchronously dispose+remount this view (current controller);

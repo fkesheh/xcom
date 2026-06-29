@@ -6,12 +6,25 @@
  * booleans. Bearings use atan2 in the grid frame where +y is "south".
  */
 
-import type { BattleState, Dir8, Faction, Grid, Unit, UnitId, Vec2 } from "./types";
+import type { BattleState, Dir8, Faction, Grid, SmokeCloud, Unit, UnitId, Vec2 } from "./types";
 import { DIR8_VECTORS } from "./types";
 import { blocksSight, inBounds } from "./grid";
 
 const DEG = 180 / Math.PI;
 const ANGLE_EPSILON = 1e-9;
+
+/**
+ * Whether `pos` lies inside any active smoke cloud. A cloud covers every tile
+ * within Chebyshev `radius` of its centre (same metric as grenade blasts). Used
+ * to occlude lines of sight/fire exactly like a blocksSight tile.
+ */
+function tileInAnySmoke(pos: Vec2, clouds: readonly SmokeCloud[] | undefined): boolean {
+  if (!clouds || clouds.length === 0) return false;
+  for (const c of clouds) {
+    if (Math.max(Math.abs(pos.x - c.pos.x), Math.abs(pos.y - c.pos.y)) <= c.radius) return true;
+  }
+  return false;
+}
 
 /** Bearing (radians) of the ray from -> to, via atan2(dy, dx). */
 export function octileBearingRad(from: Vec2, to: Vec2): number {
@@ -71,8 +84,15 @@ function supercoverLine(x0: number, y0: number, x1: number, y1: number): Vec2[] 
 /**
  * Clear line of sight between two tiles. Intermediate tiles that block sight
  * occlude the ray; the `from` and `to` tiles are never treated as blockers.
+ * Smoke clouds occlude the same way: any intermediate tile inside a cloud
+ * blocks the ray (see {@link tileInAnySmoke}).
  */
-export function hasLineOfSight(grid: Grid, from: Vec2, to: Vec2): boolean {
+export function hasLineOfSight(
+  grid: Grid,
+  from: Vec2,
+  to: Vec2,
+  smokeClouds?: readonly SmokeCloud[],
+): boolean {
   const line = supercoverLine(from.x, from.y, to.x, to.y);
   for (let i = 1; i < line.length; i++) {
     const prev = line[i - 1]!;
@@ -88,7 +108,13 @@ export function hasLineOfSight(grid: Grid, from: Vec2, to: Vec2): boolean {
       }
     }
     // Only intermediate tiles occlude; the `to` endpoint is never a blocker.
-    if (i < line.length - 1 && blocksSight(grid, cur.x, cur.y)) return false;
+    // A smoke cloud counts as an occluder on every tile it covers.
+    if (
+      i < line.length - 1 &&
+      (blocksSight(grid, cur.x, cur.y) || tileInAnySmoke(cur, smokeClouds))
+    ) {
+      return false;
+    }
   }
   return true;
 }
@@ -112,8 +138,13 @@ export interface LineResult {
  * to `to` (ties broken by Dir8 index ascending). That tile is returned as the
  * firing `origin`; with no peek available the line is not clear.
  */
-export function lineOfFire(grid: Grid, from: Vec2, to: Vec2): LineResult {
-  if (hasLineOfSight(grid, from, to)) {
+export function lineOfFire(
+  grid: Grid,
+  from: Vec2,
+  to: Vec2,
+  smokeClouds?: readonly SmokeCloud[],
+): LineResult {
+  if (hasLineOfSight(grid, from, to, smokeClouds)) {
     return { clear: true, origin: { x: from.x, y: from.y } };
   }
   let best: Vec2 | undefined;
@@ -126,7 +157,7 @@ export function lineOfFire(grid: Grid, from: Vec2, to: Vec2): LineResult {
     if (!inBounds(grid, px, py)) continue;
     if (blocksSight(grid, px, py)) continue; // can't lean through/into a wall
     if (px === to.x && py === to.y) continue; // the lean tile can't be the target
-    if (!hasLineOfSight(grid, { x: px, y: py }, to)) continue;
+    if (!hasLineOfSight(grid, { x: px, y: py }, to, smokeClouds)) continue;
     const dx = to.x - px;
     const dy = to.y - py;
     const d2 = dx * dx + dy * dy; // integer compare: deterministic, no float ties
@@ -179,12 +210,17 @@ export function inVisionCone(unit: Unit, target: Vec2): boolean {
  * peek around a corner, so a front-but-corner-blocked target becomes visible
  * while a target behind the observer stays out of the cone.
  */
-export function canSee(grid: Grid, observer: Unit, targetPos: Vec2): boolean {
+export function canSee(
+  grid: Grid,
+  observer: Unit,
+  targetPos: Vec2,
+  smokeClouds?: readonly SmokeCloud[],
+): boolean {
   const dx = targetPos.x - observer.pos.x;
   const dy = targetPos.y - observer.pos.y;
   if (Math.hypot(dx, dy) > observer.sightRange) return false;
   if (!inVisionCone(observer, targetPos)) return false;
-  return lineOfFire(grid, observer.pos, targetPos).clear;
+  return lineOfFire(grid, observer.pos, targetPos, smokeClouds).clear;
 }
 
 /** Every tile the unit can currently see (for fog reveal). Includes own tile. */
@@ -215,7 +251,7 @@ export function visibleEnemyIds(state: BattleState, faction: Faction): Set<UnitI
   for (const observer of observers) {
     for (const enemy of enemies) {
       if (seen.has(enemy.id)) continue;
-      if (canSee(state.grid, observer, enemy.pos)) seen.add(enemy.id);
+      if (canSee(state.grid, observer, enemy.pos, state.smokeClouds)) seen.add(enemy.id);
     }
   }
   return seen;

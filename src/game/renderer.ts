@@ -557,6 +557,20 @@ export class Renderer {
   private readonly fxGroup = new Group(); // tracers (transient)
   private readonly effects = new Effects(this.fxGroup); // projectile / impact FX
   private readonly previewGroup = new Group(); // path + aim, cleared often
+  // Deployed smoke clouds (translucent grey-blue). The geometry + material are
+  // shared across every cloud mesh; sync clears the group each frame and
+  // rebuilds it from state.smokeClouds, so the shared resources are never
+  // disposed mid-life (only the per-cloud meshes come and go).
+  private readonly smokeGroup = new Group();
+  private readonly smokeGeometry = new SphereGeometry(1, 16, 12);
+  private readonly smokeMaterial = new MeshStandardMaterial({
+    color: 0x9fb4c4,
+    transparent: true,
+    opacity: 0.5,
+    roughness: 1,
+    metalness: 0,
+    depthWrite: false,
+  });
   private selectionRing: Mesh | null = null;
   private selectionHalo: Mesh | null = null;
   private hoverMarker: Mesh | null = null;
@@ -606,6 +620,7 @@ export class Renderer {
     this.hemi.position.set(0, 40, 0);
     this.ambient = new AmbientLight(0xffffff, 0.15);
     this.scene.add(this.tileGroup, this.unitGroup, this.fxGroup, this.previewGroup);
+    this.scene.add(this.smokeGroup);
     this.addLights();
 
     // Post-processing: bloom only catches emissive accents / FX / bright glints.
@@ -1351,6 +1366,39 @@ export class Renderer {
 
     this.updateSelectionRing(state);
     this.syncObjectiveMarkers(state);
+    this.syncSmokeClouds(state);
+  }
+
+  /**
+   * Rebuild the smoke-cloud visuals from state. Each cloud renders as a small
+   * cluster of overlapping translucent spheres (a billowing read) scaled to the
+   * cloud's Chebyshev radius and lifted just above the ground. The shared
+   * geometry/material are reused; only the per-cloud meshes are rebuilt.
+   */
+  private syncSmokeClouds(state: BattleState): void {
+    for (const child of [...this.smokeGroup.children]) {
+      this.smokeGroup.remove(child);
+    }
+    const clouds = state.smokeClouds;
+    if (!clouds || clouds.length === 0) return;
+    for (const cloud of clouds) {
+      const w = tileToWorld(cloud.pos.x, cloud.pos.y, 0);
+      const r = cloud.radius + 0.5;
+      const cluster = new Group();
+      const main = new Mesh(this.smokeGeometry, this.smokeMaterial);
+      main.scale.setScalar(r);
+      cluster.add(main);
+      const puffA = new Mesh(this.smokeGeometry, this.smokeMaterial);
+      puffA.scale.setScalar(r * 0.6);
+      puffA.position.set(r * 0.4, 0.2, -r * 0.3);
+      cluster.add(puffA);
+      const puffB = new Mesh(this.smokeGeometry, this.smokeMaterial);
+      puffB.scale.setScalar(r * 0.55);
+      puffB.position.set(-r * 0.35, -0.1, r * 0.4);
+      cluster.add(puffB);
+      cluster.position.set(w.x, 0.5, w.z);
+      this.smokeGroup.add(cluster);
+    }
   }
 
   private updateSelectionRing(state: BattleState): void {
@@ -1774,6 +1822,13 @@ export class Renderer {
       this.coverIndicatorGroup = null;
     }
     this.disposeGrid();
+    // Smoke clouds: clear the per-cloud meshes and release the shared resources
+    // owned here (the geometry + material are not part of the shared cache).
+    for (const child of [...this.smokeGroup.children]) {
+      this.smokeGroup.remove(child);
+    }
+    this.smokeGeometry.dispose();
+    this.smokeMaterial.dispose();
     // Release the shared material/texture/env cache after the per-tile clones
     // (above) are gone, then the composer's render targets.
     disposeMaterials();

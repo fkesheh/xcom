@@ -79,7 +79,7 @@ import type { ProjectileKind } from "./effects";
 // below so three.js stays out of the initial bundle and loads lazily on first
 // mount. Renderer and Hud are not referenced as types, so they are fetched
 // purely via dynamic import() in startTactical.
-import { BaseView } from "./baseView";
+import type { BaseView } from "./baseView";
 import type { GeoscapeView } from "./geoscape";
 import type { PlaneCombatView } from "./planeCombatView";
 import type { HudDebrief, HudHover, HudSoldierDetail } from "./hud";
@@ -337,7 +337,7 @@ async function showGeoscape(): Promise<void> {
   sfx.startAmbience("geoscape");
 }
 
-function showBase(campaign: CampaignState): void {
+async function showBase(campaign: CampaignState): Promise<void> {
   flushSave();
   // Mirror the live campaign in memory; rapid base actions (recruit → assign →
   // launch) chain off this so each sees the previous action's result without
@@ -350,7 +350,9 @@ function showBase(campaign: CampaignState): void {
   baseView?.dispose();
   planeCombat?.dispose();
   planeCombat = null;
-  baseView = new BaseView({
+  const hideLoader = showScreenLoader("Loading…");
+  const { BaseView: BaseViewCtor } = await import("./baseView");
+  baseView = new BaseViewCtor({
     campaign,
     operation,
     onLaunchMission: async () => {
@@ -452,6 +454,7 @@ function showBase(campaign: CampaignState): void {
     },
   });
   baseView.mount(appRoot);
+  hideLoader();
   sfx.startAmbience("base");
 }
 
@@ -764,11 +767,15 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
         renderer.showPathPreview([]);
         const maxRange = def?.throwRange ?? 6;
         const inRange = chebyshev(sel.pos, tile) <= maxRange;
+        const effect =
+          def?.kind === "smoke"
+            ? `smoke cloud ${def.blastRadius ?? 2}`
+            : `blast ${def?.blastRadius ?? 1}`;
         currentHover = {
           kind: inRange ? "move" : "blocked",
           label: `Throw ${name}`,
           detail: inRange
-            ? `Click to throw (blast ${def?.blastRadius ?? 1}). ${sel.tu} TU left.`
+            ? `Click to throw (${effect}). ${sel.tu} TU left.`
             : `Out of throw range (max ${maxRange}).`,
           reachable: inRange,
         };

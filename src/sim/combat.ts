@@ -199,7 +199,7 @@ export function previewShot(
   const chance = hitChance(shooter, weapon, mode, dist, defense);
   const expectedHits = chance * mode.shots;
 
-  if (!lineOfFire(state.grid, shooter.pos, targetPos).clear) {
+  if (!lineOfFire(state.grid, shooter.pos, targetPos, state.smokeClouds).clear) {
     return {
       possible: false,
       hitChance: chance,

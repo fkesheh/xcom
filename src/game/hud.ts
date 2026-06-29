@@ -298,7 +298,7 @@ const CSS = `
 #hud .morale-tag.panic { color: var(--hud-red); animation: panic-pulse 1s ease-in-out infinite; }
 #hud .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-top: 12px; }
 #hud .stat { padding: 7px; border: 1px solid rgba(255,255,255,.06); border-radius: 6px; background: rgba(0,0,0,.13); }
-#hud .stat span { display: block; color: var(--hud-muted); font: 700 8px/1 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+#hud .stat span { display: block; color: var(--hud-muted); font: 700 9px/1 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
 #hud .stat b { display: block; margin-top: 4px; font: 750 12px/1 ui-monospace, monospace; }
 #hud .details-btn { min-height: 28px; min-width: 96px; margin-top: 10px; padding: 0 12px; font-size: 9px; text-transform: uppercase; }
 
@@ -334,7 +334,7 @@ const CSS = `
 #hud .item-line button.prime { flex: 0 0 auto; min-width: 78px; justify-content: center; text-transform: uppercase; }
 #hud .item-line .item-label { display: flex; flex-direction: column; gap: 1px; overflow: hidden; }
 #hud .item-line .item-label b { font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#hud .item-line .item-label small { color: var(--hud-muted); font-size: 8px; }
+#hud .item-line .item-label small { color: var(--hud-muted); font-size: 9px; }
 #hud .item-line .item-verb { color: var(--hud-cyan); font-size: 9px; text-transform: uppercase; }
 #hud .item-line button:disabled .item-verb { color: var(--hud-muted); }
 #hud .items-empty { color: var(--hud-muted); font: 600 9px/1.3 ui-monospace, monospace; padding: 4px 2px; }
@@ -380,7 +380,7 @@ const CSS = `
   color: #ffe4e6;
   background: rgba(251,113,133,.22);
   border: 1px solid rgba(251,113,133,.5);
-  font: 800 7px/1.2 ui-monospace, monospace;
+  font: 800 9px/1.2 ui-monospace, monospace;
   letter-spacing: .08em;
   animation: panic-pulse 1s ease-in-out infinite;
 }
@@ -575,6 +575,18 @@ const CSS = `
   #hud .status-row { display: none; }
   #hud .briefing-card { padding-top: 24px; padding-bottom: 24px; }
   #hud .briefing-grid { margin: 16px 0; }
+}
+/* Respect prefers-reduced-motion: kill the ambient pulses (end-turn ready glow,
+   panic throb) and collapse the hover/transition tweens. Combat feedback (toast
+   appear/disappear) still functions, just instantly. */
+@media (prefers-reduced-motion: reduce) {
+  #hud .endturn.ready,
+  #hud .morale-tag.panic,
+  #hud .roster .panic-tag { animation: none !important; }
+  #hud button,
+  #hud .bar i,
+  #hud .tu-reserve,
+  #hud .toast { transition: none !important; }
 }
 `;
 
@@ -794,6 +806,8 @@ export class Hud {
     this.muteButton = el("button");
     this.muteButton.textContent = "SFX";
     this.muteButton.title = "Toggle audio (M)";
+    this.muteButton.setAttribute("aria-label", "Toggle audio");
+    this.muteButton.setAttribute("aria-pressed", "false");
     this.muteButton.addEventListener("click", () => {
       const muted = this.cb.onToggleMute();
       this.setMuted(muted);
@@ -801,6 +815,7 @@ export class Hud {
     this.abortButton = el("button");
     this.abortButton.textContent = "ABORT";
     this.abortButton.title = "Abort operation and return to Earth Command";
+    this.abortButton.setAttribute("aria-label", "Abort operation");
     this.abortButton.addEventListener("click", () => this.requestAbort());
     tools.append(help, this.muteButton, this.abortButton);
     this.root.appendChild(tools);
@@ -1058,6 +1073,8 @@ export class Hud {
   setMuted(muted: boolean): void {
     this.muteButton.classList.toggle("active", muted);
     this.muteButton.textContent = muted ? "MUTE" : "SFX";
+    this.muteButton.setAttribute("aria-pressed", String(muted));
+    this.muteButton.setAttribute("aria-label", muted ? "Unmute audio" : "Mute audio");
   }
 
   toggleBriefing(force?: boolean): void {
@@ -1522,8 +1539,10 @@ export class Hud {
     playerActing: boolean,
   ): HTMLElement {
     const isGrenade = def.kind === "grenade";
-    const action: ItemActionKind = isGrenade ? "throw" : "use";
-    const verb = isGrenade ? "Throw" : "Use";
+    const isSmoke = def.kind === "smoke";
+    const isThrowable = isGrenade || isSmoke;
+    const action: ItemActionKind = isThrowable ? "throw" : "use";
+    const verb = isThrowable ? "Throw" : "Use";
     const cost = itemActionTuCost(maxTu, def.tuPercent, action);
     const outOfUses = inst.uses <= 0;
     const cantAfford = selected.tu < cost;
@@ -1534,7 +1553,9 @@ export class Hud {
     const main = el("button");
     main.title = isGrenade
       ? `Throw ${def.name} (blast ${def.blastRadius ?? 1}, ${def.throwRange ?? 6} range) - ${cost} TU`
-      : `Use ${def.name} on an adjacent ally (heals ${def.healAmount ?? 0}) - ${cost} TU`;
+      : isSmoke
+        ? `Throw ${def.name} (smoke cloud ${def.blastRadius ?? 2}, ${def.throwRange ?? 6} range) - ${cost} TU`
+        : `Use ${def.name} on an adjacent ally (heals ${def.healAmount ?? 0}) - ${cost} TU`;
     const label = el("span", "item-label");
     const name = el("b");
     name.textContent = def.name;
@@ -1547,7 +1568,7 @@ export class Hud {
     main.append(label, verbSpan);
     main.disabled = !playerActing || outOfUses || cantAfford || primed;
     main.addEventListener("click", () => {
-      if (isGrenade) this.cb.onThrowItem?.(inst.itemId);
+      if (isThrowable) this.cb.onThrowItem?.(inst.itemId);
       else this.cb.onUseItem?.(inst.itemId);
     });
     line.appendChild(main);
@@ -1723,7 +1744,7 @@ export class Hud {
       small.textContent =
         inst.primed
           ? `x${inst.uses} - primed ${inst.fuseTurns ?? 1}t`
-          : `x${inst.uses}${def?.kind === "grenade" ? " - blast" : def?.kind === "medkit" ? " - heal" : ""}`;
+          : `x${inst.uses}${def?.kind === "grenade" ? " - blast" : def?.kind === "smoke" ? " - smoke" : def?.kind === "medkit" ? " - heal" : ""}`;
       li.append(name, small);
       return li;
     });

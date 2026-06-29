@@ -28,7 +28,7 @@ import type {
   UnitStance,
   Vec2,
 } from "./types";
-import { DIR8_VECTORS, MORALE, STANCE, TU_COST } from "./types";
+import { DIR8_VECTORS, MORALE, SMOKE, STANCE, TU_COST } from "./types";
 import { cellIndex, moveCost } from "./grid";
 import { blocksMove, inBounds } from "./grid";
 import { canSee, dir8Towards, lineOfFire, visibleEnemyIds, visibleTiles } from "./los";
@@ -431,7 +431,7 @@ export function executeShoot(
 
   // Facing the target is free; then pay for the shot and resolve it. The shot
   // originates from the lean tile when the direct line is corner-blocked.
-  const lof = lineOfFire(state.grid, unit.pos, target);
+  const lof = lineOfFire(state.grid, unit.pos, target, state.smokeClouds);
   unit.facing = dir8Towards(unit.pos, target);
   unit.tu -= tuCostForMode(unit, mode);
   unit.ammo = Math.max(0, unit.ammo - mode.shots);
@@ -535,16 +535,18 @@ function consumeItem(unit: Unit, inst: ItemInstance): void {
 }
 
 /**
- * Throw a grenade at `target` and resolve its blast. Performs no faction check:
- * the same path serves the player command and the enemy AI executor (mirroring
- * how executeMove/executeShoot back the AiExecutor move/shoot). TU is spent,
- * the charge is consumed, the blast is resolved, and morale/died events are
- * threaded in for every struck unit. Throwing does NOT trigger reaction fire.
+ * Throw a grenade or smoke grenade at `target` and resolve its effect. Performs
+ * no faction check: the same path serves the player command and the enemy AI
+ * executor (mirroring how executeMove/executeShoot back the AiExecutor
+ * move/shoot). TU is spent and the charge consumed. A frag grenade resolves an
+ * area blast (with morale/died events for every struck unit); a smoke grenade
+ * instead deploys a line-of-sight-blocking cloud at the impact tile. Throwing
+ * does NOT trigger reaction fire.
  */
 function performThrow(state: BattleState, unit: Unit, target: Vec2, itemId: string): GameEvent[] {
   const inst = unit.items?.find((it) => it.itemId === itemId && it.uses > 0);
   const def = state.items?.[itemId];
-  if (!inst || !def || def.kind !== "grenade") {
+  if (!inst || !def || (def.kind !== "grenade" && def.kind !== "smoke")) {
     return [{ type: "blocked", reason: "no grenade" }];
   }
   const cost = Math.ceil((unit.stats.timeUnits * def.tuPercent) / 100);
@@ -560,7 +562,6 @@ function performThrow(state: BattleState, unit: Unit, target: Vec2, itemId: stri
   unit.tu -= cost;
   consumeItem(unit, inst);
 
-  const radius = def.blastRadius ?? 1;
   const events: GameEvent[] = [
     {
       type: "itemThrown",
@@ -572,6 +573,20 @@ function performThrow(state: BattleState, unit: Unit, target: Vec2, itemId: stri
     },
   ];
 
+  // A smoke grenade deploys a sight-blocking cloud instead of a damaging blast.
+  if (def.kind === "smoke") {
+    const radius = def.blastRadius ?? SMOKE.DEFAULT_RADIUS;
+    if (!state.smokeClouds) state.smokeClouds = [];
+    state.smokeClouds.push({
+      pos: { x: target.x, y: target.y },
+      radius,
+      turnsLeft: SMOKE.DURATION_TURNS,
+    });
+    state.log.push(`${unit.name} deploys a ${def.name}.`);
+    return events;
+  }
+
+  const radius = def.blastRadius ?? 1;
   const { hits } = resolveBlast(state, target, radius, def.damage ?? 0);
   events.push({
     type: "blastDetonated",
@@ -750,7 +765,7 @@ function nearestVisibleHostile(state: BattleState, unit: Unit): Unit | undefined
   let bestD = Infinity;
   for (const o of state.units) {
     if (!o.alive || o.faction === unit.faction) continue;
-    if (!canSee(state.grid, unit, o.pos)) continue;
+    if (!canSee(state.grid, unit, o.pos, state.smokeClouds)) continue;
     const d = chebyshev(unit.pos, o.pos);
     if (d < bestD) {
       bestD = d;
@@ -880,6 +895,18 @@ function startFactionTurn(state: BattleState, faction: Faction): GameEvent[] {
  * the battle ended) hand control back to the player for a new round. Returns
  * the complete ordered event stream so the renderer can replay the enemy turn.
  */
+export function tickSmokeClouds(state: BattleState): void {
+  if (!state.smokeClouds || state.smokeClouds.length === 0) return;
+  // Decrement every cloud by one round and drop the ones that have fully
+  // dissipated. Iterating back-to-front keeps the in-place splice deterministic.
+  for (let i = state.smokeClouds.length - 1; i >= 0; i--) {
+    const cloud = state.smokeClouds[i]!;
+    cloud.turnsLeft -= 1;
+    if (cloud.turnsLeft <= 0) state.smokeClouds.splice(i, 1);
+  }
+  if (state.smokeClouds.length === 0) state.smokeClouds = undefined;
+}
+
 function endPlayerTurn(state: BattleState): GameEvent[] {
   const events: GameEvent[] = [{ type: "turnEnded", faction: "player" }];
 
@@ -907,6 +934,9 @@ function endPlayerTurn(state: BattleState): GameEvent[] {
 
   events.push({ type: "turnEnded", faction: "enemy" });
   state.turn++;
+  // A new round begins: age every active smoke cloud one round and clear any
+  // that have fully dissipated, before the player acts.
+  tickSmokeClouds(state);
   state.activeFaction = "player";
   refillTU(state, "player");
   for (const u of state.units) {

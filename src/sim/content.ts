@@ -95,6 +95,16 @@ export const ITEMS: Record<string, Item> = {
     tuPercent: 40,
     healAmount: 30,
   },
+  smoke: {
+    id: "smoke",
+    name: "Smoke Grenade",
+    kind: "smoke",
+    tuPercent: 30,
+    // Radius doubles as the cloud's Chebyshev coverage; the cloud itself deals
+    // no damage — it blocks line of sight/fire across its tiles for N turns.
+    blastRadius: 2,
+    throwRange: 8,
+  },
 };
 
 /** Spawnable unit templates. Keyed by stable id (also stored on the template). */

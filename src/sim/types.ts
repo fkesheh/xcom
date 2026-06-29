@@ -169,7 +169,7 @@ export interface Weapon {
 }
 
 /** Kind of a consumable battlefield item. */
-export type ItemKind = "grenade" | "medkit";
+export type ItemKind = "grenade" | "medkit" | "smoke";
 
 /** A consumable battlefield item definition (data-driven; names are rebrandable). */
 export interface Item {
@@ -207,6 +207,19 @@ export interface BlastHit {
   unitId: UnitId;
   damage: number;
   killed: boolean;
+}
+
+/**
+ * A deployed smoke cloud. Deals no damage but blocks line of sight/fire for any
+ * tile it covers (Chebyshev `radius` around `pos`), exactly like a blocksSight
+ * tile — so throwing one between a shooter and a target breaks the shot. The
+ * cloud is ephemeral: `turnsLeft` ticks down once per round and the cloud is
+ * removed at zero.
+ */
+export interface SmokeCloud {
+  pos: Vec2;
+  radius: number;
+  turnsLeft: number;
 }
 
 /** A template used to spawn units (data-driven content). */
@@ -297,6 +310,11 @@ export interface BattleState {
   objective?: BattleObjective;
   /** Tiles ever seen by the player faction (fog-of-war "explored" memory). */
   explored: Set<number>;
+  /**
+   * Active smoke clouds (from thrown smoke grenades). Each blocks line of
+   * sight/fire across its tiles and ticks down once per round; see SmokeCloud.
+   */
+  smokeClouds?: SmokeCloud[];
   /** Human-readable combat log (most recent last). */
   log: string[];
 }
@@ -475,4 +493,16 @@ export const COVER = {
   HALF_DEFENSE: 0.3,
   /** Hit-chance reduction against a defender in FULL cover (tile.cover === 2). */
   FULL_DEFENSE: 0.55,
+} as const;
+
+/**
+ * Smoke grenade tuning. A cloud is created at the impact tile with the item's
+ * blastRadius; it blocks line of sight/fire (like a blocksSight tile) for every
+ * tile it covers and lasts DURATION_TURNS full rounds before dissipating.
+ */
+export const SMOKE = {
+  /** Full rounds a deployed cloud keeps blocking line of sight/fire. */
+  DURATION_TURNS: 3,
+  /** Cloud radius (Chebyshev tiles) when the smoke item omits blastRadius. */
+  DEFAULT_RADIUS: 2,
 } as const;

@@ -21,6 +21,7 @@ import type {
   ManufacturingProjectId,
   SoldierRank,
   SoldierStatBonus,
+  SoldierStatGrowth,
   StrategicState,
   MissionReport,
   MissionResult,
@@ -563,6 +564,69 @@ const RANKS: readonly { rank: SoldierRank; minSurvived: number; bonus: SoldierSt
   { rank: "captain", minSurvived: 5, bonus: { timeUnits: 6, health: 8, reactions: 10, firingAccuracy: 12 } },
 ];
 
+/** Zero growth — the starting point for every recruit and the default on load. */
+const STAT_GROWTH_ZERO: SoldierStatGrowth = { timeUnits: 0, health: 0, reactions: 0, firingAccuracy: 0 };
+
+/**
+ * Weighted stat-growth table. Firing accuracy is the most common combat
+ * refinement, followed by reactions, health, and time units — so veterans
+ * "feel" like sharper shots first, then faster, tougher, and quicker.
+ */
+const STAT_GROWTH_WEIGHTS: ReadonlyArray<{ stat: keyof SoldierStatGrowth; cutoff: number }> = [
+  { stat: "firingAccuracy", cutoff: 0.4 },
+  { stat: "reactions", cutoff: 0.7 },
+  { stat: "health", cutoff: 0.9 },
+  { stat: "timeUnits", cutoff: 1.0 },
+];
+
+/**
+ * Deterministic PRNG (mulberry32). Same seed => same stream. Mirrors the sim's
+ * Rng so campaign-level growth stays reproducible for saves and replays without
+ * pulling a cross-module dependency into the campaign layer.
+ */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Folds the campaign seed, mission number, and soldier id into a stable seed. */
+function statGrowthSeed(campaignSeed: number, missionNumber: number, soldierId: string): number {
+  let h = (campaignSeed ^ 0x9e3779b9 ^ Math.imul(missionNumber, 0x85ebca6b)) >>> 0;
+  for (let i = 0; i < soldierId.length; i++) {
+    h = Math.imul(h ^ soldierId.charCodeAt(i), 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+
+/**
+ * Rolls the per-mission stat growth for one surviving soldier. Deterministic in
+ * (campaign seed, mission number, soldier id): a given operative always earns the
+ * same growth from the same operation. Amount is 1..3 to a single weighted stat.
+ */
+function rollStatGrowth(campaignSeed: number, missionNumber: number, soldierId: string): SoldierStatGrowth {
+  const rng = mulberry32(statGrowthSeed(campaignSeed, missionNumber, soldierId));
+  const statRoll = rng();
+  const amount = 1 + Math.floor(rng() * 3);
+  const growth: SoldierStatGrowth = { ...STAT_GROWTH_ZERO };
+  const stat = STAT_GROWTH_WEIGHTS.find((entry) => statRoll < entry.cutoff)?.stat ?? "firingAccuracy";
+  growth[stat] = amount;
+  return growth;
+}
+
+function addStatGrowth(a: SoldierStatGrowth, b: SoldierStatGrowth): SoldierStatGrowth {
+  return {
+    timeUnits: a.timeUnits + b.timeUnits,
+    health: a.health + b.health,
+    reactions: a.reactions + b.reactions,
+    firingAccuracy: a.firingAccuracy + b.firingAccuracy,
+  };
+}
+
 function campaignId(seed: number): string {
   return `campaign-${seed.toString(16).padStart(8, "0")}`;
 }
@@ -579,6 +643,7 @@ function makeSoldier(id: string, name: string): CampaignSoldier {
     rank: "rookie",
     missions: 0,
     survivedMissions: 0,
+    statGrowth: { ...STAT_GROWTH_ZERO },
   };
 }
 
@@ -846,11 +911,12 @@ export function campaignSoldierStatBonus(campaign: CampaignState, soldier: Campa
   const armorBonus = hasResearch(campaign, "alloyArmor")
     ? { timeUnits: 0, health: 6, reactions: 2, firingAccuracy: 0 }
     : { timeUnits: 0, health: 0, reactions: 0, firingAccuracy: 0 };
+  const growth = soldier.statGrowth ?? STAT_GROWTH_ZERO;
   return {
-    timeUnits: rankBonus.timeUnits + armorBonus.timeUnits,
-    health: rankBonus.health + armorBonus.health,
-    reactions: rankBonus.reactions + armorBonus.reactions,
-    firingAccuracy: rankBonus.firingAccuracy + armorBonus.firingAccuracy,
+    timeUnits: rankBonus.timeUnits + armorBonus.timeUnits + growth.timeUnits,
+    health: rankBonus.health + armorBonus.health + growth.health,
+    reactions: rankBonus.reactions + armorBonus.reactions + growth.reactions,
+    firingAccuracy: rankBonus.firingAccuracy + armorBonus.firingAccuracy + growth.firingAccuracy,
   };
 }
 
@@ -1271,6 +1337,8 @@ export function recordMissionResult(
     survivingSoldierIds,
     result,
     woundRecovery,
+    campaign.seed,
+    operation.missionNumber,
   );
   const terrorRescue = terrorRescueBonus(operation, result, rosterOutcome);
   const report: MissionReport = {
@@ -1433,6 +1501,8 @@ function updateRoster(
   survivingSoldierIds: ReadonlySet<string>,
   result: MissionResult,
   woundRecovery: ReadonlyMap<string, number>,
+  campaignSeed: number,
+  missionNumber: number,
 ): CampaignSoldier[] {
   const deployed = new Set(deployedSoldierIds);
   return soldiers.map((soldier) => {
@@ -1441,6 +1511,12 @@ function updateRoster(
     const creditedSurvival = result === "success" && survived;
     const survivedMissions = soldier.survivedMissions + (creditedSurvival ? 1 : 0);
     const woundedUntilHour = woundRecovery.get(soldier.id);
+    const previousGrowth = soldier.statGrowth ?? STAT_GROWTH_ZERO;
+    // Surviving a mission — even a failed one — is combat experience: the soldier
+    // earns a small, deterministic stat increase. KIA soldiers do not grow.
+    const statGrowth = survived
+      ? addStatGrowth(previousGrowth, rollStatGrowth(campaignSeed, missionNumber, soldier.id))
+      : previousGrowth;
     return {
       ...soldier,
       status: survived ? (woundedUntilHour ? "wounded" : "active") : "kia",
@@ -1448,6 +1524,7 @@ function updateRoster(
       survivedMissions,
       rank: creditedSurvival ? soldierRank(survivedMissions) : soldier.rank,
       woundedUntilHour: survived ? woundedUntilHour : undefined,
+      statGrowth,
     };
   });
 }
@@ -2278,6 +2355,7 @@ function normalizeSoldiers(value: unknown): CampaignSoldier[] {
             ? Math.max(0, Math.floor(maybe.woundedUntilHour))
             : undefined,
         loadoutItems: normalizeLoadoutItems(maybe.loadoutItems),
+        statGrowth: normalizeStatGrowth(maybe.statGrowth),
       },
     ];
   });
@@ -2287,6 +2365,20 @@ function normalizeSoldiers(value: unknown): CampaignSoldier[] {
 function normalizeLoadoutItems(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is string => typeof item === "string");
+}
+
+/** Normalizes accumulated stat growth; missing or malformed values default to zeros. */
+function normalizeStatGrowth(value: unknown): SoldierStatGrowth {
+  if (!value || typeof value !== "object") return { ...STAT_GROWTH_ZERO };
+  const maybe = value as Partial<SoldierStatGrowth>;
+  const count = (v: unknown): number =>
+    typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0;
+  return {
+    timeUnits: count(maybe.timeUnits),
+    health: count(maybe.health),
+    reactions: count(maybe.reactions),
+    firingAccuracy: count(maybe.firingAccuracy),
+  };
 }
 
 function normalizeResearch(value: unknown): ResearchId[] {

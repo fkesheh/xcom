@@ -311,6 +311,72 @@ const CSS = `
   letter-spacing: .14em;
   text-transform: uppercase;
 }
+#plane-combat .pc-help {
+  position: absolute;
+  top: max(18px, env(safe-area-inset-top));
+  right: max(18px, env(safe-area-inset-right));
+  z-index: 5;
+  min-width: 38px;
+  min-height: 38px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid rgba(103,232,249,.5);
+  color: #67e8f9;
+  background: rgba(2,12,20,.82);
+  font: 800 15px/1 ui-monospace, monospace;
+  cursor: pointer;
+  box-shadow: 0 10px 30px rgba(0,0,0,.4);
+}
+#plane-combat .pc-help:hover { border-color: rgba(103,232,249,.95); background: rgba(14,52,67,.95); }
+#plane-combat .pc-help:focus-visible {
+  outline: 2px solid #67e8f9;
+  outline-offset: 2px;
+}
+#plane-combat .pc-help-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(2,4,10,.66);
+  backdrop-filter: blur(4px);
+}
+#plane-combat .pc-help-overlay.show { display: flex; }
+#plane-combat .pc-help-card {
+  width: min(520px, 100%);
+  padding: clamp(20px, 4vw, 32px);
+  border: 1px solid rgba(103,232,249,.32);
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(19,42,55,.96), rgba(5,11,17,.98) 62%);
+  box-shadow: 0 30px 100px rgba(0,0,0,.55);
+}
+#plane-combat .pc-help-card p.lede {
+  margin: 0 0 4px;
+  max-width: 460px;
+  color: #a9c8d7;
+  font: 12px/1.5 Inter, ui-sans-serif, system-ui, sans-serif;
+}
+#plane-combat .pc-help-card ul {
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+#plane-combat .pc-help-card li {
+  padding: 9px 12px;
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 8px;
+  background: rgba(0,0,0,.18);
+  color: #cfe2ee;
+  font: 600 11px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+}
+#plane-combat .pc-help-card li b { color: #67e8f9; font-weight: 800; }
+#plane-combat .pc-help-actions { display: flex; justify-content: flex-end; margin-top: 16px; }
+#plane-combat .pc-help-actions button { min-width: 130px; min-height: 38px; }
 @media (max-width: 560px) {
   #plane-combat .pc-panel { width: calc(100vw - 24px); }
   #plane-combat .pc-log { max-height: 110px; }
@@ -356,6 +422,13 @@ export class PlaneCombatView {
   private readonly logBox: HTMLDivElement;
   private readonly actionButtons: HTMLButtonElement[] = [];
   private readonly resolveOverlay: HTMLDivElement;
+  /** Concise dogfight HELP overlay (controls + outcomes reference). */
+  private helpOverlay: HTMLDivElement | null = null;
+  private readonly onKeydown = (e: KeyboardEvent): void => {
+    if (e.key === "Escape" && this.helpOverlay?.classList.contains("show")) {
+      this.toggleHelp(false);
+    }
+  };
 
   // --- Pooled combat FX (allocated once, reused per hit; no per-frame alloc) ---
   private tracerLineFx!: Line;
@@ -426,6 +499,7 @@ export class PlaneCombatView {
     container.replaceChildren(this.root);
     this.canvasWrap.appendChild(this.renderer.domElement);
     window.addEventListener("resize", this.resize);
+    window.addEventListener("keydown", this.onKeydown);
     this.resize();
     this.startTimeMs = performance.now();
     this.logBox.scrollTop = this.logBox.scrollHeight;
@@ -446,6 +520,7 @@ export class PlaneCombatView {
     cancelAnimationFrame(this.raf);
     if (this.resolveTimer !== undefined) window.clearTimeout(this.resolveTimer);
     window.removeEventListener("resize", this.resize);
+    window.removeEventListener("keydown", this.onKeydown);
     disposeObject(this.scene);
     this.renderer.dispose();
     this.renderer.domElement.remove();
@@ -919,6 +994,16 @@ export class PlaneCombatView {
     resolve.append(resolveText);
     this.root.append(resolve);
 
+    const help = el("button", "pc-help");
+    help.type = "button";
+    help.textContent = "?";
+    help.title = "Dogfight controls — click for help";
+    help.setAttribute("aria-label", "Open dogfight help");
+    help.addEventListener("click", () => this.toggleHelp(true));
+    this.root.append(help);
+    this.helpOverlay = this.buildHelpOverlay();
+    this.root.append(this.helpOverlay);
+
     const interceptorFill = interceptorBar.fill;
     const interceptorValue = interceptorBar.value;
     const ufoFill = ufoBar.fill;
@@ -942,6 +1027,53 @@ export class PlaneCombatView {
       actions: actionButtons,
       resolve,
     };
+  }
+
+  /** Toggle the dogfight HELP overlay (controls + outcomes reference). */
+  toggleHelp(force?: boolean): void {
+    if (!this.helpOverlay) return;
+    const show = force ?? !this.helpOverlay.classList.contains("show");
+    this.helpOverlay.classList.toggle("show", show);
+  }
+
+  private buildHelpOverlay(): HTMLDivElement {
+    const overlay = el("div", "pc-help-overlay");
+    const card = el("div", "pc-help-card");
+    const eye = el("div", "eyebrow");
+    eye.textContent = "Dogfight controls";
+    const title = el("h2");
+    title.textContent = "Interception";
+    const lede = el("p", "lede");
+    lede.textContent =
+      "Your interceptor duels a hostile UFO across four range bands. Manage the range, trade fire, and bring it down before it brings you down.";
+    const list = el("ul");
+    const tips: Array<[string, string]> = [
+      ["Close", "drops the range one band — closing raises both sides' hit odds and damage."],
+      ["Attack", "exchanges fire at the current range: your volley hits the UFO, then it shoots back."],
+      ["Disengage", "breaks off the chase and sends the interceptor home, leaving the UFO tracked."],
+      ["Range bands", "Long → Medium → Short → Point-blank; the closer you get, the deadlier for both."],
+      ["UFO down", "drop the UFO to 0 HP and it crashes to Earth, opening a recovery assault mission."],
+      ["Interceptor lost", "if your craft hits 0 HP first, the UFO escapes and the interceptor is destroyed."],
+    ];
+    for (const [head, copy] of tips) {
+      const li = el("li");
+      const b = el("b");
+      b.textContent = `${head} — `;
+      li.append(b, document.createTextNode(copy));
+      list.appendChild(li);
+    }
+    const actions = el("div", "pc-help-actions");
+    const close = el("button");
+    close.type = "button";
+    close.textContent = "Got it [ESC]";
+    close.addEventListener("click", () => this.toggleHelp(false));
+    actions.appendChild(close);
+    card.append(eye, title, lede, list, actions);
+    overlay.append(card);
+    overlay.addEventListener("click", (e: MouseEvent) => {
+      if (e.target === overlay) this.toggleHelp(false);
+    });
+    return overlay;
   }
 
   private hpBar(label: string, variant: "ufo" | "interceptor"): {
