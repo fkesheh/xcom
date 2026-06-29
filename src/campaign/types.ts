@@ -217,7 +217,7 @@ export interface SoldierStatBonus {
   firingAccuracy: number;
 }
 
-export type OperationTheme = "farmland" | "urban" | "desert";
+export type OperationTheme = "farmland" | "urban" | "desert" | "arctic" | "jungle" | "forest";
 
 /** Per-mission-type context (civilians for terror, facility for base defense). */
 export interface MissionContext {

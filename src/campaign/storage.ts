@@ -2426,7 +2426,10 @@ function normalizeProjectReports(value: unknown): ProjectReport[] {
 }
 
 function normalizeTheme(value: unknown): OperationTheme {
-  return value === "farmland" || value === "urban" || value === "desert" ? value : "farmland";
+  return value === "farmland" || value === "urban" || value === "desert" ||
+    value === "arctic" || value === "jungle" || value === "forest"
+    ? value
+    : "farmland";
 }
 
 function normalizeResources(value: unknown): CampaignResources {

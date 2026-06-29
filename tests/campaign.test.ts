@@ -937,7 +937,7 @@ describe("campaign state", () => {
     expect(first).toEqual(again);
     expect(first.missionNumber).toBe(1);
     expect(first.region).toBe("Africa");
-    expect(["farmland", "urban", "desert"]).toContain(first.themeId);
+    expect(["farmland", "urban", "desert", "arctic", "jungle", "forest"]).toContain(first.themeId);
     expect(first.durationHours).toBeGreaterThanOrEqual(6);
     expect(first.enemyCount).toBeGreaterThanOrEqual(5);
     expect(first.reward.credits).toBeGreaterThan(0);

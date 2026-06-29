@@ -9,7 +9,7 @@ import type {
 } from "./types";
 import { campaignMissionSeed, difficultyConfig, hasBaseFacility } from "./storage";
 
-const THEMES: readonly OperationTheme[] = ["farmland", "urban", "desert"];
+const THEMES: readonly OperationTheme[] = ["farmland", "urban", "desert", "arctic", "jungle", "forest"];
 const CODE_A = ["Silent", "Ash", "Iron", "Night", "Glass", "Violet", "Black", "Cold"] as const;
 const CODE_B = ["Dawn", "Needle", "Signal", "Anvil", "Comet", "Lantern", "Crown", "Orbit"] as const;
 const BASE_OPERATION_DURATION_HOURS = 6;
