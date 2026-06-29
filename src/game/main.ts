@@ -32,11 +32,16 @@ import type {
   BattleState,
   Command,
   GameEvent,
+  PsiKind,
   ReserveMode,
   ShotKind,
   Unit,
   Vec2,
 } from "../sim/index";
+// PSI is the psionics tuning block (TU cost, range, MC hard cap). It is a value
+// re-export from the sim's public types, not the index barrel, so import it
+// directly — same path src/game/hud.ts already uses for MORALE/STANCE.
+import { PSI } from "../sim/types";
 import type {
   BaseLocation,
   CampaignState,
@@ -82,7 +87,7 @@ import type { ProjectileKind } from "./effects";
 import type { BaseView } from "./baseView";
 import type { GeoscapeView } from "./geoscape";
 import type { PlaneCombatView } from "./planeCombatView";
-import type { HudDebrief, HudHover, HudSoldierDetail } from "./hud";
+import type { HudDebrief, HudHover, HudPsiInfo, HudSoldierDetail } from "./hud";
 
 function urlSeed(): number | null {
   const raw = new URLSearchParams(window.location.search).get("seed");
@@ -538,6 +543,10 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
   /** Active item-targeting mode (throw a grenade / heal an ally), or null. */
   let itemTargeting: { kind: "throw" | "heal"; itemId: string } | null = null;
 
+  /** Active psi-targeting mode (panic / mind control), or null. The next enemy
+   *  click resolves into a `psiAttack` command; right-click / ESC cancels. */
+  let psiTargeting: { kind: PsiKind } | null = null;
+
   /** Guards against double-dispose and stops the rAF loop on teardown. */
   let tacticalActive = true;
   let frameId = 0;
@@ -557,6 +566,7 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
     onThrowItem: (itemId) => beginTargeting("throw", itemId),
     onUseItem: (itemId) => beginTargeting("heal", itemId),
     onPrimeItem: (itemId) => primeSelected(itemId),
+    onPsiAttack: (kind) => beginPsiTargeting(kind),
     onSetStance: (stance) => {
       const sel = selectedUnit();
       if (sel && !busy) void dispatch({ type: "setStance", unitId: sel.id, stance });
@@ -621,6 +631,7 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
       busy,
       campaignStatus: status === "won" || status === "lost" ? status : undefined,
       soldierDetail: soldierDetailFor(selectedUnit()),
+      psi: psiInfoFor(selectedUnit()),
     });
   }
 
@@ -805,6 +816,110 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
           detail: "Click an adjacent ally to heal.",
         };
     refreshHud();
+  }
+
+  // -------------------------------------------------------------------------
+  // Psi-targeting mode
+  // -------------------------------------------------------------------------
+
+  function beginPsiTargeting(kind: PsiKind): void {
+    if (busy || state.status !== "playing") return;
+    const sel = selectedUnit();
+    if (!sel || (sel.stats.psiSkill ?? 0) <= 0) return;
+    if (sel.controlledByFaction !== undefined) {
+      hud.notify("CONTROLLED UNITS CANNOT CAST PSI", "danger");
+      return;
+    }
+    if (kind === "mindControl" && (state.mcUsedThisBattle ?? 0) >= PSI.MC_MAX_PER_BATTLE) {
+      hud.notify("MIND CONTROL HARD CAP REACHED", "danger");
+      return;
+    }
+    psiTargeting = { kind };
+    hud.setPsiTargeting(kind);
+    hud.notify(
+      kind === "mindControl" ? "CLICK A VISIBLE ENEMY TO SEIZE CONTROL" : "CLICK A VISIBLE ENEMY TO PSI-PANIC",
+      "info",
+    );
+    renderer.clearPreview();
+    currentHover = null;
+    refreshHud();
+  }
+
+  function clearPsiTargeting(): void {
+    if (!psiTargeting) return;
+    psiTargeting = null;
+    hud.setPsiTargeting(null);
+    renderer.clearPreview();
+    currentHover = null;
+    refreshHud();
+  }
+
+  /** Resolve a psi-targeting click: a visible enemy fires the psi command. */
+  function handlePsiClick(clientX: number, clientY: number): void {
+    const sel = selectedUnit();
+    if (!sel) {
+      clearPsiTargeting();
+      return;
+    }
+    const hoveredUnitId = renderer.raycastUnit(clientX, clientY);
+    if (hoveredUnitId === null) return;
+    const target = unitById(state, hoveredUnitId);
+    if (target && target.alive && target.faction === "enemy") {
+      const kind = psiTargeting?.kind;
+      if (!kind) return;
+      clearPsiTargeting();
+      void dispatch({ type: "psiAttack", unitId: sel.id, targetId: target.id, kind });
+    } else {
+      hud.notify("TARGET MUST BE A VISIBLE ENEMY", "danger");
+    }
+  }
+
+  /** Hover hint while in psi-targeting mode. */
+  function handlePsiHover(clientX: number, clientY: number): void {
+    const sel = selectedUnit();
+    if (!sel || !psiTargeting) return;
+    const hoveredUnitId = renderer.raycastUnit(clientX, clientY);
+    const target = hoveredUnitId !== null ? unitById(state, hoveredUnitId) : undefined;
+    const valid = !!target && target.alive && target.faction === "enemy";
+    renderer.setHoverTile(null);
+    renderer.showPathPreview([]);
+    if (valid && target) {
+      renderer.showAimLine(sel.pos, target.pos);
+      const verb = psiTargeting.kind === "mindControl" ? "seize control of" : "psi-panic";
+      currentHover = {
+        kind: "target",
+        label: target.name,
+        detail: `Click to ${verb} ${target.name}. ${sel.tu} TU left.`,
+      };
+    } else {
+      currentHover = {
+        kind: "blocked",
+        label: psiTargeting.kind === "mindControl" ? "Mind Control" : "Panic",
+        detail: "Click a visible enemy.",
+      };
+    }
+    refreshHud();
+  }
+
+  /** TU cost of a psi action (mirrors executePsiAttack: PSI.TU_PERCENT of max TU). */
+  function psiTuCost(unit: Unit): number {
+    return Math.ceil((unit.stats.timeUnits * PSI.TU_PERCENT) / 100);
+  }
+
+  /** HUD psi-availability for the selected operative (costs + MC hard cap). */
+  function psiInfoFor(unit: Unit | null): HudPsiInfo | undefined {
+    if (!unit || (unit.stats.psiSkill ?? 0) <= 0) return undefined;
+    const cost = psiTuCost(unit);
+    const playerTurn = state.activeFaction === "player" && state.status === "playing" && !busy;
+    const mcSpent = (state.mcUsedThisBattle ?? 0) >= PSI.MC_MAX_PER_BATTLE;
+    const controlled = unit.controlledByFaction !== undefined;
+    return {
+      panicTuCost: cost,
+      panicAvailable: playerTurn && !controlled && unit.tu >= cost,
+      mcTuCost: cost,
+      mcAvailable: playerTurn && !controlled && !mcSpent && unit.tu >= cost,
+      mcSpent,
+    };
   }
 
   /** TU to enter `to` from the adjacent `from` (mirrors the sim's movement rule). */
@@ -1182,6 +1297,29 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
         case "turnStarted":
           sfx.turn(ev.faction);
           break;
+        case "psiUsed": {
+          // Panic that lands uses the panic sting; any resisted psi gets a soft
+          // blip. A successful mind-control psi is silent here — its cue rides on
+          // the mindControlled event that immediately follows.
+          if (ev.kind === "panic" && ev.success) sfx.panic();
+          else if (!ev.success) sfx.select();
+          if (!ev.success) hud.notify("PSI ATTACK RESISTED", "danger");
+          refreshHud();
+          break;
+        }
+        case "mindControlled": {
+          // Who seized whom decides tone: player grabs an enemy => success chime;
+          // alien commander grabs one of ours => danger sting + toast.
+          if (ev.faction === "player") {
+            sfx.heal();
+            hud.notify("ENEMY MIND-CONTROLLED", "success");
+          } else {
+            sfx.panic();
+            hud.notify("OPERATIVE MIND-CONTROLLED", "danger");
+          }
+          refreshHud();
+          break;
+        }
         default:
           break;
       }
@@ -1260,15 +1398,21 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
     onClick(e.clientX, e.clientY, e.metaKey || e.ctrlKey);
   }, { signal: tacticalSignal });
 
-  // Right-click cancels item-targeting mode (and suppresses the browser menu).
+  // Right-click cancels item- or psi-targeting mode (and suppresses the browser menu).
   canvas.addEventListener("contextmenu", (e: MouseEvent) => {
-    if (itemTargeting) {
+    if (itemTargeting || psiTargeting) {
       e.preventDefault();
-      clearTargeting();
+      if (itemTargeting) clearTargeting();
+      if (psiTargeting) clearPsiTargeting();
     }
   }, { signal: tacticalSignal });
 
   function onHover(clientX: number, clientY: number): void {
+    // Psi-targeting mode has its own hover UX (target a visible enemy).
+    if (psiTargeting) {
+      handlePsiHover(clientX, clientY);
+      return;
+    }
     // Item-targeting mode has its own hover UX (throw range / heal eligibility).
     if (itemTargeting) {
       handleTargetingHover(clientX, clientY);
@@ -1371,6 +1515,12 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
 
   function onClick(clientX: number, clientY: number, faceModifier: boolean): void {
     if (busy || state.status !== "playing") return;
+
+    // Psi-targeting mode intercepts all clicks before anything else.
+    if (psiTargeting) {
+      handlePsiClick(clientX, clientY);
+      return;
+    }
 
     // Item-targeting mode intercepts all clicks before anything else.
     if (itemTargeting) {
@@ -1483,8 +1633,10 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
         void dispatch({ type: "endTurn" });
         break;
       case "Escape":
-        // Cancel item-targeting mode first, then close the briefing, then deselect.
-        if (itemTargeting) clearTargeting();
+        // Cancel psi-targeting, then item-targeting, then close the briefing,
+        // then deselect — innermost armed mode clears first.
+        if (psiTargeting) clearPsiTargeting();
+        else if (itemTargeting) clearTargeting();
         else if (hud.isBriefingOpen()) hud.toggleBriefing(false);
         else select(null);
         break;

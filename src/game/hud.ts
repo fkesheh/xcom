@@ -10,6 +10,7 @@ import type {
   BattleState,
   Item,
   ItemInstance,
+  PsiKind,
   ReserveMode,
   ShotKind,
   ShotMode,
@@ -54,6 +55,25 @@ export interface HudRuntime {
   campaignStatus?: "won" | "lost";
   /** Campaign career data for the currently selected soldier, when available. */
   soldierDetail?: HudSoldierDetail;
+  /** Psionic-action availability for the selected operative. Omitted (and the PSI
+   *  row hidden) when the operative has no psi skill. TU costs + the Mind Control
+   *  hard-cap ("1 per battle") are computed by the controller so the HUD never
+   *  reaches into the sim's PSI tuning constants directly. */
+  psi?: HudPsiInfo;
+}
+
+/** Psionic action availability surfaced to the HUD for the selected operative. */
+export interface HudPsiInfo {
+  /** TU the Panic psi action would cost. */
+  panicTuCost: number;
+  /** Panic actionable right now (player's turn, not busy, enough TU). */
+  panicAvailable: boolean;
+  /** TU the Mind Control psi action would cost. */
+  mcTuCost: number;
+  /** Mind Control actionable right now (also false once the per-battle hard cap is spent). */
+  mcAvailable: boolean;
+  /** True once the 1-MC-per-battle hard cap has been used (disables the MC button). */
+  mcSpent: boolean;
 }
 
 export interface HudDebrief {
@@ -85,6 +105,12 @@ export interface HudCallbacks {
   onThrowItem?: (itemId: string) => void;
   onUseItem?: (itemId: string) => void;
   onPrimeItem?: (itemId: string) => void;
+  /**
+   * Enter psi-targeting mode for the selected operative. The next enemy click
+   * resolves into a `psiAttack` command (see main.ts). Omitted when the unit has
+   * no psi skill.
+   */
+  onPsiAttack?: (kind: PsiKind) => void;
   /** Toggle the selected operative's body stance (stand <-> kneel). */
   onSetStance?: (stance: UnitStance) => void;
   onOpenSoldierDetail?: (unitId: number) => void;
@@ -348,6 +374,30 @@ const CSS = `
 #hud .stance-row button:disabled .stance-glyph,
 #hud .stance-row button:disabled .stance-tu { color: var(--hud-muted); }
 
+/* Psionics row (actions panel) — mirrors stance-row layout but holds two
+   sub-buttons (Panic + Mind Control). Each pairs a glyph with its label and TU
+   cost so state is never conveyed by colour alone; the MC button reads "SPENT"
+   once the per-battle hard cap is used. */
+#hud .psi-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+#hud .psi-row > span { width: 76px; color: var(--hud-muted); font: 700 8px/1.2 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+#hud .psi-actions { flex: 1; display: grid; grid-template-columns: repeat(2, 1fr); gap: 5px; }
+#hud .psi-actions button {
+  min-height: 38px;
+  padding: 5px 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-size: 9px;
+  text-transform: uppercase;
+}
+#hud .psi-actions .psi-glyph { color: var(--hud-cyan); font-size: 12px; line-height: 1; }
+#hud .psi-actions .psi-cost { color: var(--hud-muted); font-size: 8px; letter-spacing: .04em; text-transform: none; }
+#hud .psi-actions button:disabled .psi-glyph,
+#hud .psi-actions button:disabled .psi-cost { color: var(--hud-muted); }
+/* Armed psi-targeting mode reads as an active state on the chosen sub-button. */
+#hud .psi-actions button.active .psi-glyph { color: #effcff; }
+
 /* Stance + cover readout (unit panel). The cover tone tints the value but a
    text label (Full / Half / Exposed) always accompanies the colour. */
 #hud .status-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; margin-top: 12px; }
@@ -558,7 +608,8 @@ const CSS = `
   #hud .reserve-row,
   #hud .reload-row,
   #hud .items-row,
-  #hud .stance-row { display: none; }
+  #hud .stance-row,
+  #hud .psi-row { display: none; }
   #hud .modes { margin-top: 7px; }
   #hud .modes button { min-height: 48px; }
   #hud .endturn { right: 20px; bottom: 36px; min-width: 104px; min-height: 46px; font-size: 9px; }
@@ -710,6 +761,9 @@ export class Hud {
   private readonly stanceButton: HTMLButtonElement;
   private readonly stanceValue: HTMLElement;
   private readonly coverValue: HTMLElement;
+  private readonly psiRow: HTMLDivElement;
+  private readonly psiPanicButton: HTMLButtonElement;
+  private readonly psiMcButton: HTMLButtonElement;
   private readonly rosterEl: HTMLDivElement;
   private readonly logEl: HTMLElement;
   private readonly endTurn: HTMLButtonElement;
@@ -736,6 +790,8 @@ export class Hud {
   private readonly dossierCareer: HTMLDivElement;
 
   private activeMode: ShotKind = "snap";
+  /** Armed psi-targeting kind (null = not targeting). Drives the active sub-button. */
+  private activePsi: PsiKind | null = null;
   private toastTimer: number | null = null;
   private abortConfirmTimer: number | null = null;
   private detailsOpen = false;
@@ -940,6 +996,27 @@ export class Hud {
     stanceRow.append(stanceLabel, this.stanceButton);
     actions.appendChild(stanceRow);
 
+    // Psionics row: hidden unless the selected operative has psi skill. Each
+    // sub-button pairs a glyph with its label + TU cost so the armed/spent state
+    // is never conveyed by colour alone; MC reads "SPENT" once the per-battle
+    // hard cap is used. TU costs + availability arrive via runtime.psi (computed
+    // by the controller, which owns the PSI tuning constants).
+    this.psiRow = el("div", "psi-row");
+    const psiLabel = el("span");
+    psiLabel.textContent = "Psionics";
+    const psiActions = el("div", "psi-actions");
+    this.psiPanicButton = el("button");
+    this.psiPanicButton.dataset.kind = "panic";
+    this.psiPanicButton.title = "Psi-panic a visible enemy (dumps morale, may break nerve)";
+    this.psiPanicButton.addEventListener("click", () => this.cb.onPsiAttack?.("panic"));
+    this.psiMcButton = el("button");
+    this.psiMcButton.dataset.kind = "mindControl";
+    this.psiMcButton.title = "Seize an enemy for one round. Hard-capped at one use per battle.";
+    this.psiMcButton.addEventListener("click", () => this.cb.onPsiAttack?.("mindControl"));
+    psiActions.append(this.psiPanicButton, this.psiMcButton);
+    this.psiRow.append(psiLabel, psiActions);
+    actions.appendChild(this.psiRow);
+
     const reserveRow = el("div", "reserve-row");
     const reserveLabel = el("span");
     reserveLabel.textContent = "Reaction reserve";
@@ -1068,6 +1145,11 @@ export class Hud {
     for (const [mode, button] of this.modeButtons) {
       button.classList.toggle("active", mode === kind);
     }
+  }
+
+  /** Arm/disarm psi-targeting mode; the chosen sub-button highlights on next render. */
+  setPsiTargeting(kind: PsiKind | null): void {
+    this.activePsi = kind;
   }
 
   setMuted(muted: boolean): void {
@@ -1202,6 +1284,7 @@ export class Hud {
     this.updateModeButtons(state, selected, hover, runtime);
     this.updateReloadButton(state, selected, runtime);
     this.updateStanceButton(state, selected, runtime);
+    this.updatePsiButtons(selected, runtime);
     this.updateReserveButtons(selected, runtime);
     this.updateItemButtons(state, selected, runtime);
     this.renderRoster(players, selected, runtime);
@@ -1383,6 +1466,66 @@ export class Hud {
             : stance === "stand"
               ? "Kneel: boosts accuracy and shrinks your profile, but costs 4 TU and makes moves costlier"
               : "Stand up: restores full mobility (kneeling boosts accuracy)";
+  }
+
+  /**
+   * Render the Panic + Mind Control sub-buttons. Hidden entirely unless the
+   * operative has psi skill; MC is disabled once the per-battle hard cap is
+   * spent (and reads "SPENT" + a text reason, never colour alone).
+   */
+  private updatePsiButtons(selected: Unit | null, runtime: HudRuntime): void {
+    const hasPsi = !!selected && (selected.stats.psiSkill ?? 0) > 0;
+    if (!hasPsi || !runtime.psi) {
+      this.psiRow.style.display = "none";
+      return;
+    }
+    this.psiRow.style.display = "";
+    const info = runtime.psi;
+    this.renderPsiButton(
+      this.psiPanicButton,
+      "✦",
+      "Panic",
+      `${info.panicTuCost} TU`,
+      info.panicAvailable,
+      this.activePsi === "panic",
+      info.panicAvailable
+        ? "Psi-panic: dumps morale, may break the target's nerve"
+        : "Not enough TU or not your turn",
+    );
+    this.renderPsiButton(
+      this.psiMcButton,
+      "☯",
+      info.mcSpent ? "MC Spent" : "Mind Control",
+      info.mcSpent ? "1 / battle used" : `${info.mcTuCost} TU`,
+      info.mcAvailable,
+      this.activePsi === "mindControl",
+      info.mcSpent
+        ? "Mind control hard cap reached (1 per battle)"
+        : info.mcAvailable
+          ? "Seize an enemy for one round (1 per battle)"
+          : "Not enough TU or not your turn",
+    );
+  }
+
+  private renderPsiButton(
+    button: HTMLButtonElement,
+    glyph: string,
+    label: string,
+    cost: string,
+    enabled: boolean,
+    active: boolean,
+    title: string,
+  ): void {
+    const g = el("span", "psi-glyph");
+    g.textContent = glyph;
+    const l = el("span");
+    l.textContent = label;
+    const c = el("span", "psi-cost");
+    c.textContent = cost;
+    button.replaceChildren(g, l, c);
+    button.disabled = !enabled;
+    button.classList.toggle("active", active);
+    button.title = title;
   }
 
   private updateContext(hover: HudHover | null, selected: Unit | null): void {

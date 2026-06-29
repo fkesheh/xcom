@@ -32,13 +32,14 @@ import type {
   AiExecutor,
   BattleState,
   GameEvent,
+  PsiKind,
   ShotMode,
   Unit,
   UnitId,
   Vec2,
   Weapon,
 } from "./types";
-import { COVER, STANCE, TU_COST } from "./types";
+import { COVER, PSI, STANCE, TU_COST } from "./types";
 import { canSee, hasLineOfSight } from "./los";
 import { findPath } from "./pathfinding";
 import { inBounds, moveCost, tileTypeAt } from "./grid";
@@ -231,6 +232,64 @@ function tryReload(
   events.push(...exec.reload(unit.id));
   const after = state.units.find((u) => u.id === unit.id);
   return !!after && (after.ammo > ammoBefore || after.tu < tuBefore);
+}
+
+// ---------------------------------------------------------------------------
+// Psionics
+// ---------------------------------------------------------------------------
+
+/**
+ * Pick the highest-value psionic target visible to and in range of `unit`:
+ * prefer low psiStrength (easy to crack) then low HP (nearly dead), tie-broken
+ * by ascending id. Skips units already fighting for the caster's side (e.g. one
+ * it already seized this battle) so psi is never wasted.
+ */
+function choosePsiTarget(state: BattleState, unit: Unit): Unit | undefined {
+  const targets = state.units.filter(
+    (t) =>
+      t.alive &&
+      t.faction !== unit.faction &&
+      t.controlledByFaction === undefined &&
+      canSee(state.grid, unit, t.pos) &&
+      chebyshev(unit.pos, t.pos) <= PSI.RANGE,
+  );
+  targets.sort((a, b) => {
+    const sa = a.stats.psiStrength ?? 0;
+    const sb = b.stats.psiStrength ?? 0;
+    if (sa !== sb) return sa - sb;
+    if (a.hp !== b.hp) return a.hp - b.hp;
+    return a.id - b.id;
+  });
+  return targets[0];
+}
+
+/**
+ * A psi-capable unit (the commander) casts one psi attack when it has a viable
+ * target and enough TU: mind control when the per-battle hard cap still allows
+ * it, otherwise a panic. Returns true when a psi action was actually performed
+ * (advancing the rng), so the caller can mark the unit as having used psi this
+ * turn. Pure apart from the exec it drives (which mutates state + emits events).
+ */
+function tryPsi(
+  state: BattleState,
+  unit: Unit,
+  exec: AiExecutor,
+  events: GameEvent[],
+): boolean {
+  if (!exec.psiAttack) return false;
+  if ((unit.stats.psiSkill ?? 0) <= 0) return false;
+  if (unit.controlledByFaction !== undefined) return false;
+  const target = choosePsiTarget(state, unit);
+  if (!target) return false;
+  const cost = Math.ceil((unit.stats.timeUnits * PSI.TU_PERCENT) / 100);
+  if (unit.tu < cost) return false;
+
+  const kind: PsiKind =
+    (state.mcUsedThisBattle ?? 0) < PSI.MC_MAX_PER_BATTLE ? "mindControl" : "panic";
+  const before = state.rng.state;
+  const psiEvents = exec.psiAttack(unit.id, target.id, kind);
+  events.push(...psiEvents);
+  return psiEvents.length > 0 && state.rng.state !== before;
 }
 
 /**
@@ -629,6 +688,9 @@ export function runEnemyTurn(state: BattleState, exec: AiExecutor): GameEvent[] 
     .filter((u) => u.faction === "enemy" && u.alive)
     .map((u) => u.id)
     .sort((a, b) => a - b);
+  // A psi-capable unit casts at most one psi attack per turn (the rest of its
+  // TU goes to guns / movement); tracked per unit id for determinism.
+  const psiedThisTurn = new Set<UnitId>();
 
   for (const id of enemyIds) {
     for (let iteration = 0; iteration < MAX_ACTIONS_PER_UNIT; iteration++) {
@@ -636,6 +698,14 @@ export function runEnemyTurn(state: BattleState, exec: AiExecutor): GameEvent[] 
 
       const unit = state.units.find((u) => u.id === id);
       if (!unit || !unit.alive || unit.tu <= 0) break;
+
+      // Psionics: a psi-capable unit (the alien commander) leads with one psi
+      // attack per turn — mind control when the hard cap allows, else a panic —
+      // aimed at the softest visible target, before falling through to guns.
+      if (!psiedThisTurn.has(id) && tryPsi(state, unit, exec, events)) {
+        psiedThisTurn.add(id);
+        continue;
+      }
 
       // Aliens hunt civilians as readily as soldiers: a terror-site strike zone
       // puts neutral civilians in the line of fire, so the shot-target pool is

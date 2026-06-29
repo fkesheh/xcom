@@ -21,6 +21,7 @@ import type {
   GameEvent,
   ItemInstance,
   PanicBehavior,
+  PsiKind,
   ShotKind,
   ShotPreview,
   Unit,
@@ -28,7 +29,7 @@ import type {
   UnitStance,
   Vec2,
 } from "./types";
-import { DIR8_VECTORS, MORALE, SMOKE, STANCE, TU_COST } from "./types";
+import { DIR8_VECTORS, MORALE, PSI, SMOKE, STANCE, TU_COST } from "./types";
 import { cellIndex, destroyCoverAt, moveCost } from "./grid";
 import { blocksMove, inBounds } from "./grid";
 import { canSee, dir8Towards, lineOfFire, visibleEnemyIds, visibleTiles } from "./los";
@@ -705,6 +706,107 @@ function executePrimeItem(
 }
 
 // ---------------------------------------------------------------------------
+// Psionics
+// ---------------------------------------------------------------------------
+
+/**
+ * Execute a psionic attack. The caster rolls a single success chance derived
+ * from its psiSkill against the target's psiStrength, reduced by distance; the
+ * action costs PSI.TU_PERCENT of max TU whether or not it lands.
+ *
+ *  - 'panic': on a hit, dumps the target's morale to 0 — feeding it into the
+ *    existing morale/panic system so the target rolls for panic at the start of
+ *    its next turn (bravery can still resist that roll).
+ *  - 'mindControl': HARD-CAPPED at PSI.MC_MAX_PER_BATTLE per battle. On a hit,
+ *    the target switches sides for PSI.MC_DURATION_TURNS: its `faction` becomes
+ *    the caster's faction (so combat / AI / victory logic treats it as the
+ *    controller's), its home faction is stashed on `controlledByFaction` for
+ *    revert, and `mcTurnsLeft` is set. A mind-controlled unit cannot cast psi.
+ *
+ * Purity: no DOM / three.js. The only rng draw is the single success roll.
+ */
+export function executePsiAttack(
+  state: BattleState,
+  attacker: Unit,
+  targetId: UnitId,
+  kind: PsiKind,
+): GameEvent[] {
+  if (!attacker.alive) return [{ type: "blocked", reason: "no such unit" }];
+  // A controlled unit cannot project psi; psiSkill 0/unset means untrained.
+  if (attacker.controlledByFaction !== undefined) {
+    return [{ type: "blocked", reason: "mind-controlled" }];
+  }
+  const psiSkill = attacker.stats.psiSkill ?? 0;
+  if (psiSkill <= 0) return [{ type: "blocked", reason: "no psi ability" }];
+
+  const target = unitById(state, targetId);
+  if (!target || !target.alive) return [{ type: "blocked", reason: "no target" }];
+  if (target.faction === attacker.faction) {
+    return [{ type: "blocked", reason: "friendly target" }];
+  }
+  if (kind === "mindControl" && (state.mcUsedThisBattle ?? 0) >= PSI.MC_MAX_PER_BATTLE) {
+    return [{ type: "blocked", reason: "mind control spent" }];
+  }
+
+  const dist = chebyshev(attacker.pos, target.pos);
+  if (dist > PSI.RANGE) return [{ type: "blocked", reason: "out of psi range" }];
+
+  const cost = Math.ceil((attacker.stats.timeUnits * PSI.TU_PERCENT) / 100);
+  if (attacker.tu < cost) return [{ type: "blocked", reason: "not enough TU" }];
+
+  attacker.tu -= cost;
+
+  // Base odds from skill vs resistance, clamped to [MIN, MAX], then shrunk by
+  // distance (falloff per tile, floored so psi never fully zeros out to range).
+  const psiStrength = target.stats.psiStrength ?? 0;
+  const base = (psiSkill - psiStrength * 0.5) / 100;
+  const baseClamped = Math.min(PSI.MAX_CHANCE, Math.max(PSI.MIN_CHANCE, base));
+  const rangeFactor = Math.max(PSI.FALLOFF_FLOOR, 1 - dist * PSI.FALLOFF_PER_TILE);
+  const chance = baseClamped * rangeFactor;
+  const success = state.rng.chance(chance);
+
+  const events: GameEvent[] = [
+    { type: "psiUsed", attackerId: attacker.id, targetId, kind, success, tuLeft: attacker.tu },
+  ];
+
+  if (!success) {
+    state.log.push(`${attacker.name}'s psi attack on ${target.name} was resisted.`);
+    return events;
+  }
+
+  if (kind === "panic") {
+    // Dump morale to 0; the start-of-turn panic phase rolls from here.
+    const before = target.morale ?? MORALE.MAX;
+    target.morale = 0;
+    if (target.morale !== before) {
+      events.push({ type: "moraleChanged", unitId: target.id, morale: 0 });
+    }
+    state.log.push(`${attacker.name} panics ${target.name}.`);
+    return events;
+  }
+
+  // mindControl: seize the target for the caster's faction. `controlledByFaction`
+  // stashes the home faction; `faction` is swapped so the unit genuinely fights
+  // for the wrong side until the round-end tick reverts it.
+  target.controlledByFaction = target.faction;
+  target.faction = attacker.faction;
+  target.mcTurnsLeft = PSI.MC_DURATION_TURNS;
+  state.mcUsedThisBattle = (state.mcUsedThisBattle ?? 0) + 1;
+  state.log.push(`${attacker.name} seizes control of ${target.name}.`);
+  events.push({
+    type: "mindControlled",
+    unitId: target.id,
+    faction: attacker.faction,
+    turnsLeft: PSI.MC_DURATION_TURNS,
+  });
+
+  // A side wipe via MC (e.g. seizing the last living soldier) can end the battle.
+  const over = checkVictory(state);
+  if (over) events.push(over);
+  return events;
+}
+
+// ---------------------------------------------------------------------------
 // Start-of-turn: primed detonation, morale recovery, and panic
 // ---------------------------------------------------------------------------
 //
@@ -942,6 +1044,26 @@ export function tickSmokeClouds(state: BattleState): void {
   if (state.smokeClouds.length === 0) state.smokeClouds = undefined;
 }
 
+/**
+ * Age every mind-controlled unit one round: decrement `mcTurnsLeft`, and when it
+ * hits 0 restore the unit's home faction (stashed on `controlledByFaction`) and
+ * clear the MC state — so the unit reverts to its original side. Iterates units
+ * in ascending id order for determinism. A no-op when nobody is controlled.
+ */
+export function tickMindControl(state: BattleState): void {
+  const controlled = state.units
+    .filter((u) => u.controlledByFaction !== undefined && u.mcTurnsLeft !== undefined)
+    .sort((a, b) => a.id - b.id);
+  for (const u of controlled) {
+    u.mcTurnsLeft = Math.max(0, (u.mcTurnsLeft ?? 0) - 1);
+    if ((u.mcTurnsLeft ?? 0) <= 0) {
+      u.faction = u.controlledByFaction ?? u.faction;
+      u.controlledByFaction = undefined;
+      u.mcTurnsLeft = undefined;
+    }
+  }
+}
+
 function endPlayerTurn(state: BattleState): GameEvent[] {
   const events: GameEvent[] = [{ type: "turnEnded", faction: "player" }];
 
@@ -960,6 +1082,10 @@ function endPlayerTurn(state: BattleState): GameEvent[] {
       const u = unitById(state, id);
       return u ? performThrow(state, u, target, itemId) : [];
     },
+    psiAttack: (id, targetId, kind) => {
+      const u = unitById(state, id);
+      return u ? executePsiAttack(state, u, targetId, kind) : [];
+    },
   };
   events.push(...runEnemyTurn(state, exec));
 
@@ -969,9 +1095,10 @@ function endPlayerTurn(state: BattleState): GameEvent[] {
 
   events.push({ type: "turnEnded", faction: "enemy" });
   state.turn++;
-  // A new round begins: age every active smoke cloud one round and clear any
-  // that have fully dissipated, before the player acts.
+  // A new round begins: age every active smoke cloud one round, clear any that
+  // have fully dissipated, and lapse every mind control before the player acts.
   tickSmokeClouds(state);
+  tickMindControl(state);
   state.activeFaction = "player";
   refillTU(state, "player");
   for (const u of state.units) {
@@ -1032,6 +1159,8 @@ export function applyCommand(state: BattleState, cmd: Command): GameEvent[] {
       return executeUseItem(state, unit, cmd.targetId, cmd.itemId);
     case "primeItem":
       return executePrimeItem(state, unit, cmd.itemId, cmd.fuseTurns);
+    case "psiAttack":
+      return executePsiAttack(state, unit, cmd.targetId, cmd.kind);
   }
 }
 

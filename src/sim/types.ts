@@ -138,9 +138,20 @@ export interface UnitStats {
   strength: number;
   /** Bravery (classic 0..120 scale); governs morale retention and panic resistance. */
   bravery?: number;
+  /**
+   * Psionic skill (0 or unset = no psi ability; 1..100 = trained). Only units
+   * with psiSkill > 0 can initiate psi attacks. Player units start at 0 (a
+   * future psi-lab training unlock); the psionic alien commander is the caster.
+   */
+  psiSkill?: number;
+  /** Innate psionic resistance (1..100). Higher shrinks an attacker's psi odds. */
+  psiStrength?: number;
 }
 
 export type ShotKind = "snap" | "aimed" | "auto";
+
+/** Kind of psionic attack: break the target's nerve, or seize control of it. */
+export type PsiKind = "panic" | "mindControl";
 
 /** A firing mode of a weapon. */
 export interface ShotMode {
@@ -265,6 +276,15 @@ export interface Unit {
   reserve: ReserveMode;
   /** Current body stance (kneel = better accuracy, smaller target). Defaults to stand. */
   stance?: UnitStance;
+  /**
+   * Mind-control marker. When defined, this unit is under mind control: its
+   * `faction` has been swapped to the controller's faction for the duration, and
+   * this field holds the unit's HOME faction to restore when control lapses
+   * (`mcTurnsLeft` hitting 0). Also gates psi — a controlled unit cannot cast.
+   */
+  controlledByFaction?: Faction;
+  /** Turns of mind control remaining; decremented once per round, reverting at 0. */
+  mcTurnsLeft?: number;
   sightRange: number;
   visionHalfAngleDeg: number;
 }
@@ -315,6 +335,12 @@ export interface BattleState {
    * sight/fire across its tiles and ticks down once per round; see SmokeCloud.
    */
   smokeClouds?: SmokeCloud[];
+  /**
+   * Mind-control hard-cap counter: how many mind-control attempts have landed
+   * this battle. Capped at {@link PSI.MC_MAX_PER_BATTLE} (1) — at most one MC
+   * per battle, by design.
+   */
+  mcUsedThisBattle?: number;
   /** Human-readable combat log (most recent last). */
   log: string[];
 }
@@ -339,6 +365,7 @@ export type Command =
   | { type: "throwItem"; unitId: UnitId; target: Vec2; itemId: string }
   | { type: "useItem"; unitId: UnitId; targetId: UnitId; itemId: string }
   | { type: "primeItem"; unitId: UnitId; itemId: string; fuseTurns: number }
+  | { type: "psiAttack"; unitId: UnitId; targetId: UnitId; kind: PsiKind }
   | { type: "endTurn" };
 
 /**
@@ -377,6 +404,15 @@ export type GameEvent =
   | { type: "panicked"; unitId: UnitId; behavior: PanicBehavior }
   | { type: "moraleChanged"; unitId: UnitId; morale: number }
   | { type: "stanceChanged"; unitId: UnitId; stance: UnitStance; tuLeft: number }
+  | {
+      type: "psiUsed";
+      attackerId: UnitId;
+      targetId: UnitId;
+      kind: PsiKind;
+      success: boolean;
+      tuLeft: number;
+    }
+  | { type: "mindControlled"; unitId: UnitId; faction: Faction; turnsLeft: number }
   | { type: "blocked"; reason: string };
 
 /**
@@ -392,6 +428,8 @@ export interface AiExecutor {
   face(unitId: UnitId, dir: Dir8): GameEvent[];
   /** Optional: throwing a grenade. The real reducer implements this; AI calls it when it elects to throw. */
   throwItem?(unitId: UnitId, target: Vec2, itemId: string): GameEvent[];
+  /** Optional: a psionic attack. The reducer implements this; the psi-capable AI calls it. */
+  psiAttack?(unitId: UnitId, targetId: UnitId, kind: PsiKind): GameEvent[];
 }
 
 /** Outcome of a single round of fire (auto fires several per action). */
@@ -505,4 +543,29 @@ export const SMOKE = {
   DURATION_TURNS: 3,
   /** Cloud radius (Chebyshev tiles) when the smoke item omits blastRadius. */
   DEFAULT_RADIUS: 2,
+} as const;
+
+/**
+ * Psionics tuning. A psi attack's base odds come from the attacker's psiSkill
+ * against the target's psiStrength, clamped to [MIN_CHANCE, MAX_CHANCE] and then
+ * reduced by distance (falloff per tile). Mind control is HARD-CAPPED at one
+ * successful seize per battle and decays after one round.
+ */
+export const PSI = {
+  /** Psi action TU cost, as a percentage of the caster's max TU. */
+  TU_PERCENT: 50,
+  /** Success chance floor (nothing is hopeless, nothing is certain). */
+  MIN_CHANCE: 0.05,
+  /** Success chance ceiling. */
+  MAX_CHANCE: 0.85,
+  /** Max Chebyshev range in tiles; beyond this a psi attack is impossible. */
+  RANGE: 20,
+  /** Success chance lost per tile of distance to the target. */
+  FALLOFF_PER_TILE: 0.03,
+  /** Distance multiplier floor (psi never loses more than 80% of its odds to range). */
+  FALLOFF_FLOOR: 0.2,
+  /** Hard cap: max successful mind controls per battle. */
+  MC_MAX_PER_BATTLE: 1,
+  /** Rounds a seized unit stays mind-controlled before control reverts. */
+  MC_DURATION_TURNS: 1,
 } as const;

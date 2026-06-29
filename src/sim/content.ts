@@ -200,7 +200,9 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
     name: "Commander",
     faction: "enemy",
     // Priority target: high reactions and the roster's top bravery make it a
-    // steady, panic-proof leader that presses the attack and carries a grenade.
+    // steady, panic-proof leader that presses the attack, carries a grenade, and
+    // is the roster's sole psionic — it can break a soldier's nerve or seize
+    // control of one (hard-capped at a single mind control per battle).
     stats: {
       timeUnits: 58,
       health: 50,
@@ -208,6 +210,8 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
       firingAccuracy: 62,
       strength: 40,
       bravery: 90,
+      psiSkill: 60,
+      psiStrength: 70,
     },
     weaponId: "plasma",
     items: ["grenade"],
