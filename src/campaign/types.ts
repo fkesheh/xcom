@@ -30,6 +30,8 @@ export type ManufacturingProjectId =
   | "armor";
 export type DifficultyLevel = "rookie" | "veteran" | "commander";
 export type MissionType = "crashSite" | "terror" | "landedUfo" | "baseDefense";
+/** Classification of a detected UFO, driving its strength / speed / lifetime profile. */
+export type UfoType = "scout" | "harvester" | "terror" | "battleship";
 export type CouncilRegion =
   | "North America"
   | "South America"
@@ -129,6 +131,8 @@ export interface UfoContact {
   status: "tracked" | "landed" | "engaging" | "crashed" | "escaped";
   /** Mission type this contact seeds when assaulted (defaults to crashSite). */
   missionType?: MissionType;
+  /** Rolled UFO classification driving strength/speed/lifetime; defaults to "harvester". */
+  ufoType?: UfoType;
   lat: number;
   lon: number;
   region: string;

@@ -162,12 +162,17 @@ describe("interactive interception encounters", () => {
         "close",
       );
 
+    // The shared contact (seed 12345) rolls a scout (str 1, 30 HP) that dies to a single
+    // point-blank commander volley. Use a sturdier UFO (seed 25 → terror ship, str 5, 70 HP)
+    // so both encounters stay live and the difficulty scaling stays comparable.
+    const sturdyTrackedContact = (): CampaignState => advanceGeoscape(createCampaign(BASE, 25), 18);
+
     const rookie = executeInterceptionAction(
-      closeToPointBlank(startInterceptionEncounter(withDifficulty(withTrackedContact(), "rookie"))),
+      closeToPointBlank(startInterceptionEncounter(withDifficulty(sturdyTrackedContact(), "rookie"))),
       "attack",
     );
     const commander = executeInterceptionAction(
-      closeToPointBlank(startInterceptionEncounter(withDifficulty(withTrackedContact(), "commander"))),
+      closeToPointBlank(startInterceptionEncounter(withDifficulty(sturdyTrackedContact(), "commander"))),
       "attack",
     );
 

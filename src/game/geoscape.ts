@@ -42,6 +42,7 @@ import type {
   DifficultyLevel,
   MissionType,
   UfoContact,
+  UfoType,
 } from "../campaign/types";
 import {
   canLaunchInterceptor,
@@ -50,6 +51,7 @@ import {
   type InterceptionAction,
   interceptionForecast,
   isInterceptorReady,
+  ufoTypeInfo,
 } from "../campaign/geoscape";
 import { campaignObjectiveProgress, canBuildNewBase, DIFFICULTY_CONFIGS, highestRegionalPanic, MAX_EXTRA_BASES, NEW_BASE_COST, transportCraft } from "../campaign/storage";
 import {
@@ -1198,6 +1200,8 @@ export class GeoscapeView {
   private campaign: CampaignState | null;
   /** Mission type the UFO marker was last built for (rebuilt only on change). */
   private ufoMissionType: MissionType | undefined;
+  /** UFO variety the marker was last built for (rebuilt only on change). */
+  private ufoType: UfoType | undefined;
   /** Contact id the current trail belongs to; reset whenever the UFO changes. */
   private ufoTrailContactId: string | null = null;
   /** Recent airborne UFO positions (lat/lon, oldest first); capped at UFO_TRAIL_MAX. */
@@ -1376,6 +1380,7 @@ export class GeoscapeView {
     this.overlaySlot = panels.overlaySlot;
     this.toast = panels.toast;
     this.ufoMissionType = opts.campaign?.ufoContact?.missionType;
+    this.ufoType = opts.campaign?.ufoContact?.ufoType;
     this.updateSelectionHud();
     // First render populates every panel/marker and seeds the event snapshot
     // (without firing an auto-pause toast for the already-known campaign).
@@ -1514,7 +1519,7 @@ export class GeoscapeView {
       this.extraBaseMarkers.add(marker);
     }
     this.earthGroup.add(this.extraBaseMarkers);
-    this.buildUfoMarker(this.opts.campaign?.ufoContact?.missionType);
+    this.buildUfoMarker(this.opts.campaign?.ufoContact?.missionType, this.opts.campaign?.ufoContact?.ufoType);
     this.earthGroup.add(this.ufoMarker);
     if (this.opts.campaign?.ufoContact) this.placeUfoMarker(this.opts.campaign.ufoContact);
     else this.ufoMarker.visible = false;
@@ -1856,8 +1861,9 @@ export class GeoscapeView {
     return group;
   }
 
-  private buildUfoMarker(missionType: MissionType | undefined): void {
+  private buildUfoMarker(missionType: MissionType | undefined, ufoType: UfoType | undefined): void {
     const info = missionTypeInfo(missionType);
+    const ufoColor = ufoTypeInfo(ufoType).color;
     const core = new Mesh(
       new SphereGeometry(0.045, 16, 10),
       new MeshBasicMaterial({
@@ -1888,6 +1894,22 @@ export class GeoscapeView {
       }),
     );
     beam.position.y = 0.08;
+    // UFO-type tint: an outer ring colored by the UFO variety (scout/harvester/
+    // terror/battleship). Additive to the mission-type coloring above — the core,
+    // ring, and beam keep the mission color, and the urgent halo below is kept.
+    // The type color is always paired with the icon + label in the contact card,
+    // so it is never conveyed by color alone.
+    const typeRing = new Mesh(
+      new RingGeometry(0.2, 0.24, 28),
+      new MeshBasicMaterial({
+        color: ufoColor,
+        transparent: true,
+        opacity: 0.5,
+        side: DoubleSide,
+        blending: AdditiveBlending,
+      }),
+    );
+    typeRing.rotation.x = -Math.PI / 2;
     // Urgent mission types (terror / base defense) get a second outer halo so the
     // marker reads as higher-priority on the globe; the render loop also pulses
     // these faster. Color is always paired with the icon + label in the contact
@@ -1904,9 +1926,9 @@ export class GeoscapeView {
         }),
       );
       halo.rotation.x = -Math.PI / 2;
-      this.ufoMarker.add(core, ring, halo, beam);
+      this.ufoMarker.add(core, ring, halo, beam, typeRing);
     } else {
-      this.ufoMarker.add(core, ring, beam);
+      this.ufoMarker.add(core, ring, beam, typeRing);
     }
   }
 
@@ -2276,6 +2298,8 @@ export class GeoscapeView {
           : "Intercept"
         : "Repairing";
       intercept.disabled = !canLaunchInterceptor(c);
+      const ufoInfo = ufoTypeInfo(c.ufoContact?.ufoType);
+      intercept.title = `Engage ${ufoInfo.label} — threat ${ufoInfo.threat}`;
       intercept.addEventListener("click", () => this.opts.onInterceptUfo());
       this.actionsSlot.append(intercept);
     }
@@ -2314,7 +2338,7 @@ export class GeoscapeView {
     }
     const contact = c?.ufoContact;
     if (contact) {
-      this.refreshUfoMarkerType(contact.missionType);
+      this.refreshUfoMarkerType(contact.missionType, contact.ufoType);
       this.placeUfoMarker(contact);
       this.refreshUfoTrail(contact);
     } else {
@@ -2540,9 +2564,10 @@ export class GeoscapeView {
     trail.visible = count >= 2;
   }
 
-  private refreshUfoMarkerType(missionType: MissionType | undefined): void {
-    if (this.ufoMissionType === missionType) return;
+  private refreshUfoMarkerType(missionType: MissionType | undefined, ufoType: UfoType | undefined): void {
+    if (this.ufoMissionType === missionType && this.ufoType === ufoType) return;
     this.ufoMissionType = missionType;
+    this.ufoType = ufoType;
     for (const child of [...this.ufoMarker.children]) {
       this.ufoMarker.remove(child);
       if (child instanceof Mesh || child instanceof Line) {
@@ -2552,7 +2577,7 @@ export class GeoscapeView {
         else material.dispose();
       }
     }
-    this.buildUfoMarker(missionType);
+    this.buildUfoMarker(missionType, ufoType);
   }
 
   /**
@@ -3338,7 +3363,18 @@ export class GeoscapeView {
       : { ...info, label: this.contactBadgeLabel(contact) };
     const badge = this.missionBadge(badgeInfo);
     if (lostAtSea) badge.classList.add("lost");
-    card.append(badge, title, status, meta);
+    // UFO-variety badge (scout/harvester/terror/battleship), distinct from the
+    // mission badge above. The type color tints the border, but the icon + label
+    // text always carry the meaning, so the type is never conveyed by color alone.
+    const ufoInfo = ufoTypeInfo(contact.ufoType);
+    const ufoBadge = el("div", "geo-mission-badge");
+    ufoBadge.style.borderColor = new Color(ufoInfo.color).getStyle();
+    const ufoIcon = el("span", "geo-mission-icon");
+    ufoIcon.textContent = ufoInfo.icon;
+    const ufoLabel = el("span");
+    ufoLabel.textContent = `${ufoInfo.label} · ${ufoInfo.threat} threat`;
+    ufoBadge.append(ufoIcon, ufoLabel);
+    card.append(badge, ufoBadge, title, status, meta);
     return card;
   }
 

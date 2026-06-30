@@ -17,6 +17,7 @@ import {
   interceptorRepairHours,
   isInterceptorReady,
   UFO_CONTACT_LIFETIME_HOURS,
+  UFO_TYPE_PROFILES,
 } from "../src/campaign/geoscape";
 import { generateOperation } from "../src/campaign/operations";
 import {
@@ -276,7 +277,9 @@ describe("campaign state", () => {
     });
     expect(detected.ufoContact?.id).toMatch(/^UFO-01-/);
     expect(detected.ufoContact?.status).toBe("tracked");
-    expect(detected.ufoContact?.expiresAtHour).toBe(18 + UFO_CONTACT_LIFETIME_HOURS);
+    // Seed 12345/hour 18 rolls a scout (16h lifetime) — ufoType now drives expiry, not the mission.
+    expect(detected.ufoContact?.ufoType).toBe("scout");
+    expect(detected.ufoContact?.expiresAtHour).toBe(18 + UFO_TYPE_PROFILES.scout.lifetimeHours);
     expect(canLaunchInterceptor(detected)).toBe(true);
     expect(forecast).toMatchObject({
       contactId: detected.ufoContact?.id,
@@ -342,7 +345,10 @@ describe("campaign state", () => {
   });
 
   it("can fail an interception against a strong UFO and applies escape pressure", () => {
-    const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 2);
+    // Seed 3 rolls a harvester (strength 3) at hour 18: strong enough to escape without
+    // radar (ufoScore 71 > 68) yet recoverable once radar-2 tips the balance (71 < 78),
+    // preserving the "strong UFO escapes, then is forced down with radar" scenario.
+    const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 3);
     const detected = advanceGeoscape(campaign, 18);
     const forecast = interceptionForecast(detected);
     const failed = interceptUfo(detected);
@@ -390,7 +396,10 @@ describe("campaign state", () => {
   });
 
   it("repairs interceptor damage over geoscape time while the standby interceptor covers launches", () => {
-    const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 12345);
+    // Seed 33 rolls a harvester (strength 3): the first interception escapes and deals 72%
+    // damage, so int-1 is still repairing at hour 60 when the next contact spawns — letting
+    // the standby (int-2) cover. (A scout would deal too little damage and int-1 would return first.)
+    const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 33);
     const detected = advanceGeoscape(campaign, 18);
     const damaged = interceptUfo(detected);
     const repairHours = damaged.interceptor.repairedAtHour! - damaged.clock.elapsedHours;

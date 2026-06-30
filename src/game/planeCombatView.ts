@@ -26,7 +26,7 @@ import {
   WebGLRenderer,
 } from "three";
 import type { CampaignState, InterceptionEncounter } from "../campaign/types";
-import type { InterceptionAction } from "../campaign/geoscape";
+import { type InterceptionAction, ufoTypeInfo } from "../campaign/geoscape";
 
 /**
  * Sealed, self-contained 3D dogfight screen (NOT the geoscape). Mirrors the
@@ -947,7 +947,8 @@ export class PlaneCombatView {
     const rounds = el("span");
     rounds.innerHTML = `ROUND <b>—</b>`;
     const threat = el("span");
-    threat.innerHTML = `HOSTILE <b>UFO</b>`;
+    const ufoInfo = ufoTypeInfo(this.campaign.ufoContact?.ufoType);
+    threat.innerHTML = `HOSTILE <b>${ufoInfo.label.toUpperCase()}</b>`;
     meta.append(rounds, threat);
 
     const rangeTitle = el("div", "pc-range");
@@ -1102,7 +1103,8 @@ export class PlaneCombatView {
   private refresh(): void {
     const enc = this.campaign.interception ?? null;
     if (enc) {
-      this.contactHeading.textContent = `${enc.contactId} engagement`;
+      const ufoInfo = ufoTypeInfo(this.campaign.ufoContact?.ufoType);
+      this.contactHeading.textContent = `${ufoInfo.label} · ${enc.contactId}`;
       this.roundsValue.innerHTML = `ROUND <b>${enc.roundsElapsed + 1}</b>`;
       const info = rangeInfo(enc.range);
       // Segments are laid out Long(left) → Point-blank(right); flip index to column.

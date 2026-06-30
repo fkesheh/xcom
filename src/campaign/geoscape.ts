@@ -14,6 +14,7 @@ import type {
   ProjectReport,
   StrategicState,
   UfoContact,
+  UfoType,
 } from "./types";
 import { summarizeBaseFacilities } from "./base";
 import { isLand } from "./landMask";
@@ -46,7 +47,47 @@ import {
 } from "./storage";
 
 export const GEOSCAPE_SCAN_HOURS = 6;
-export const UFO_CONTACT_LIFETIME_HOURS = 30;
+
+export interface UfoTypeProfile {
+  strength: number;
+  speed: number; // tracked-flight speed, deg/hour
+  lifetimeHours: number; // tracked/landed contact lifetime
+  infiltrationMult: number;
+  panicMult: number;
+}
+
+export const UFO_TYPE_PROFILES: Record<UfoType, UfoTypeProfile> = {
+  scout: { strength: 1, speed: 1.4, lifetimeHours: 16, infiltrationMult: 0.5, panicMult: 0.5 },
+  harvester: { strength: 3, speed: 0.6, lifetimeHours: 30, infiltrationMult: 1.0, panicMult: 1.0 },
+  terror: { strength: 5, speed: 0.35, lifetimeHours: 48, infiltrationMult: 1.6, panicMult: 1.6 },
+  battleship: { strength: 8, speed: 0.15, lifetimeHours: 72, infiltrationMult: 2.2, panicMult: 2.2 },
+};
+
+export interface UfoTypeInfo {
+  label: string;
+  icon: string;
+  color: number;
+  threat: string;
+}
+
+export function ufoTypeInfo(ufoType?: UfoType): UfoTypeInfo {
+  switch (ufoType) {
+    case "scout":
+      return { label: "Scout", icon: "◈", color: 0x67e8f9, threat: "Low" };
+    case "harvester":
+      return { label: "Harvester", icon: "◆", color: 0xfbbf24, threat: "Moderate" };
+    case "terror":
+      return { label: "Terror Ship", icon: "▲", color: 0xf97316, threat: "High" };
+    case "battleship":
+      return { label: "Battleship", icon: "⬢", color: 0xef4444, threat: "Critical" };
+    default:
+      return { label: "Unknown", icon: "?", color: 0x64748b, threat: "Unknown" };
+  }
+}
+
+// The harvester profile is the identity/default lifetime (×1.0); legacy code that
+// pinned UFO_CONTACT_LIFETIME_HOURS reads it from here so the two never drift.
+export const UFO_CONTACT_LIFETIME_HOURS = UFO_TYPE_PROFILES.harvester.lifetimeHours;
 export const CRASH_SITE_LIFETIME_HOURS = 24;
 export const FUNDING_REPORT_INTERVAL_HOURS = 24 * 30;
 export const INTERCEPTOR_REPAIR_MIN_HOURS = 6;
@@ -58,15 +99,13 @@ const UFO_BASE_SCORE = 44;
 const ENCOUNTER_START_RANGE = 3;
 /** Salt for the deterministic mission-type roll on contact spawn. */
 const MISSION_TYPE_ROLL_SALT = 0x9e3779ba;
+/** Salt for the deterministic UFO-type roll on contact spawn (independent of missionType). */
+const UFO_TYPE_ROLL_SALT = 0x433a5c7b;
 /** Hit/damage scaling salts for interactive encounter rounds. */
 const ENCOUNTER_INTERCEPTOR_SALT = 0x1b1b1b1b;
 const ENCOUNTER_UFO_SALT = 0x2d2d2d2d;
-/** Salts for a tracked UFO's deterministic flight vector (heading deg + speed deg/hour). */
+/** Salt for a tracked UFO's deterministic flight heading (deg). Speed comes from the UFO-type profile. */
 const UFO_HEADING_SALT = 0x5f3759df;
-const UFO_SPEED_SALT = 0x2b7e1516;
-/** Tracked UFOs drift in [min, min + range] degrees/hour — slow enough to stay regional. */
-const UFO_TRACKING_SPEED_MIN = 0.25;
-const UFO_TRACKING_SPEED_RANGE = 0.6;
 // --- Ship fuel --------------------------------------------------------------
 /** Fuel capacity assumed when a craft has no explicit maxFuel (legacy fixtures). */
 const CRAFT_MAX_FUEL_DEFAULT = 100;
@@ -160,22 +199,24 @@ export function contactMissionType(contact: UfoContact | undefined): MissionType
   return contact?.missionType ?? "crashSite";
 }
 
+/** A contact's UFO type; a missing ufoType defaults to "harvester" (the identity profile, ×1.0). */
+function ufoTypeOf(contact: UfoContact): UfoType {
+  return contact.ufoType ?? "harvester";
+}
+
 /**
- * Deterministic UFO strength for a mission type. crashSite and terror reuse the
- * legacy formula exactly; landed craft and base assaults field starker opposition.
+ * Deterministic UFO type for a freshly detected contact, rolled from the SAME seed
+ * createUfoContact computes (independent of missionType). This guarantees spawn
+ * count/timing are untouched and the same (seed, hour) yields the same ufoType — and
+ * thus the same strength — regardless of the rolled mission type. Weighted so scouts
+ * are common and battleships rare.
  */
-function ufoStrengthForMission(missionType: MissionType, seed: number): number {
-  const base = 1 + (hash(seed ^ 0xc2b2ae35) % 3);
-  switch (missionType) {
-    case "landedUfo":
-      return base + 1;
-    case "baseDefense":
-      return base + 2;
-    case "terror":
-    case "crashSite":
-    default:
-      return base;
-  }
+function rollUfoType(seed: number): UfoType {
+  const roll = hash(seed ^ UFO_TYPE_ROLL_SALT) % 100;
+  if (roll < 40) return "scout";
+  if (roll < 75) return "harvester";
+  if (roll < 93) return "terror";
+  return "battleship";
 }
 
 /**
@@ -251,21 +292,26 @@ export function createUfoContact(
   // Ground assaults (landed UFO, terror, base defense) spawn already on the ground;
   // only crash-site contacts begin tracked for an air-to-air shoot-down.
   const groundAssault = missionType !== "crashSite";
-  // Tracked UFOs fly: a deterministic heading (deg) + speed (deg/hour) advance
-  // their lat/lon as the geoscape clock ticks. Ground-assault contacts hold position.
+  // The UFO type is rolled from the same seed (independent of missionType) and drives
+  // the contact's strength, tracked-flight speed, and lifetime.
+  const ufoType = rollUfoType(seed);
+  const profile = UFO_TYPE_PROFILES[ufoType];
+  // Tracked UFOs fly: a deterministic heading (deg) + the profile speed (deg/hour)
+  // advance their lat/lon as the geoscape clock ticks. Ground-assault contacts hold position.
   const heading = rollFraction(hash(seed ^ UFO_HEADING_SALT)) * 360;
-  const speed = UFO_TRACKING_SPEED_MIN + rollFraction(hash(seed ^ UFO_SPEED_SALT)) * UFO_TRACKING_SPEED_RANGE;
+  const speed = profile.speed;
   return {
     id: `UFO-${String(campaign.missionsAttempted + 1).padStart(2, "0")}-${seed.toString(16).slice(0, 4).toUpperCase()}`,
     status: groundAssault ? "landed" : "tracked",
     missionType,
+    ufoType,
     lat: Math.round(lat * 10) / 10,
     lon: Math.round(lon * 10) / 10,
     region,
     detectedAtHour,
-    expiresAtHour: detectedAtHour + UFO_CONTACT_LIFETIME_HOURS,
+    expiresAtHour: detectedAtHour + profile.lifetimeHours,
     missionSeed: hash(seed ^ 0x85ebca6b),
-    strength: ufoStrengthForMission(missionType, seed),
+    strength: profile.strength,
     ...(groundAssault ? {} : { heading, speed }),
   };
 }
@@ -618,23 +664,29 @@ function penalizeIgnoredContact(campaign: CampaignState, strategic: StrategicSta
 
 /**
  * Extra regional panic an un-addressed UFO's mission heaps on top of the baseline
- * ignore penalty, per mission type. Terror/base/landed assaults are severe; a crashSite
- * contact (a tracked UFO that slipped away after recon) adds none because the baseline
- * penalty already covers it — keeping crashSite the "smaller" case and preserving the
- * legacy ignore penalty for tracked crashSite contacts exactly.
+ * ignore penalty. The mission type sets the base (terror/base/landed assaults are
+ * severe; a crashSite recon adds none); the UFO type's panicMult then scales it. A
+ * missing ufoType defaults to harvester (×1.0), so legacy contacts behave as before.
  */
-function contactTerrorBonus(missionType: MissionType): { local: number; spillover: number } {
-  switch (missionType) {
+function contactTerrorBonus(contact: UfoContact): { local: number; spillover: number } {
+  let missionBonus: { local: number; spillover: number };
+  switch (contactMissionType(contact)) {
     case "terror":
-      return { local: 18, spillover: 5 };
+      missionBonus = { local: 18, spillover: 5 };
+      break;
     case "baseDefense":
-      return { local: 16, spillover: 4 };
+      missionBonus = { local: 16, spillover: 4 };
+      break;
     case "landedUfo":
-      return { local: 12, spillover: 3 };
+      missionBonus = { local: 12, spillover: 3 };
+      break;
     case "crashSite":
     default:
-      return { local: 0, spillover: 0 };
+      missionBonus = { local: 0, spillover: 0 };
+      break;
   }
+  const panicMult = UFO_TYPE_PROFILES[ufoTypeOf(contact)].panicMult;
+  return { local: missionBonus.local * panicMult, spillover: missionBonus.spillover * panicMult };
 }
 
 function contactTerrorHeadline(missionType: MissionType): string {
@@ -652,23 +704,30 @@ function contactTerrorHeadline(missionType: MissionType): string {
 }
 
 /**
- * Infiltration deepened by an un-addressed UFO, per mission type. Terror and landed
- * assaults advance a region toward defection fastest; a crash-site recon that slips
- * away after detection is the slower baseline. Scaled by the difficulty panicMult
- * at apply time so harder campaigns infiltrate faster.
+ * Infiltration deepened by an un-addressed UFO. The mission type sets the base (terror
+ * and landed assaults advance a region toward defection fastest; a crash-site recon is
+ * the slower baseline); the UFO type's infiltrationMult then scales it. Scaled by the
+ * difficulty panicMult at apply time so harder campaigns infiltrate faster. A missing
+ * ufoType defaults to harvester (×1.0).
  */
-function contactInfiltrationGain(missionType: MissionType): number {
-  switch (missionType) {
+function contactInfiltrationGain(contact: UfoContact): number {
+  let missionBase: number;
+  switch (contactMissionType(contact)) {
     case "terror":
-      return 30;
+      missionBase = 30;
+      break;
     case "baseDefense":
-      return 25;
+      missionBase = 25;
+      break;
     case "landedUfo":
-      return 20;
+      missionBase = 20;
+      break;
     case "crashSite":
     default:
-      return 10;
+      missionBase = 10;
+      break;
   }
+  return missionBase * UFO_TYPE_PROFILES[ufoTypeOf(contact)].infiltrationMult;
 }
 
 /** Per-nation share of council funding, withdrawn for good when that nation defects. */
@@ -719,7 +778,7 @@ function applyDefection(
  */
 function applyContactTerror(campaign: CampaignState, contact: UfoContact): CampaignState {
   const missionType = contactMissionType(contact);
-  const bonus = contactTerrorBonus(missionType);
+  const bonus = contactTerrorBonus(contact);
   const panicMult = difficultyConfig(campaign).panicMult;
   const baselineLocal = hasBaseFacility(campaign, "radar-2") ? 14 : 22;
   const bonusLocal = Math.round(bonus.local * panicMult);
@@ -746,7 +805,7 @@ function applyContactTerror(campaign: CampaignState, contact: UfoContact): Campa
   const infiltrationAfter = adjustRegionalInfiltration(
     infiltrationBefore,
     contact.region,
-    contactInfiltrationGain(missionType),
+    contactInfiltrationGain(contact),
     panicMult,
   );
   next = { ...next, infiltration: infiltrationAfter };
@@ -1012,7 +1071,7 @@ function makePatrolFlight(craft: Craft, campaign: CampaignState, contact: UfoCon
     toLat: contact.lat,
     toLon: contact.lon,
     progress: 0,
-    speedDegPerHour: patrolSpeedDegPerHour(contact.speed ?? UFO_TRACKING_SPEED_MIN),
+    speedDegPerHour: patrolSpeedDegPerHour(contact.speed ?? UFO_TYPE_PROFILES.harvester.speed),
     startedAtHour: campaign.clock.elapsedHours,
   };
 }
