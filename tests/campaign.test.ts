@@ -88,7 +88,7 @@ describe("campaign state", () => {
     expect(campaign.id).toBe("campaign-00003039");
     expect(campaign.seed).toBe(12345);
     expect(campaign.base.region).toBe("Atlantic sector");
-    expect(campaign.strategic).toEqual({ status: "active", threat: 25, funding: 600, score: 0 });
+    expect(campaign.strategic).toEqual({ status: "active", threat: 20, funding: 640, score: 0 });
     expect(campaign.regionalPanic).toEqual(STARTING_REGIONAL_PANIC);
     expect(highestRegionalPanic(campaign)).toEqual({ region: "North America", panic: 20 });
     expect(campaign.clock).toEqual({
@@ -102,7 +102,7 @@ describe("campaign state", () => {
     expect(campaign.interceptor).toEqual({ damage: 0, sorties: 0 });
     expect(campaign.lastInterceptionReport).toBeUndefined();
     expect(campaign.ufoContact).toBeUndefined();
-    expect(campaign.resources).toEqual({ credits: 650, alloys: 0, elerium: 0, alienData: 0 });
+    expect(campaign.resources).toEqual({ credits: 800, alloys: 0, elerium: 0, alienData: 0 });
     expect(campaign.armory.weapons).toEqual({ rifle: 6, pistol: 2, plasma: 0, cannon: 0 });
     expect(campaign.facilities).toEqual([...STARTER_BASE_FACILITY_IDS]);
     expect(campaign.soldiers).toHaveLength(6);
@@ -333,10 +333,10 @@ describe("campaign state", () => {
 
     expect(detected.ufoContact).toBeDefined();
     expect(expired.ufoContact).toBeUndefined();
-    expect(expired.strategic.threat - campaign.strategic.threat).toBe(10);
-    expect(campaign.strategic.funding - expired.strategic.funding).toBe(25);
+    expect(expired.strategic.threat - campaign.strategic.threat).toBe(6);
+    expect(campaign.strategic.funding - expired.strategic.funding).toBe(15);
     expect(regionalPanicFor(expired, detected.ufoContact!.region)).toBe(
-      regionalPanicFor(campaign, detected.ufoContact!.region)! + 22,
+      regionalPanicFor(campaign, detected.ufoContact!.region)! + 18,
     );
     expect(highestRegionalPanic(expired).region).toBe(detected.ufoContact!.region);
     expect(expired.clock.lastContactHour).toBe(expired.clock.elapsedHours);
@@ -345,10 +345,10 @@ describe("campaign state", () => {
   });
 
   it("can fail an interception against a strong UFO and applies escape pressure", () => {
-    // Seed 3 rolls a harvester (strength 3) at hour 18: strong enough to escape without
-    // radar (ufoScore 71 > 68) yet recoverable once radar-2 tips the balance (71 < 78),
+    // Seed 8 rolls a terror ship (strength 5) at hour 18: strong enough to escape without
+    // radar (ufoScore 75 > 74) yet recoverable once radar-2 tips the balance (75 < 84),
     // preserving the "strong UFO escapes, then is forced down with radar" scenario.
-    const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 3);
+    const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 8);
     const detected = advanceGeoscape(campaign, 18);
     const forecast = interceptionForecast(detected);
     const failed = interceptUfo(detected);
@@ -360,12 +360,12 @@ describe("campaign state", () => {
     const radarForecast = interceptionForecast(radar);
     const recovered = interceptUfo(radar);
 
-    expect(detected.ufoContact?.strength).toBe(3);
+    expect(detected.ufoContact?.strength).toBe(5);
     expect(forecast).toMatchObject({
       risk: "dangerous",
       succeeds: false,
       canLaunch: true,
-      strength: 3,
+      strength: 5,
     });
     expect(forecast?.summary).toContain("UFO may escape");
     expect(failed.ufoContact).toBeUndefined();
@@ -373,7 +373,7 @@ describe("campaign state", () => {
       contactId: detected.ufoContact?.id,
       result: "escaped",
       region: detected.ufoContact?.region,
-      strength: 3,
+      strength: 5,
       completedAtHour: detected.clock.elapsedHours,
     });
     expect(failed.lastInterceptionReport?.summary).toContain("escaped");
@@ -381,16 +381,16 @@ describe("campaign state", () => {
     expect(failed.interceptor.damage).toBeGreaterThan(0);
     expect(failed.interceptor.repairedAtHour).toBeGreaterThan(failed.clock.elapsedHours);
     expect(failed.clock.lastContactHour).toBe(failed.clock.elapsedHours);
-    expect(failed.strategic.threat - detected.strategic.threat).toBe(8);
-    expect(detected.strategic.funding - failed.strategic.funding).toBe(20);
+    expect(failed.strategic.threat - detected.strategic.threat).toBe(6);
+    expect(detected.strategic.funding - failed.strategic.funding).toBe(15);
     expect(regionalPanicFor(failed, detected.ufoContact!.region)).toBe(
-      regionalPanicFor(detected, detected.ufoContact!.region)! + 12,
+      regionalPanicFor(detected, detected.ufoContact!.region)! + 8,
     );
     expect(recovered.ufoContact?.status).toBe("crashed");
     expect(radarForecast).toMatchObject({
       risk: "favorable",
       succeeds: true,
-      strength: 3,
+      strength: 5,
     });
     expect(recovered.lastInterceptionReport?.result).toBe("crashed");
   });
@@ -450,17 +450,17 @@ describe("campaign state", () => {
     expect(firstReport.lastFundingReport).toMatchObject({
       reportNumber: 1,
       completedAtHour: FUNDING_REPORT_INTERVAL_HOURS,
-      income: 600,
+      income: 640,
       upkeep: 387,
-      net: 213,
-      funding: 600,
-      threat: 25,
+      net: 253,
+      funding: 640,
+      threat: 20,
     });
-    expect(firstReport.resources.credits).toBe(campaign.resources.credits + 213);
-    expect(firstReport.strategic.score).toBe(campaign.strategic.score + 21);
+    expect(firstReport.resources.credits).toBe(campaign.resources.credits + 253);
+    expect(firstReport.strategic.score).toBe(campaign.strategic.score + 25);
 
-    expect(highThreat.strategic.funding).toBe(campaign.strategic.funding - 60);
-    expect(highThreat.lastFundingReport?.summary).toContain("High threat cut future funding by 60c");
+    expect(highThreat.strategic.funding).toBe(campaign.strategic.funding - 45);
+    expect(highThreat.lastFundingReport?.summary).toContain("High threat cut future funding by 45c");
 
     expect(highPanic.strategic.funding).toBe(campaign.strategic.funding - 80);
     expect(highPanic.lastFundingReport?.summary).toContain("regional panic cut 80c");
@@ -749,7 +749,7 @@ describe("campaign state", () => {
     });
 
     let losing = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 12345);
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 5; i++) {
       losing = recordMissionResult(losing, "failure", generateOperation(losing), `2026-06-${15 + i}T00:00:00.000Z`);
     }
     expect(losing.strategic.status).toBe("lost");
@@ -926,8 +926,8 @@ describe("campaign state", () => {
 
     const failedWithoutRadar = recordMissionResult(campaign, "failure", baseOperation, "2026-06-15T00:00:00.000Z");
     const failedWithRadar = recordMissionResult(radar, "failure", radarOperation, "2026-06-15T00:00:00.000Z");
-    expect(failedWithoutRadar.strategic.threat - campaign.strategic.threat).toBe(24);
-    expect(failedWithRadar.strategic.threat - radar.strategic.threat).toBe(18);
+    expect(failedWithoutRadar.strategic.threat - campaign.strategic.threat).toBe(16);
+    expect(failedWithRadar.strategic.threat - radar.strategic.threat).toBe(12);
 
     expect(researchCost(campaign, "plasmaWeapons")).toEqual(RESEARCH_COSTS.plasmaWeapons);
     expect(researchCost(annex, "plasmaWeapons")).toEqual({

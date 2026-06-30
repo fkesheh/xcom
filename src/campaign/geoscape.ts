@@ -92,8 +92,8 @@ export const CRASH_SITE_LIFETIME_HOURS = 24;
 export const FUNDING_REPORT_INTERVAL_HOURS = 24 * 30;
 export const INTERCEPTOR_REPAIR_MIN_HOURS = 6;
 export const INTERCEPTOR_REPAIR_MAX_HOURS = 72;
-const INTERCEPTOR_BASE_SCORE = 68;
-const UFO_BASE_SCORE = 44;
+const INTERCEPTOR_BASE_SCORE = 74;
+const UFO_BASE_SCORE = 40;
 
 /** Starting engagement range for an interactive interception encounter. */
 const ENCOUNTER_START_RANGE = 3;
@@ -353,16 +353,16 @@ function interceptorEngagementScore(campaign: CampaignState): number {
 }
 
 function ufoEngagementScore(contact: UfoContact): number {
-  return UFO_BASE_SCORE + contact.strength * 9;
+  return UFO_BASE_SCORE + contact.strength * 7;
 }
 
 function interceptionDamage(campaign: CampaignState, contact: UfoContact, succeeded: boolean): number {
   const trackingUplink = hasBaseFacility(campaign, "radar-2");
   const fabricationBay = hasBaseFacility(campaign, "workshop-2");
-  const base = succeeded ? 14 : 30;
-  const strengthScale = succeeded ? 12 : 14;
+  const base = succeeded ? 11 : 24;
+  const strengthScale = succeeded ? 10 : 12;
   return Math.max(
-    succeeded ? 6 : 18,
+    succeeded ? 5 : 14,
     base + contact.strength * strengthScale - (trackingUplink ? 5 : 0) - (fabricationBay ? 4 : 0),
   );
 }
@@ -435,11 +435,11 @@ function applyInterceptionOutcome(
   const overOcean = result === "crashed" && !isLand(contact.lat, contact.lon);
   const report = makeInterceptionReport(contact, result, reportDamage, afterCraft.clock.elapsedHours, overOcean);
   if (result === "escaped") {
-    const regionalPanic = adjustRegionalPanic(afterCraft.regionalPanic, contact.region, 12, 1);
+    const regionalPanic = adjustRegionalPanic(afterCraft.regionalPanic, contact.region, 8, 1);
     const strategic = statusAfterStrategicChange({ ...afterCraft, regionalPanic }, {
       ...afterCraft.strategic,
-      threat: Math.min(100, afterCraft.strategic.threat + 8),
-      funding: Math.max(0, afterCraft.strategic.funding - 20),
+      threat: Math.min(100, afterCraft.strategic.threat + 6),
+      funding: Math.max(0, afterCraft.strategic.funding - 15),
       score: afterCraft.strategic.score - 20,
     });
     return {
@@ -646,13 +646,13 @@ function penalizeIgnoredContact(campaign: CampaignState, strategic: StrategicSta
   const regionalPanic = adjustRegionalPanic(
     campaign.regionalPanic,
     campaign.ufoContact?.region ?? campaign.base.region,
-    trackingUplink ? 14 : 22,
-    trackingUplink ? 1 : 3,
+    trackingUplink ? 12 : 18,
+    trackingUplink ? 1 : 2,
   );
   const next = {
     ...strategic,
-    threat: Math.min(100, strategic.threat + (trackingUplink ? 6 : 10)),
-    funding: Math.max(0, strategic.funding - (trackingUplink ? 15 : 25)),
+    threat: Math.min(100, strategic.threat + (trackingUplink ? 4 : 6)),
+    funding: Math.max(0, strategic.funding - (trackingUplink ? 10 : 15)),
     score: strategic.score - 25,
   };
   const updated = { ...campaign, regionalPanic };
@@ -780,7 +780,7 @@ function applyContactTerror(campaign: CampaignState, contact: UfoContact): Campa
   const missionType = contactMissionType(contact);
   const bonus = contactTerrorBonus(contact);
   const panicMult = difficultyConfig(campaign).panicMult;
-  const baselineLocal = hasBaseFacility(campaign, "radar-2") ? 14 : 22;
+  const baselineLocal = hasBaseFacility(campaign, "radar-2") ? 12 : 18;
   const bonusLocal = Math.round(bonus.local * panicMult);
   const totalLocal = baselineLocal + bonusLocal;
 
@@ -845,9 +845,9 @@ function monthlyUpkeep(campaign: CampaignState): number {
 }
 
 function fundingPressure(threat: number): number {
-  if (threat >= 85) return 90;
-  if (threat >= 70) return 60;
-  if (threat >= 55) return 30;
+  if (threat >= 85) return 70;
+  if (threat >= 70) return 45;
+  if (threat >= 55) return 25;
   return 0;
 }
 

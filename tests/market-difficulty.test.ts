@@ -34,9 +34,9 @@ describe("difficulty presets", () => {
   it("veteran (the default) reproduces the current starting numbers exactly", () => {
     const campaign = createCampaign(BASE, SEED);
 
-    expect(campaign.strategic).toEqual({ status: "active", threat: 25, funding: 600, score: 0 });
+    expect(campaign.strategic).toEqual({ status: "active", threat: 20, funding: 640, score: 0 });
     expect(campaign.strategic.difficulty).toBeUndefined();
-    expect(campaign.resources).toEqual({ credits: 650, alloys: 0, elerium: 0, alienData: 0 });
+    expect(campaign.resources).toEqual({ credits: 800, alloys: 0, elerium: 0, alienData: 0 });
     expect(difficultyConfig(campaign)).toBe(DIFFICULTY_CONFIGS.veteran);
   });
 

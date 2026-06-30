@@ -46,7 +46,7 @@ import {
 export const CAMPAIGN_STORAGE_KEY = "blacksite.campaign.v1";
 export const CAMPAIGN_VICTORY_OPERATIONS = 5;
 export const DEPLOYMENT_SIZE = 4;
-export const RECRUIT_COST = 120;
+export const RECRUIT_COST = 90;
 export const MEDBAY_FACILITY_ID = "medbay-2";
 export const MEDBAY_WOUND_RECOVERY_MULTIPLIER = 0.75;
 export const WOUND_RECOVERY_MIN_HOURS = 12;
@@ -212,7 +212,7 @@ export function repairFleet(campaign: CampaignState, currentHour?: number): Camp
 
 
 export const STARTING_RESOURCES: CampaignResources = {
-  credits: 650,
+  credits: 800,
   alloys: 0,
   elerium: 0,
   alienData: 0,
@@ -220,8 +220,8 @@ export const STARTING_RESOURCES: CampaignResources = {
 
 export const STARTING_STRATEGIC: StrategicState = {
   status: "active",
-  threat: 25,
-  funding: 600,
+  threat: 20,
+  funding: 640,
   score: 0,
 };
 
@@ -283,14 +283,14 @@ export interface DifficultyConfig {
 export const DIFFICULTY_CONFIGS: Record<DifficultyLevel, DifficultyConfig> = {
   rookie: {
     label: "Rookie",
-    startingThreat: 15,
-    startingFunding: 720,
-    startingCredits: 800,
+    startingThreat: 12,
+    startingFunding: 760,
+    startingCredits: 900,
     enemyCountMult: 0.8,
     ufoStrengthBonus: 0,
     interceptionDamageMult: 0.8,
-    fundingPressureMult: 0.7,
-    panicMult: 0.7,
+    fundingPressureMult: 0.6,
+    panicMult: 0.65,
     upkeepMult: 0.8,
   },
   veteran: {
@@ -307,14 +307,14 @@ export const DIFFICULTY_CONFIGS: Record<DifficultyLevel, DifficultyConfig> = {
   },
   commander: {
     label: "Commander",
-    startingThreat: 35,
-    startingFunding: 520,
-    startingCredits: 550,
-    enemyCountMult: 1.3,
+    startingThreat: 28,
+    startingFunding: 560,
+    startingCredits: 650,
+    enemyCountMult: 1.2,
     ufoStrengthBonus: 1,
-    interceptionDamageMult: 1.2,
-    fundingPressureMult: 1.3,
-    panicMult: 1.4,
+    interceptionDamageMult: 1.15,
+    fundingPressureMult: 1.2,
+    panicMult: 1.3,
     upkeepMult: 1.2,
   },
 };
@@ -1868,9 +1868,9 @@ function updateStrategic(
 
   const success = result === "success";
   const trackingUplink = hasBaseFacility(campaign, "radar-2");
-  const threatDelta = success ? (trackingUplink ? -15 : -12) : trackingUplink ? 18 : 24;
+  const threatDelta = success ? (trackingUplink ? -16 : -14) : trackingUplink ? 12 : 16;
   const threat = Math.max(0, Math.min(100, strategic.threat + threatDelta));
-  const funding = Math.max(0, strategic.funding + (success ? 75 : -120));
+  const funding = Math.max(0, strategic.funding + (success ? 80 : -75));
   const score = strategic.score + (success ? 100 + operation.enemyCount * 10 : -50);
   const canFieldSquad =
     soldiers.some((soldier) => soldier.status !== "kia") ||

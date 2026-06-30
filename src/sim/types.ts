@@ -519,7 +519,7 @@ export const COMBAT = {
   RANGE_FALLOFF_PER_TILE: 0.02,
   /** Damage roll is uniform in [base * MIN, base * MAX], rounded to int. */
   DAMAGE_MIN_MULT: 0.5,
-  DAMAGE_MAX_MULT: 1.5,
+  DAMAGE_MAX_MULT: 1.4,
   /** Extra TU-percent floor: a unit needs at least this much of max TU to reaction-fire. */
 } as const;
 
@@ -538,12 +538,12 @@ export const TU_COST = {
  */
 export const MORALE = {
   MAX: 100,
-  PANIC_THRESHOLD: 35,
-  SELF_WOUNDED_LOSS: 12,
-  ALLY_WOUNDED_LOSS: 6,
-  ALLY_DEATH_LOSS: 25,
+  PANIC_THRESHOLD: 30,
+  SELF_WOUNDED_LOSS: 10,
+  ALLY_WOUNDED_LOSS: 5,
+  ALLY_DEATH_LOSS: 18,
   /** Per-turn recovery, scaled by bravery (higher bravery => more recovery). */
-  RECOVERY_PER_TURN: 6,
+  RECOVERY_PER_TURN: 8,
   /** Bravery used when a stat omits it (classic rookie baseline). */
   DEFAULT_BRAVERY: 50,
 } as const;
@@ -553,9 +553,9 @@ export const STANCE = {
   /** TU cost to toggle stance (stand <-> kneel). */
   TOGGLE_TU: 4,
   /** Firing-accuracy bonus while kneeling (added to effective accuracy, classic 0..120 scale). */
-  KNEEL_ACCURACY_BONUS: 20,
+  KNEEL_ACCURACY_BONUS: 24,
   /** Hit-chance reduction against a kneeling target (presents a smaller profile). */
-  KNEEL_TARGET_DEFENSE: 0.2,
+  KNEEL_TARGET_DEFENSE: 0.25,
   /** Movement TU multiplier while kneeling (kneeling moves are a bit costlier). */
   KNEEL_MOVE_MULT: 1.25,
 } as const;
@@ -566,9 +566,9 @@ export const STANCE = {
  */
 export const COVER = {
   /** Hit-chance reduction against a defender in HALF cover (tile.cover === 1). */
-  HALF_DEFENSE: 0.3,
+  HALF_DEFENSE: 0.4,
   /** Hit-chance reduction against a defender in FULL cover (tile.cover === 2). */
-  FULL_DEFENSE: 0.55,
+  FULL_DEFENSE: 0.65,
 } as const;
 
 /**

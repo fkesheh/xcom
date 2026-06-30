@@ -13,20 +13,20 @@ export const WEAPONS: Record<string, Weapon> = {
   rifle: {
     id: "rifle",
     name: "Service Rifle",
-    damage: 26,
+    damage: 30,
     range: 12,
     magazineSize: 24,
     reloadTuPercent: 20,
     modes: [
       { kind: "snap", tuPercent: 25, accuracy: 60, shots: 1 },
-      { kind: "aimed", tuPercent: 50, accuracy: 110, shots: 1 },
+      { kind: "aimed", tuPercent: 50, accuracy: 115, shots: 1 },
       { kind: "auto", tuPercent: 35, accuracy: 35, shots: 3 },
     ],
   },
   pistol: {
     id: "pistol",
     name: "Sidearm",
-    damage: 18,
+    damage: 22,
     range: 8,
     magazineSize: 12,
     reloadTuPercent: 18,
@@ -38,7 +38,7 @@ export const WEAPONS: Record<string, Weapon> = {
   plasma: {
     id: "plasma",
     name: "Plasma Caster",
-    damage: 34,
+    damage: 28,
     range: 14,
     magazineSize: 8,
     reloadTuPercent: 24,
@@ -52,7 +52,7 @@ export const WEAPONS: Record<string, Weapon> = {
     name: "Assault Cannon",
     // Heavy hitter: high base damage in exchange for short range, low
     // accuracy, and a steep TU cost. A single landed shot defines a turn.
-    damage: 45,
+    damage: 40,
     range: 7,
     magazineSize: 6,
     reloadTuPercent: 30,
@@ -66,7 +66,7 @@ export const WEAPONS: Record<string, Weapon> = {
     name: "Marksman Rifle",
     // Precision tool: very high accuracy multiplier and long effective range,
     // priced at a very high TU cost so it fires one deliberate shot per turn.
-    damage: 45,
+    damage: 38,
     range: 20,
     magazineSize: 5,
     reloadTuPercent: 28,
@@ -132,11 +132,11 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
     faction: "player",
     stats: {
       timeUnits: 60,
-      health: 40,
+      health: 68,
       reactions: 50,
-      firingAccuracy: 65,
+      firingAccuracy: 74,
       strength: 35,
-      bravery: 55,
+      bravery: 60,
     },
     weaponId: "rifle",
     items: ["grenade", "medkit"],
@@ -149,9 +149,9 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
     faction: "enemy",
     stats: {
       timeUnits: 50,
-      health: 32,
-      reactions: 35,
-      firingAccuracy: 50,
+      health: 30,
+      reactions: 22,
+      firingAccuracy: 40,
       strength: 40,
       bravery: 90,
     },
@@ -165,9 +165,9 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
     faction: "enemy",
     stats: {
       timeUnits: 55,
-      health: 46,
-      reactions: 45,
-      firingAccuracy: 58,
+      health: 44,
+      reactions: 28,
+      firingAccuracy: 46,
       strength: 50,
       bravery: 60,
     },
@@ -184,9 +184,9 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
     // cannon to bear. Slow TUs mean it advances deliberately and fires once.
     stats: {
       timeUnits: 42,
-      health: 80,
-      reactions: 30,
-      firingAccuracy: 55,
+      health: 68,
+      reactions: 20,
+      firingAccuracy: 44,
       strength: 60,
       bravery: 70,
     },
@@ -203,8 +203,8 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
     stats: {
       timeUnits: 75,
       health: 20,
-      reactions: 70,
-      firingAccuracy: 80,
+      reactions: 62,
+      firingAccuracy: 60,
       strength: 30,
       bravery: 50,
     },
@@ -222,9 +222,9 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
     // control of one (hard-capped at a single mind control per battle).
     stats: {
       timeUnits: 58,
-      health: 50,
-      reactions: 75,
-      firingAccuracy: 62,
+      health: 48,
+      reactions: 72,
+      firingAccuracy: 50,
       strength: 40,
       bravery: 90,
       psiSkill: 60,

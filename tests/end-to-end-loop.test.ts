@@ -664,19 +664,21 @@ describe("market -> armory purchase", () => {
     const riflesBefore = campaign.armory.weapons.rifle;
     const price = MARKET_CONFIG.rifle.price;
 
-    // Veteran starts with 650 credits; a rifle costs 400, so one purchase fits.
-    expect(creditsBefore).toBeGreaterThanOrEqual(price);
+    // Veteran starts with 800 credits; a rifle costs 400, so two purchases fit.
+    expect(creditsBefore).toBeGreaterThanOrEqual(price * 2);
 
     const after = purchaseWeapon(campaign, "rifle");
     expect(after.resources.credits).toBe(creditsBefore - price);
     expect(after.armory.weapons.rifle).toBe(riflesBefore + 1);
 
-    // The remaining credits (250) are below the rifle price (400): a second
-    // purchase is now blocked by the public guard and is a no-op.
-    expect(canPurchaseWeapon(after, "rifle").ok).toBe(false);
-    const blocked = purchaseWeapon(after, "rifle");
-    expect(blocked.resources.credits).toBe(after.resources.credits);
-    expect(blocked.armory.weapons.rifle).toBe(after.armory.weapons.rifle);
+    // Spend down to broke: a second rifle empties the bank (0 credits left),
+    // so a third purchase is blocked by the public guard and is a no-op.
+    const after2 = purchaseWeapon(after, "rifle");
+    expect(after2.resources.credits).toBe(creditsBefore - price * 2);
+    expect(canPurchaseWeapon(after2, "rifle").ok).toBe(false);
+    const blocked = purchaseWeapon(after2, "rifle");
+    expect(blocked.resources.credits).toBe(after2.resources.credits);
+    expect(blocked.armory.weapons.rifle).toBe(after2.armory.weapons.rifle);
   });
 });
 

@@ -486,9 +486,9 @@ describe("morale helpers", () => {
 
   it.each<[number, number]>([
     [0, 1], // bravery 0 still recovers the minimum 1
-    [30, 3], // 6 * 30 / 60 = 3
-    [60, 6], // baseline bravery => full RECOVERY_PER_TURN
-    [120, 12], // brave veteran recovers double
+    [30, 4], // 8 * 30 / 60 = 4
+    [60, 8], // baseline bravery => full RECOVERY_PER_TURN
+    [120, 16], // brave veteran recovers double
   ])("moraleRecoveryFor scales with bravery (%i => %i)", (bravery, expected) => {
     const u = makeUnit(1, "player", { x: 0, y: 0 }, 0, {
       stats: { timeUnits: 60, health: 40, reactions: 40, firingAccuracy: 60, strength: 30, bravery },
@@ -615,11 +615,11 @@ describe("morale on casualties", () => {
 
 describe("morale recovery + panic at turn start", () => {
   it("recovers morale at the start of the unit's own turn", () => {
-    // Bravery 100 => +10/turn recovery. Start at 30 (below threshold) but
-    // recovery lifts it to 40 (>= threshold) so no panic roll fires.
+    // Bravery 60 => +8/turn recovery. Start at 25 (below threshold 30) but
+    // recovery lifts it to 33 (>= threshold) so no panic roll fires.
     const shaken = makeUnit(1, "player", { x: 5, y: 5 }, 2, {
-      morale: 30,
-      stats: { timeUnits: 60, health: 40, reactions: 40, firingAccuracy: 60, strength: 30, bravery: 100 },
+      morale: 25,
+      stats: { timeUnits: 60, health: 40, reactions: 40, firingAccuracy: 60, strength: 30, bravery: 60 },
     });
     const farEnemy = makeUnit(2, "enemy", { x: 29, y: 29 }, 6, { hp: 100, morale: 100 });
     const state = makeState([shaken, farEnemy], 5);
@@ -631,10 +631,10 @@ describe("morale recovery + panic at turn start", () => {
     );
     expect(recovery).toBeDefined();
     if (recovery?.type === "moraleChanged") {
-      expect(recovery.morale).toBe(40);
+      expect(recovery.morale).toBe(33);
     }
-    expect(shaken.morale).toBe(40);
-    // No panic: 40 is at/above the threshold.
+    expect(shaken.morale).toBe(33);
+    // No panic: 33 is at/above the threshold.
     expect(events.some((e) => e.type === "panicked" && e.unitId === 1)).toBe(false);
   });
 

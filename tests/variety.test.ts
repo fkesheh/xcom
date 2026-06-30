@@ -172,7 +172,7 @@ function makeExec(state: BattleState): AiExecutor {
 describe("new weapons", () => {
   it("cannon is a short-range, low-accuracy, high-TU heavy hitter", () => {
     const cannon = weapon("cannon");
-    expect(cannon.damage).toBe(45);
+    expect(cannon.damage).toBe(40);
     expect(cannon.range).toBeLessThanOrEqual(8); // short range
     expect(cannon.magazineSize).toBeGreaterThanOrEqual(1);
 
@@ -188,7 +188,7 @@ describe("new weapons", () => {
 
   it("sniper is a long-range, very-high-accuracy, very-high-TU precision tool", () => {
     const sniper = weapon("sniper");
-    expect(sniper.damage).toBeGreaterThanOrEqual(40);
+    expect(sniper.damage).toBeGreaterThanOrEqual(35);
     expect(sniper.range).toBeGreaterThanOrEqual(18); // long range
 
     const aimed = mode(sniper, "aimed");
@@ -207,7 +207,7 @@ describe("new enemy templates", () => {
   it("heavy is a high-HP, slow tank carrying the cannon", () => {
     const heavy = template("heavy");
     expect(heavy.faction).toBe("enemy");
-    expect(heavy.stats.health).toBe(80);
+    expect(heavy.stats.health).toBe(68);
     expect(heavy.stats.timeUnits).toBeLessThan(50); // slow
     expect(heavy.weaponId).toBe("cannon");
     expect(WEAPONS[heavy.weaponId]).toBeDefined();
@@ -226,7 +226,7 @@ describe("new enemy templates", () => {
   it("commander is a steady, high-bravery priority target with a grenade", () => {
     const commander = template("commander");
     expect(commander.faction).toBe("enemy");
-    expect(commander.stats.health).toBe(50);
+    expect(commander.stats.health).toBe(48);
     expect(commander.stats.reactions).toBeGreaterThan(70);
     expect(commander.stats.bravery).toBeGreaterThanOrEqual(90); // top of roster
     expect(commander.weaponId).toBe("plasma");

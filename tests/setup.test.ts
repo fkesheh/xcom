@@ -134,10 +134,10 @@ describe("createSkirmish", () => {
     expect(players.map((unit) => unit.name)).toEqual(["Vega", "Rook"]);
     expect(players.map((unit) => unit.campaignSoldierId)).toEqual(["soldier-01", "soldier-02"]);
     expect(players[0]?.stats.timeUnits).toBe(62);
-    expect(players[0]?.stats.health).toBe(42);
-    expect(players[0]?.stats.firingAccuracy).toBe(69);
+    expect(players[0]?.stats.health).toBe(70);
+    expect(players[0]?.stats.firingAccuracy).toBe(78);
     expect(players[1]?.stats.timeUnits).toBe(66);
-    expect(players[1]?.stats.health).toBe(48);
+    expect(players[1]?.stats.health).toBe(76);
     expect(players[1]?.stats.reactions).toBe(60);
   });
 

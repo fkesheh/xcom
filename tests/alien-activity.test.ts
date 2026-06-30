@@ -35,14 +35,14 @@ describe("un-addressed UFOs carry out their mission and cause terror", () => {
 
     const expired = advanceGeoscape(campaign, UFO_CONTACT_LIFETIME_HOURS);
 
-    // Baseline ignore penalty (22, no radar) + terror mission bonus (18) at veteran panicMult 1.0.
+    // Baseline ignore penalty (18, no radar) + terror mission bonus (18) at veteran panicMult 1.0.
     expect(expired.ufoContact).toBeUndefined();
-    expect(regionalPanicFor(expired, region)!).toBe(panicBefore + 22 + 18);
+    expect(regionalPanicFor(expired, region)!).toBe(panicBefore + 18 + 18);
 
     const report = expired.projectReports.find((entry) => entry.title === "Alien terror strike");
     expect(report).toBeDefined();
     expect(report!.summary).toContain(region);
-    expect(report!.summary).toContain("+40 panic");
+    expect(report!.summary).toContain("+36 panic");
   });
 
   it("is fully deterministic across repeated runs from the same seed", () => {
@@ -66,9 +66,9 @@ describe("un-addressed UFOs carry out their mission and cause terror", () => {
     // Let the crash-site recovery window lapse.
     const expired = advanceGeoscape(shot, CRASH_SITE_LIFETIME_HOURS);
 
-    // Only the baseline ignore penalty fires (+22); no mission-type terror bonus, no report.
+    // Only the baseline ignore penalty fires (+18); no mission-type terror bonus, no report.
     expect(expired.projectReports.some((entry) => entry.id.startsWith("alien-activity-"))).toBe(false);
-    expect(regionalPanicFor(expired, region)!).toBe(panicBefore + 22);
+    expect(regionalPanicFor(expired, region)!).toBe(panicBefore + 18);
   });
 
   it("scales the terror panic up at commander difficulty via panicMult", () => {
@@ -95,9 +95,9 @@ describe("un-addressed UFOs carry out their mission and cause terror", () => {
     const commanderDelta =
       regionalPanicFor(commanderExpired, commanderRegion)! - regionalPanicFor(commander, commanderRegion)!;
 
-    // Baseline (22) is unscaled; only the terror bonus (18) is multiplied by panicMult.
-    expect(rookieDelta).toBe(22 + Math.round(18 * 0.7));
-    expect(commanderDelta).toBe(22 + Math.round(18 * 1.4));
+    // Baseline (18) is unscaled; only the terror bonus (18) is multiplied by panicMult.
+    expect(rookieDelta).toBe(18 + Math.round(18 * 0.65));
+    expect(commanderDelta).toBe(18 + Math.round(18 * 1.3));
     expect(commanderDelta).toBeGreaterThan(rookieDelta);
   });
 });
