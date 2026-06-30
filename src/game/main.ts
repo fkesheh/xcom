@@ -48,6 +48,8 @@ import type {
   CampaignWeaponId,
   DifficultyLevel,
   OperationPlan,
+  SoldierRank,
+  SoldierStatGrowth,
 } from "../campaign/types";
 import {
   advanceGeoscape,
@@ -87,7 +89,37 @@ import type { ProjectileKind } from "./effects";
 import type { BaseView } from "./baseView";
 import type { GeoscapeView } from "./geoscape";
 import type { PlaneCombatView } from "./planeCombatView";
-import type { HudDebrief, HudHover, HudPsiInfo, HudSoldierDetail } from "./hud";
+import type {
+  HudDebrief,
+  HudDebriefCasualty,
+  HudDebriefSurvivor,
+  HudHover,
+  HudPsiInfo,
+  HudSoldierDetail,
+} from "./hud";
+
+/**
+ * Per-mission stat growth = (cumulative growth after) − (cumulative growth before).
+ * Returns undefined when either side is missing or the mission granted no growth.
+ */
+function thisMissionGrowth(
+  before: SoldierStatGrowth | undefined,
+  after: SoldierStatGrowth | undefined,
+): SoldierStatGrowth | undefined {
+  if (!before || !after) return undefined;
+  const delta: SoldierStatGrowth = {
+    timeUnits: after.timeUnits - before.timeUnits,
+    health: after.health - before.health,
+    reactions: after.reactions - before.reactions,
+    firingAccuracy: after.firingAccuracy - before.firingAccuracy,
+  };
+  const grew =
+    delta.timeUnits !== 0 ||
+    delta.health !== 0 ||
+    delta.reactions !== 0 ||
+    delta.firingAccuracy !== 0;
+  return grew ? delta : undefined;
+}
 
 function urlSeed(): number | null {
   const raw = new URLSearchParams(window.location.search).get("seed");
@@ -644,9 +676,52 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
   function currentDebrief(): HudDebrief | undefined {
     if (!completedCampaign?.lastMission) return undefined;
     const report = completedCampaign.lastMission;
-    const casualties = report.kiaSoldierIds.map(
-      (id) => completedCampaign?.soldiers.find((soldier) => soldier.id === id)?.name ?? id,
+    const soldiers = completedCampaign.soldiers;
+    const byId = new Map(soldiers.map((soldier) => [soldier.id, soldier]));
+    const before = missionBefore?.soldiers ?? new Map();
+    const elapsed = completedCampaign.clock.elapsedHours;
+
+    const kia: HudDebriefCasualty[] = report.kiaSoldierIds.map((id) => {
+      const soldier = byId.get(id);
+      return {
+        id,
+        name: soldier?.name ?? id,
+        rank: soldier?.rank ?? "rookie",
+        ...(soldier?.bio ? { bio: soldier.bio } : {}),
+      };
+    });
+
+    const survivorIds = report.deployedSoldierIds.filter(
+      (id) => !report.kiaSoldierIds.includes(id),
     );
+    const survivors: HudDebriefSurvivor[] = survivorIds.map((id) => {
+      const soldier = byId.get(id);
+      const previous = before.get(id);
+      const wounded = report.woundedSoldierIds.includes(id);
+      const woundRecoveryHours =
+        wounded && soldier?.woundedUntilHour !== undefined
+          ? Math.max(0, soldier.woundedUntilHour - elapsed)
+          : undefined;
+      const growthDelta = thisMissionGrowth(previous?.statGrowth, soldier?.statGrowth);
+      return {
+        id,
+        name: soldier?.name ?? id,
+        rank: soldier?.rank ?? "rookie",
+        ...(previous && soldier && previous.rank !== soldier.rank
+          ? { previousRank: previous.rank }
+          : {}),
+        ...(wounded
+          ? { wounded: true, ...(woundRecoveryHours !== undefined ? { woundRecoveryHours } : {}) }
+          : {}),
+        ...(growthDelta ? { statGrowth: growthDelta } : {}),
+      };
+    });
+
+    const casualties = kia.map((entry) => entry.name);
+    const missionScore = missionBefore
+      ? completedCampaign.strategic.score - missionBefore.score
+      : undefined;
+
     return {
       result: report.result,
       operation: report.codename,
@@ -657,6 +732,13 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
       threat: completedCampaign.strategic.threat,
       funding: completedCampaign.strategic.funding,
       score: completedCampaign.strategic.score,
+      kia,
+      survivors,
+      ...(missionScore !== undefined ? { missionScore } : {}),
+      ...(report.civiliansRescued !== undefined ? { civiliansRescued: report.civiliansRescued } : {}),
+      ...(report.civilianCasualties !== undefined
+        ? { civilianCasualties: report.civilianCasualties }
+        : {}),
     };
   }
 
@@ -1210,10 +1292,32 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
   }
 
   let completedCampaign: CampaignState | null = null;
+  /**
+   * Snapshot of each deployed operative's rank + stat growth, plus the strategic
+   * score, taken the instant a mission resolves. Lets the debrief derive per-mission
+   * promotions, stat growth, and the mission-score delta by diffing against the
+   * post-`recordMissionResult` campaign state.
+   */
+  let missionBefore: {
+    score: number;
+    soldiers: Map<string, { rank: SoldierRank; statGrowth?: SoldierStatGrowth }>;
+  } | null = null;
 
   function completeMission(result: "success" | "failure"): void {
     if (completedCampaign) return;
     const latest = currentCampaign ?? campaign;
+    missionBefore = {
+      score: latest.strategic.score,
+      soldiers: new Map(
+        latest.soldiers.map((soldier) => [
+          soldier.id,
+          {
+            rank: soldier.rank,
+            ...(soldier.statGrowth ? { statGrowth: soldier.statGrowth } : {}),
+          },
+        ]),
+      ),
+    };
     const deployed = state.units
       .filter((unit) => unit.faction === "player" && unit.campaignSoldierId)
       .map((unit) => unit.campaignSoldierId!);

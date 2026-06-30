@@ -22,6 +22,7 @@ import type {
 } from "../sim/types";
 import { coverDefenseFor } from "../sim/combat";
 import { visibleEnemyIds } from "../sim/index";
+import type { SoldierRank, SoldierStatGrowth } from "../campaign/types";
 
 export interface HudHover {
   kind: "target" | "move" | "blocked";
@@ -76,6 +77,29 @@ export interface HudPsiInfo {
   mcSpent: boolean;
 }
 
+/** A KIA operative surfaced by name on the debrief (the permadeath payoff). */
+export interface HudDebriefCasualty {
+  id: string;
+  name: string;
+  rank: SoldierRank;
+  /** Procedural background rolled at recruit; shown as the operative's epitaph. */
+  bio?: string;
+}
+
+/** A surviving operative, with the career progress they earned this mission. */
+export interface HudDebriefSurvivor {
+  id: string;
+  name: string;
+  rank: SoldierRank;
+  /** Rank held before this mission; present lets the HUD flag a promotion. */
+  previousRank?: SoldierRank;
+  wounded?: boolean;
+  /** Recovery hours remaining at debrief time (wounded soldiers only). */
+  woundRecoveryHours?: number;
+  /** Stat growth earned THIS mission (delta), when the controller can derive it. */
+  statGrowth?: SoldierStatGrowth;
+}
+
 export interface HudDebrief {
   result: "success" | "failure";
   operation: string;
@@ -86,11 +110,21 @@ export interface HudDebrief {
     elerium: number;
     alienData: number;
   };
+  /** Legacy KIA list (names/ids). Superseded by `kia` when the controller provides it. */
   casualties: string[];
   strategicStatus: "active" | "won" | "lost";
   threat: number;
   funding: number;
   score: number;
+  /** KIA operatives with full identity (name/rank/bio). Optional — controller-provided. */
+  kia?: HudDebriefCasualty[];
+  /** Surviving operatives with growth/promotions/wounds. Optional — controller-provided. */
+  survivors?: HudDebriefSurvivor[];
+  /** Per-mission score contribution (before → after strategic score). Drives the rating. */
+  missionScore?: number;
+  /** Civilians saved on a terror mission, when applicable. */
+  civiliansRescued?: number;
+  civilianCasualties?: number;
 }
 
 export interface HudCallbacks {
@@ -551,6 +585,126 @@ const CSS = `
   font: 850 11px/1.2 ui-monospace, monospace;
   text-transform: uppercase;
 }
+
+/* After-action report body — stacked, left-aligned sections inside the banner card. */
+#hud .debrief {
+  margin: 18px 0 6px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+#hud .debrief .eyebrow { display: block; }
+#hud .debrief-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+#hud .debrief-count {
+  color: var(--hud-muted);
+  font: 700 9px/1 ui-monospace, monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+/* Campaign win/lose strip — makes the terminal banner distinct from a regular debrief. */
+#hud .debrief-campaign {
+  padding: 11px 13px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,.1);
+}
+#hud .debrief-campaign.won { border-color: rgba(74,222,128,.45); background: rgba(74,222,128,.07); }
+#hud .debrief-campaign.lost { border-color: rgba(251,113,133,.45); background: rgba(251,113,133,.07); }
+#hud .debrief-campaign.won .eyebrow { color: var(--hud-green); }
+#hud .debrief-campaign.lost .eyebrow { color: var(--hud-red); }
+#hud .debrief-campaign-line { margin-top: 5px; color: #c3d4df; font: 600 11px/1.35 ui-monospace, monospace; }
+
+/* Loot bar — four resource chips, each a glyph + amount + label. */
+#hud .debrief-loot-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin-top: 8px; }
+#hud .loot-chip {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 8px;
+  background: rgba(0,0,0,.22);
+}
+#hud .loot-chip.zero { opacity: .38; }
+#hud .loot-glyph {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  font: 800 15px/1 ui-monospace, monospace;
+}
+#hud .loot-chip.credits .loot-glyph { color: var(--hud-amber); background: rgba(251,191,36,.14); }
+#hud .loot-chip.alloys .loot-glyph { color: #cbd5e1; background: rgba(203,213,225,.12); }
+#hud .loot-chip.elerium .loot-glyph { color: var(--hud-green); background: rgba(74,222,128,.14); }
+#hud .loot-chip.alienData .loot-glyph { color: var(--hud-cyan); background: rgba(103,232,249,.14); }
+#hud .loot-chip b { display: block; font: 850 15px/1 ui-monospace, monospace; }
+#hud .loot-chip small {
+  display: block;
+  margin-top: 4px;
+  color: var(--hud-muted);
+  font: 700 8px/1 ui-monospace, monospace;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+/* Score + strategic meta row. */
+#hud .debrief-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+#hud .debrief-meta .rating {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font: 800 9px/1.2 ui-monospace, monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+#hud .debrief-meta .rating.excellent { color: var(--hud-green); background: rgba(74,222,128,.14); }
+#hud .debrief-meta .rating.good { color: var(--hud-cyan); background: rgba(103,232,249,.12); }
+#hud .debrief-meta .rating.fair { color: var(--hud-amber); background: rgba(251,191,36,.12); }
+#hud .debrief-meta .rating.poor { color: var(--hud-red); background: rgba(251,113,133,.14); }
+
+/* Roster lists (KIA + survivors). */
+#hud .debrief-roster { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+#hud .debrief-roster li {
+  padding: 9px 11px;
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 8px;
+  background: rgba(0,0,0,.18);
+}
+#hud .debrief-roster li.kia { border-color: rgba(251,113,133,.28); background: rgba(251,113,133,.05); }
+#hud .debrief-soldier-line { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+#hud .debrief-soldier-name { font: 750 13px/1.2 ui-monospace, monospace; letter-spacing: .02em; }
+#hud .debrief-rank { color: var(--hud-cyan); font: 700 9px/1 ui-monospace, monospace; letter-spacing: .1em; text-transform: uppercase; }
+#hud .debrief-bio { margin-top: 5px; color: var(--hud-muted); font: 500 10px/1.45 ui-monospace, monospace; }
+#hud .debrief-tag { margin-top: 6px; font: 800 9px/1.2 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+#hud .debrief-tag.kia { color: var(--hud-red); }
+#hud .debrief-tag.wounded { color: var(--hud-amber); }
+#hud .debrief-tag.promoted { color: var(--hud-green); }
+#hud .debrief-growth { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 5px; }
+#hud .debrief-growth span {
+  padding: 2px 7px;
+  border-radius: 4px;
+  color: var(--hud-green);
+  background: rgba(74,222,128,.12);
+  font: 700 9px/1.2 ui-monospace, monospace;
+  letter-spacing: .03em;
+}
+#hud .debrief-empty {
+  padding: 9px 11px;
+  border: 1px dashed rgba(255,255,255,.1);
+  border-radius: 8px;
+  color: var(--hud-muted);
+  font: 600 10px/1.3 ui-monospace, monospace;
+}
 #hud .briefing-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 26px 0; }
 #hud .briefing-step { padding: 13px; border: 1px solid rgba(255,255,255,.08); border-radius: 8px; background: rgba(0,0,0,.14); }
 #hud .briefing-step b { display: block; margin: 5px 0; font-size: 13px; text-transform: uppercase; }
@@ -617,6 +771,7 @@ const CSS = `
   #hud .briefing-step { padding: 10px 12px; }
   #hud .briefing-actions { align-items: stretch; flex-direction: column; }
   #hud .briefing-actions button { width: 100%; }
+  #hud .debrief-loot-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   #hud .dossier-stats { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-height: 660px) {
@@ -1816,20 +1971,9 @@ export class Hud {
             : "Squad Lost";
     this.bannerCopy.textContent = debrief?.summary ?? "Mission report transmitted to base command.";
     this.bannerReport.hidden = !debrief;
+    this.bannerReport.className = "";
     if (debrief) {
-      const reward =
-        `+${debrief.reward.credits}C +${debrief.reward.alloys}A ` +
-        `+${debrief.reward.elerium}E +${debrief.reward.alienData}D`;
-      const casualties = debrief.casualties.length > 0 ? debrief.casualties.join(", ") : "None";
-      const campaign =
-        debrief.strategicStatus === "active"
-          ? `Threat ${debrief.threat}% / Funding ${debrief.funding} / Score ${debrief.score}`
-          : debrief.strategicStatus;
-      this.bannerReport.replaceChildren(
-        this.debriefStat("Reward", reward),
-        this.debriefStat("KIA", casualties),
-        this.debriefStat("Campaign", campaign),
-      );
+      this.bannerReport.replaceChildren(this.renderDebriefReport(debrief));
     } else {
       this.bannerReport.replaceChildren();
     }
@@ -1931,6 +2075,258 @@ export class Hud {
     strong.textContent = value;
     node.append(span, strong);
     return node;
+  }
+
+  /**
+   * Builds the cinematic after-action report: campaign strip (if over), loot bar,
+   * score/threat/funding meta, then KIA and survivor rosters. Rich fields are
+   * optional; when the controller omits them the HUD falls back to legible defaults
+   * so the debrief never reads as broken.
+   */
+  private renderDebriefReport(debrief: HudDebrief): HTMLElement {
+    const root = el("div", "debrief");
+    const status = debrief.strategicStatus;
+    if (status === "won" || status === "lost") {
+      root.appendChild(this.renderCampaignStrip(status));
+    }
+    root.appendChild(this.renderLootRow(debrief.reward));
+    root.appendChild(this.renderDebriefMeta(debrief));
+    root.appendChild(this.renderCasualtySection(debrief));
+    root.appendChild(this.renderSurvivorSection(debrief));
+    return root;
+  }
+
+  private renderCampaignStrip(status: "won" | "lost"): HTMLElement {
+    const strip = el("div", `debrief-campaign ${status}`);
+    const head = el("div", "eyebrow");
+    head.textContent = status === "won" ? "Campaign victory" : "Campaign defeat";
+    const line = el("div", "debrief-campaign-line");
+    line.textContent = status === "won"
+      ? "Containment achieved — the alien command cell is broken."
+      : "Command has collapsed. Earth's defense falls silent.";
+    strip.append(head, line);
+    return strip;
+  }
+
+  private renderLootRow(reward: HudDebrief["reward"]): HTMLElement {
+    const wrap = el("div");
+    const head = el("div", "eyebrow");
+    head.textContent = "Materiel recovered";
+    wrap.appendChild(head);
+    const row = el("div", "debrief-loot-row");
+    row.append(
+      this.lootChip("credits", "$", reward.credits, "Credits"),
+      this.lootChip("alloys", "◆", reward.alloys, "Alloys"),
+      this.lootChip("elerium", "✦", reward.elerium, "Elerium"),
+      this.lootChip("alienData", "Σ", reward.alienData, "Alien data"),
+    );
+    wrap.appendChild(row);
+    return wrap;
+  }
+
+  private lootChip(kind: string, glyph: string, amount: number, label: string): HTMLElement {
+    const chip = el("div", `loot-chip ${kind}${amount === 0 ? " zero" : ""}`);
+    const g = el("span", "loot-glyph");
+    g.textContent = glyph;
+    const txt = el("span");
+    const big = el("b");
+    big.textContent = `+${amount}`;
+    const small = el("small");
+    small.textContent = label;
+    txt.append(big, small);
+    chip.append(g, txt);
+    return chip;
+  }
+
+  private renderDebriefMeta(debrief: HudDebrief): HTMLElement {
+    const grid = el("div", "debrief-meta");
+    const hasMissionScore = debrief.missionScore !== undefined;
+    const score = hasMissionScore ? (debrief.missionScore as number) : debrief.score;
+    const rating = this.missionRating(score, hasMissionScore);
+    grid.append(
+      this.debriefScoreStat(score, rating, hasMissionScore),
+      this.debriefStat("Threat", `${debrief.threat}%`),
+      this.debriefStat("Funding", `${debrief.funding}`),
+    );
+    return grid;
+  }
+
+  private debriefScoreStat(
+    score: number,
+    rating: { label: string; cls: string },
+    isMission: boolean,
+  ): HTMLElement {
+    const node = el("div", "debrief-stat");
+    const span = el("span");
+    span.textContent = isMission ? "Mission score" : "Campaign score";
+    const strong = el("b");
+    strong.textContent = String(score);
+    const rate = el("span", `rating ${rating.cls}`);
+    rate.textContent = rating.label;
+    node.append(span, strong, rate);
+    return node;
+  }
+
+  /**
+   * Maps a numeric score to its Excellent/Good/Fair/Poor rating. Per-mission scores
+   * (a success is worth ~+100..+250, a failure ~-50) use tighter thresholds than the
+   * cumulative campaign score, which climbs across many operations.
+   */
+  private missionRating(score: number, isMission: boolean): { label: string; cls: string } {
+    if (isMission) {
+      if (score >= 150) return { label: "Excellent", cls: "excellent" };
+      if (score >= 100) return { label: "Good", cls: "good" };
+      if (score >= 0) return { label: "Fair", cls: "fair" };
+      return { label: "Poor", cls: "poor" };
+    }
+    if (score >= 500) return { label: "Excellent", cls: "excellent" };
+    if (score >= 200) return { label: "Good", cls: "good" };
+    if (score >= 0) return { label: "Fair", cls: "fair" };
+    return { label: "Poor", cls: "poor" };
+  }
+
+  private renderCasualtySection(debrief: HudDebrief): HTMLElement {
+    const section = el("div", "debrief-section");
+    const kia = debrief.kia ?? this.fallbackCasualties(debrief);
+    const head = el("div", "debrief-section-head");
+    const eyebrow = el("div", "eyebrow");
+    eyebrow.textContent = "Casualties";
+    const count = el("span", "debrief-count");
+    count.textContent = kia.length === 0 ? "No losses" : `${kia.length} KIA`;
+    head.append(eyebrow, count);
+    section.appendChild(head);
+
+    if (kia.length === 0) {
+      const empty = el("div", "debrief-empty");
+      empty.textContent = "All operatives returned safely.";
+      section.appendChild(empty);
+      return section;
+    }
+
+    const list = el("ul", "debrief-roster");
+    for (const soldier of kia) list.appendChild(this.renderCasualtyRow(soldier));
+    section.appendChild(list);
+    return section;
+  }
+
+  private renderCasualtyRow(soldier: HudDebriefCasualty): HTMLElement {
+    const li = el("li", "kia");
+    li.append(this.soldierLine(soldier.name, soldier.rank));
+    if (soldier.bio) {
+      const bio = el("div", "debrief-bio");
+      bio.textContent = soldier.bio;
+      li.appendChild(bio);
+    }
+    const tag = el("div", "debrief-tag kia");
+    tag.textContent = "Killed in action";
+    li.appendChild(tag);
+    return li;
+  }
+
+  private renderSurvivorSection(debrief: HudDebrief): HTMLElement {
+    const section = el("div", "debrief-section");
+    const survivors = debrief.survivors ?? [];
+    const total = survivors.length + (debrief.kia?.length ?? debrief.casualties.length);
+    const woundedCount = survivors.filter((s) => s.wounded).length;
+    const head = el("div", "debrief-section-head");
+    const eyebrow = el("div", "eyebrow");
+    eyebrow.textContent = "Survivors";
+    const count = el("span", "debrief-count");
+    count.textContent = total > 0
+      ? `${survivors.length} / ${total} returned${woundedCount > 0 ? ` · ${woundedCount} wounded` : ""}`
+      : "No squad";
+    head.append(eyebrow, count);
+    section.appendChild(head);
+
+    if (survivors.length === 0) {
+      const empty = el("div", "debrief-empty");
+      empty.textContent = "No operatives survived the operation.";
+      section.appendChild(empty);
+      return section;
+    }
+
+    const list = el("ul", "debrief-roster");
+    for (const soldier of survivors) list.appendChild(this.renderSurvivorRow(soldier));
+    section.appendChild(list);
+    return section;
+  }
+
+  private renderSurvivorRow(soldier: HudDebriefSurvivor): HTMLElement {
+    const li = el("li");
+    li.append(this.soldierLine(soldier.name, soldier.rank));
+
+    if (soldier.previousRank && soldier.previousRank !== soldier.rank) {
+      const promo = el("div", "debrief-tag promoted");
+      promo.textContent = `Promoted: ${this.rankLabel(soldier.previousRank)} → ${this.rankLabel(soldier.rank)}`;
+      li.appendChild(promo);
+    }
+
+    if (soldier.statGrowth) {
+      const parts = this.formatStatGrowth(soldier.statGrowth);
+      if (parts.length > 0) {
+        const growth = el("div", "debrief-growth");
+        for (const part of parts) {
+          const chip = el("span");
+          chip.textContent = part;
+          growth.appendChild(chip);
+        }
+        li.appendChild(growth);
+      }
+    }
+
+    if (soldier.wounded) {
+      const tag = el("div", "debrief-tag wounded");
+      const hours = soldier.woundRecoveryHours ?? 0;
+      tag.textContent = hours > 0 ? `Wounded · ${this.formatDuration(hours)} recovery` : "Wounded";
+      li.appendChild(tag);
+    }
+    return li;
+  }
+
+  /** Name + rank header shared by KIA and survivor rows. */
+  private soldierLine(name: string, rank: SoldierRank): HTMLElement {
+    const line = el("div", "debrief-soldier-line");
+    const nameEl = el("span", "debrief-soldier-name");
+    nameEl.textContent = name;
+    const rankEl = el("span", "debrief-rank");
+    rankEl.textContent = this.rankLabel(rank);
+    line.append(nameEl, rankEl);
+    return line;
+  }
+
+  /**
+   * When the controller only supplies the legacy `casualties` name/id list, fold it
+   * into the rich roster shape so the KIA section still reads as names (not raw ids).
+   */
+  private fallbackCasualties(debrief: HudDebrief): HudDebriefCasualty[] {
+    return debrief.casualties.map((entry, index) => ({
+      id: `legacy-${index}`,
+      name: entry,
+      rank: "rookie",
+    }));
+  }
+
+  private rankLabel(rank: SoldierRank): string {
+    return titleCase(rank);
+  }
+
+  /** Formats this-mission stat growth as "+N Stat" chips, ordered by combat impact. */
+  private formatStatGrowth(growth: SoldierStatGrowth): string[] {
+    const parts: string[] = [];
+    if (growth.firingAccuracy) parts.push(`+${growth.firingAccuracy} Accuracy`);
+    if (growth.reactions) parts.push(`+${growth.reactions} Reactions`);
+    if (growth.health) parts.push(`+${growth.health} Health`);
+    if (growth.timeUnits) parts.push(`+${growth.timeUnits} Time Units`);
+    return parts;
+  }
+
+  private formatDuration(hours: number): string {
+    const h = Math.max(0, Math.round(hours));
+    const days = Math.floor(h / 24);
+    const rem = h % 24;
+    if (days > 0 && rem > 0) return `${days}d ${rem}h`;
+    if (days > 0) return `${days}d`;
+    return `${h}h`;
   }
 
   private makeStat(parent: HTMLElement, label: string): HTMLElement {
