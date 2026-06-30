@@ -57,6 +57,7 @@ import {
   MANUFACTURING_PROJECTS,
   MEDBAY_FACILITY_ID,
   RESEARCH_COSTS,
+  RESEARCH_IDS,
   facilityConstructionDuration,
   researchDuration,
   researchCost,
@@ -75,6 +76,7 @@ import {
   STARTING_REGIONAL_PANIC,
   updateCampaignBase,
 } from "../src/campaign/storage";
+import { ITEMS, WEAPONS } from "../src/sim/content";
 import type { CampaignState, MissionType, UfoContact } from "../src/campaign/types";
 
 describe("campaign state", () => {
@@ -1022,11 +1024,11 @@ describe("manufacturing catalog", () => {
     };
   }
 
-  it("exposes the original three weapon projects plus five new gear projects", () => {
+  it("exposes the original three weapon projects plus three gear projects", () => {
     const ids = MANUFACTURING_PROJECTS.map((project) => project.id);
-    expect(ids).toHaveLength(8);
+    expect(ids).toHaveLength(6);
     expect(new Set(ids)).toEqual(
-      new Set(["pistol", "rifle", "plasma", "grenade", "medkit", "sniper", "armor", "cannon"]),
+      new Set(["pistol", "rifle", "plasma", "grenade", "medkit", "cannon"]),
     );
     // The original three projects still produce their weapon into armory.weapons.
     for (const id of ["pistol", "rifle", "plasma"] as const) {
@@ -1035,20 +1037,16 @@ describe("manufacturing catalog", () => {
     }
   });
 
-  it("fabricates an item batch (grenades) and single items (medkit, sniper) into armory.items", () => {
+  it("fabricates an item batch (grenades) and single items (medkit) into armory.items", () => {
     const before = stocked();
     const grenadeStarted = startManufacturing(before, "grenade");
     const grenadeDone = advanceGeoscape(grenadeStarted, manufacturingDuration(before, "grenade"));
     const medkitStarted = startManufacturing(grenadeDone, "medkit");
     const medkitDone = advanceGeoscape(medkitStarted, manufacturingDuration(grenadeDone, "medkit"));
-    const sniperStarted = startManufacturing(medkitDone, "sniper");
-    const sniperDone = advanceGeoscape(sniperStarted, manufacturingDuration(medkitDone, "sniper"));
 
-    // Frag grenade project fabricates a batch of 2; medkit and sniper add one each.
+    // Frag grenade project fabricates a batch of 2; medkit adds one.
     expect(grenadeDone.armory.items?.grenade).toBe((before.armory.items?.grenade ?? 0) + 2);
     expect(medkitDone.armory.items?.medkit).toBe((before.armory.items?.medkit ?? 0) + 1);
-    // A sniper rifle is durable gear, not one of the four CampaignWeaponId slots, so it stocks as an item.
-    expect(sniperDone.armory.items?.sniper).toBe(1);
     // Completing clears the active slot and logs a manufacturing report.
     expect(grenadeDone.activeManufacturing).toBeUndefined();
     expect(grenadeDone.projectReports[0]).toMatchObject({ kind: "manufacturing", id: "grenade" });
@@ -1069,23 +1067,51 @@ describe("manufacturing catalog", () => {
     expect(completed.projectReports[0]).toMatchObject({ kind: "manufacturing", id: "cannon" });
   });
 
-  it("fabricates alloy armor into armory.items once alloy armor research clears", () => {
-    const base = stocked();
-    expect(canStartManufacturing(base, "armor")).toBe(false);
-    const armored = completeResearch(base, "alloyArmor");
-    expect(canStartManufacturing(armored, "armor")).toBe(true);
-
-    const started = startManufacturing(armored, "armor");
-    const completed = advanceGeoscape(started, manufacturingDuration(armored, "armor"));
-    expect(completed.armory.items?.armor).toBe((armored.armory.items?.armor ?? 0) + 1);
+  it("manufactures every catalogue project into gear that resolves to a real battle definition", () => {
+    // Gear that doesn't resolve to a Weapon or Item definition is invisible in
+    // the loadout UI and has no battle effect, so the catalogue must only
+    // advertise gear that works end-to-end. Flush resources and complete every
+    // research line so even the cannon's heavy-plasma chain is startable.
+    let ready: CampaignState = {
+      ...createCampaign(BASE, 12345),
+      resources: { credits: 10000, alloys: 500, elerium: 100, alienData: 100 },
+    };
+    for (const id of RESEARCH_IDS) {
+      ready = completeResearch(ready, id);
+    }
+    for (const project of MANUFACTURING_PROJECTS) {
+      expect(canStartManufacturing(ready, project.id), `${project.id} must be startable`).toBe(true);
+      const completed = advanceGeoscape(
+        startManufacturing(ready, project.id),
+        manufacturingDuration(ready, project.id),
+      );
+      const { product } = project;
+      if (product.kind === "weapon") {
+        expect(completed.armory.weapons[product.weaponId]).toBe(
+          ready.armory.weapons[product.weaponId] + product.quantity,
+        );
+        expect(
+          WEAPONS[product.weaponId],
+          `${product.weaponId} must resolve to a real Weapon definition`,
+        ).toBeDefined();
+      } else {
+        expect(completed.armory.items?.[product.itemId] ?? 0).toBe(
+          (ready.armory.items?.[product.itemId] ?? 0) + product.quantity,
+        );
+        expect(
+          ITEMS[product.itemId],
+          `${product.itemId} must resolve to a real Item definition`,
+        ).toBeDefined();
+      }
+    }
   });
 
   it("keeps the workshop committed to a single manufacturing order at a time", () => {
     const before = stocked();
     const started = startManufacturing(before, "grenade");
-    expect(canStartManufacturing(started, "sniper")).toBe(false);
+    expect(canStartManufacturing(started, "medkit")).toBe(false);
     // While busy, starting a second order is a no-op.
-    expect(startManufacturing(started, "sniper")).toBe(started);
+    expect(startManufacturing(started, "medkit")).toBe(started);
   });
 });
 

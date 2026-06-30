@@ -442,9 +442,11 @@ export interface ResearchProject {
 /**
  * What a manufacturing project fabricates on completion. Weapons land in
  * `armory.weapons` (one of the fixed CampaignWeaponId slots); everything else
- * lands in the free-form `armory.items` stock — consumables like grenades and
- * medkits, plus durable gear that isn't a weapon slot (sniper rifles, armor
- * suits). `quantity` lets a single run fabricate a batch (e.g. of grenades).
+ * lands in the free-form `armory.items` stock as consumables (grenades,
+ * medkits). Every product id must resolve to a real battle-side Weapon or Item
+ * definition so the gear is visible in the loadout UI and effective in battle;
+ * projects whose product has no such definition are intentionally omitted.
+ * `quantity` lets a single run fabricate a batch (e.g. of grenades).
  */
 export type ManufacturingProduct =
   | { kind: "weapon"; weaponId: CampaignWeaponId; quantity: number }
@@ -641,23 +643,6 @@ export const MANUFACTURING_PROJECTS: readonly ManufacturingProject[] = [
     description: "Assemble a trauma kit so medics can stabilize the wounded in the field.",
     durationHours: 14,
     cost: { credits: 90, alloys: 2, elerium: 1, alienData: 2 },
-  },
-  {
-    id: "sniper",
-    product: { kind: "item", itemId: "sniper", quantity: 1 },
-    title: "Sniper rifle",
-    description: "Build a precision long arm for a dedicated marksman.",
-    durationHours: 20,
-    cost: { credits: 140, alloys: 6, elerium: 0, alienData: 0 },
-  },
-  {
-    id: "armor",
-    product: { kind: "item", itemId: "armor", quantity: 1 },
-    title: "Alloy armor",
-    description: "Forge recovered alien alloys into a hardened personal armor suit.",
-    durationHours: 30,
-    cost: { credits: 180, alloys: 14, elerium: 2, alienData: 0 },
-    requiresResearch: "alloyArmor",
   },
   {
     id: "cannon",
