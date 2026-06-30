@@ -1683,7 +1683,9 @@ export class Hud {
   ): HTMLElement {
     const isGrenade = def.kind === "grenade";
     const isSmoke = def.kind === "smoke";
-    const isThrowable = isGrenade || isSmoke;
+    const isProxMine = def.kind === "proxMine";
+    const isScanner = def.kind === "scanner";
+    const isThrowable = isGrenade || isSmoke || isProxMine;
     const action: ItemActionKind = isThrowable ? "throw" : "use";
     const verb = isThrowable ? "Throw" : "Use";
     const cost = itemActionTuCost(maxTu, def.tuPercent, action);
@@ -1698,7 +1700,11 @@ export class Hud {
       ? `Throw ${def.name} (blast ${def.blastRadius ?? 1}, ${def.throwRange ?? 6} range) - ${cost} TU`
       : isSmoke
         ? `Throw ${def.name} (smoke cloud ${def.blastRadius ?? 2}, ${def.throwRange ?? 6} range) - ${cost} TU`
-        : `Use ${def.name} on an adjacent ally (heals ${def.healAmount ?? 0}) - ${cost} TU`;
+        : isProxMine
+          ? `Throw ${def.name} (mine, blast ${def.blastRadius ?? 2}, ${def.throwRange ?? 6} range) - ${cost} TU`
+          : isScanner
+            ? `Use ${def.name} (reveals enemies within ${def.scanRadius ?? 8} tiles through walls) - ${cost} TU`
+            : `Use ${def.name} on an adjacent ally (heals ${def.healAmount ?? 0}) - ${cost} TU`;
     const label = el("span", "item-label");
     const name = el("b");
     name.textContent = def.name;
@@ -1887,7 +1893,7 @@ export class Hud {
       small.textContent =
         inst.primed
           ? `x${inst.uses} - primed ${inst.fuseTurns ?? 1}t`
-          : `x${inst.uses}${def?.kind === "grenade" ? " - blast" : def?.kind === "smoke" ? " - smoke" : def?.kind === "medkit" ? " - heal" : ""}`;
+          : `x${inst.uses}${def?.kind === "grenade" ? " - blast" : def?.kind === "smoke" ? " - smoke" : def?.kind === "medkit" ? " - heal" : def?.kind === "scanner" ? " - scan" : def?.kind === "proxMine" ? " - mine" : ""}`;
       li.append(name, small);
       return li;
     });
@@ -1953,7 +1959,7 @@ export class Hud {
       ["01", "Move", "Click a green path to advance. Every tile spends Time Units."],
       ["02", "Engage", "Hover a hostile for honest hit odds, then click to fire."],
       ["03", "Recover", "Click the power-source beacon to move adjacent or secure it."],
-      ["04", "Equip", "Throw frag grenades for blast damage, prime them to arm a fuse, and use medkits on adjacent allies to heal."],
+      ["04", "Equip", "Throw frag grenades for blast damage, prime them to arm a fuse, use medkits on adjacent allies to heal, sweep with a motion scanner to reveal nearby enemies, and plant proximity mines to ambush movers."],
     ];
     for (const [number, heading, copy] of steps) {
       const step = el("div", "briefing-step");

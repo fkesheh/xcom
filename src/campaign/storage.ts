@@ -439,13 +439,25 @@ export interface ResearchProject {
   unlocks?: ResearchUnlocks;
 }
 
+/**
+ * What a manufacturing project fabricates on completion. Weapons land in
+ * `armory.weapons` (one of the fixed CampaignWeaponId slots); everything else
+ * lands in the free-form `armory.items` stock — consumables like grenades and
+ * medkits, plus durable gear that isn't a weapon slot (sniper rifles, armor
+ * suits). `quantity` lets a single run fabricate a batch (e.g. of grenades).
+ */
+export type ManufacturingProduct =
+  | { kind: "weapon"; weaponId: CampaignWeaponId; quantity: number }
+  | { kind: "item"; itemId: string; quantity: number };
+
 export interface ManufacturingProject {
   id: ManufacturingProjectId;
-  weaponId: CampaignWeaponId;
+  product: ManufacturingProduct;
   title: string;
   description: string;
   durationHours: number;
   cost: CampaignResources;
+  /** Prerequisite research that must be completed before this project can start. */
   requiresResearch?: ResearchId;
 }
 
@@ -591,7 +603,7 @@ export interface ResearchTreeNode {
 export const MANUFACTURING_PROJECTS: readonly ManufacturingProject[] = [
   {
     id: "pistol",
-    weaponId: "pistol",
+    product: { kind: "weapon", weaponId: "pistol", quantity: 1 },
     title: "Sidearm",
     description: "Machine a compact backup weapon for rookies, scouts, or wounded veterans.",
     durationHours: 8,
@@ -599,7 +611,7 @@ export const MANUFACTURING_PROJECTS: readonly ManufacturingProject[] = [
   },
   {
     id: "rifle",
-    weaponId: "rifle",
+    product: { kind: "weapon", weaponId: "rifle", quantity: 1 },
     title: "Service rifle",
     description: "Assemble another standard long arm for replacement troops.",
     durationHours: 12,
@@ -607,14 +619,60 @@ export const MANUFACTURING_PROJECTS: readonly ManufacturingProject[] = [
   },
   {
     id: "plasma",
-    weaponId: "plasma",
+    product: { kind: "weapon", weaponId: "plasma", quantity: 1 },
     title: "Plasma caster",
     description: "Fabricate a recovered emitter around an alien alloy frame.",
     durationHours: 36,
     cost: { credits: 160, alloys: 8, elerium: 2, alienData: 2 },
     requiresResearch: "plasmaWeapons",
   },
+  {
+    id: "grenade",
+    product: { kind: "item", itemId: "grenade", quantity: 2 },
+    title: "Frag grenade",
+    description: "Press a batch of alloy-cased fragmentation grenades for the squad.",
+    durationHours: 6,
+    cost: { credits: 50, alloys: 3, elerium: 0, alienData: 0 },
+  },
+  {
+    id: "medkit",
+    product: { kind: "item", itemId: "medkit", quantity: 1 },
+    title: "Field medkit",
+    description: "Assemble a trauma kit so medics can stabilize the wounded in the field.",
+    durationHours: 14,
+    cost: { credits: 90, alloys: 2, elerium: 1, alienData: 2 },
+  },
+  {
+    id: "sniper",
+    product: { kind: "item", itemId: "sniper", quantity: 1 },
+    title: "Sniper rifle",
+    description: "Build a precision long arm for a dedicated marksman.",
+    durationHours: 20,
+    cost: { credits: 140, alloys: 6, elerium: 0, alienData: 0 },
+  },
+  {
+    id: "armor",
+    product: { kind: "item", itemId: "armor", quantity: 1 },
+    title: "Alloy armor",
+    description: "Forge recovered alien alloys into a hardened personal armor suit.",
+    durationHours: 30,
+    cost: { credits: 180, alloys: 14, elerium: 2, alienData: 0 },
+    requiresResearch: "alloyArmor",
+  },
+  {
+    id: "cannon",
+    product: { kind: "weapon", weaponId: "cannon", quantity: 1 },
+    title: "Heavy plasma cannon",
+    description: "Fabricate a vehicle-grade anti-materiel plasma platform.",
+    durationHours: 40,
+    cost: { credits: 200, alloys: 12, elerium: 4, alienData: 2 },
+    requiresResearch: "heavyPlasma",
+  },
 ] as const;
+
+export const MANUFACTURING_PROJECT_IDS: readonly ManufacturingProjectId[] = MANUFACTURING_PROJECTS.map(
+  (project) => project.id,
+);
 
 const STARTING_SOLDIER_NAMES = ["Vega", "Rook", "Mason", "Pike", "Cole", "Reyes"] as const;
 const RECRUIT_NAMES = ["Knox", "Drake", "Sloane", "Hart", "Frost", "Wren"] as const;
@@ -1405,6 +1463,13 @@ export function manufacturingProject(id: ManufacturingProjectId): ManufacturingP
   return MANUFACTURING_PROJECTS.find((project) => project.id === id)!;
 }
 
+/** Deposits a fabricated product into the armory: weapons into `weapons`, items into `items`. */
+function addManufacturingProduct(armory: CampaignArmory, product: ManufacturingProduct): CampaignArmory {
+  return product.kind === "weapon"
+    ? addWeapon(armory, product.weaponId, product.quantity)
+    : addItemStock(armory, product.itemId, product.quantity);
+}
+
 export function manufacturingDuration(campaign: CampaignState, id: ManufacturingProjectId): number {
   const base = manufacturingProject(id).durationHours;
   return Math.max(4, base - (hasBaseFacility(campaign, "workshop-2") ? 8 : 0));
@@ -1451,7 +1516,7 @@ export function completeFinishedManufacturing(campaign: CampaignState): Campaign
   return addProjectReport({
     ...campaign,
     activeManufacturing: undefined,
-    armory: addWeapon(campaign.armory, project.weaponId, 1),
+    armory: addManufacturingProduct(campaign.armory, project.product),
   }, manufacturingReport(project, campaign.clock.elapsedHours));
 }
 
@@ -1473,11 +1538,16 @@ function constructionReport(facility: BaseFacility, completedAtHour: number): Pr
 }
 
 function manufacturingReport(project: ManufacturingProject, completedAtHour: number): ProjectReport {
+  const { product } = project;
+  const delivered =
+    product.quantity === 1
+      ? `one ${project.title.toLowerCase()}`
+      : `${product.quantity} ${product.kind === "weapon" ? product.weaponId : product.itemId}s`;
   return {
     kind: "manufacturing",
     id: project.id,
     title: `${project.title} complete`,
-    summary: `Workshop delivered one ${project.title.toLowerCase()} to the armory.`,
+    summary: `Workshop delivered ${delivered} to the armory.`,
     completedAtHour,
   };
 }
@@ -1936,7 +2006,7 @@ function isResearchId(value: unknown): value is ResearchId {
 }
 
 function isManufacturingProjectId(value: unknown): value is ManufacturingProjectId {
-  return value === "rifle" || value === "pistol" || value === "plasma";
+  return typeof value === "string" && (MANUFACTURING_PROJECT_IDS as readonly string[]).includes(value);
 }
 
 function addWeapon(armory: CampaignArmory, weaponId: CampaignWeaponId, count: number): CampaignArmory {

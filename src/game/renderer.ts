@@ -581,6 +581,26 @@ export class Renderer {
     metalness: 0,
     depthWrite: false,
   });
+  // Deployed item markers: proximity mines (small red dot per planted tile) and
+  // motion-scanner pulses (a faint cyan pad under each scanning unit). Built per
+  // sync from state.mines / unit.scanRadius, mirroring the smoke-cloud pattern.
+  private readonly markerGroup = new Group();
+  private readonly markerGeometry = new SphereGeometry(1, 12, 8);
+  private readonly mineMaterial = new MeshStandardMaterial({
+    color: 0xff3b30,
+    emissive: 0xff3b30,
+    emissiveIntensity: 0.8,
+    roughness: 0.5,
+    metalness: 0,
+    transparent: true,
+    opacity: 0.95,
+  });
+  private readonly scannerMaterial = new MeshBasicMaterial({
+    color: 0x6ee7ff,
+    transparent: true,
+    opacity: 0.12,
+    depthWrite: false,
+  });
   private selectionRing: Mesh | null = null;
   private selectionHalo: Mesh | null = null;
   private hoverMarker: Mesh | null = null;
@@ -631,6 +651,7 @@ export class Renderer {
     this.ambient = new AmbientLight(0xffffff, 0.15);
     this.scene.add(this.tileGroup, this.unitGroup, this.fxGroup, this.previewGroup);
     this.scene.add(this.smokeGroup);
+    this.scene.add(this.markerGroup);
     this.addLights();
 
     // Post-processing: bloom only catches emissive accents / FX / bright glints.
@@ -1440,6 +1461,7 @@ export class Renderer {
     this.updateSelectionRing(state);
     this.syncObjectiveMarkers(state);
     this.syncSmokeClouds(state);
+    this.syncDeployableMarkers(state);
   }
 
   /**
@@ -1471,6 +1493,39 @@ export class Renderer {
       cluster.add(puffB);
       cluster.position.set(w.x, 0.5, w.z);
       this.smokeGroup.add(cluster);
+    }
+  }
+
+  /**
+   * Rebuild the deployable-item markers from state. Each planted proximity mine
+   * renders as a small emissive red dot lifted just above its tile; each unit
+   * with an active scanner reveal gets a faint flattened cyan pad on the ground
+   * sized to its scan radius (a best-effort pulse — no animation). The shared
+   * geometry/material are reused; only the per-deployable meshes are rebuilt.
+   */
+  private syncDeployableMarkers(state: BattleState): void {
+    for (const child of [...this.markerGroup.children]) {
+      this.markerGroup.remove(child);
+    }
+    const mines = state.mines;
+    if (mines) {
+      for (const mine of mines) {
+        const w = tileToWorld(mine.pos.x, mine.pos.y, 0);
+        const dot = new Mesh(this.markerGeometry, this.mineMaterial);
+        dot.scale.setScalar(0.22);
+        dot.position.set(w.x, 0.35, w.z);
+        this.markerGroup.add(dot);
+      }
+    }
+    for (const u of state.units) {
+      if (!u.alive || !u.scanRadius || u.scanRadius <= 0) continue;
+      const w = tileToWorld(u.pos.x, u.pos.y, 0);
+      const r = u.scanRadius + 0.5;
+      const pad = new Mesh(this.markerGeometry, this.scannerMaterial);
+      // Flattened sphere => a thin glowing disc reading as the scan area.
+      pad.scale.set(r, 0.06, r);
+      pad.position.set(w.x, 0.04, w.z);
+      this.markerGroup.add(pad);
     }
   }
 
@@ -1902,6 +1957,13 @@ export class Renderer {
     }
     this.smokeGeometry.dispose();
     this.smokeMaterial.dispose();
+    // Deployable-item markers (mines + scanner pulses): same pattern.
+    for (const child of [...this.markerGroup.children]) {
+      this.markerGroup.remove(child);
+    }
+    this.markerGeometry.dispose();
+    this.mineMaterial.dispose();
+    this.scannerMaterial.dispose();
     // Release the shared material/texture/env cache after the per-tile clones
     // (above) are gone, then the composer's render targets.
     disposeMaterials();

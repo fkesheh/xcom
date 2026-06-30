@@ -19,7 +19,15 @@ export type CampaignStatus = "active" | "won" | "lost";
 export type SoldierStatus = "active" | "wounded" | "kia";
 export type SoldierRank = "rookie" | "squaddie" | "sergeant" | "captain";
 export type CampaignWeaponId = "rifle" | "pistol" | "plasma" | "cannon";
-export type ManufacturingProjectId = "rifle" | "pistol" | "plasma";
+export type ManufacturingProjectId =
+  | "rifle"
+  | "pistol"
+  | "plasma"
+  | "cannon"
+  | "sniper"
+  | "grenade"
+  | "medkit"
+  | "armor";
 export type DifficultyLevel = "rookie" | "veteran" | "commander";
 export type MissionType = "crashSite" | "terror" | "landedUfo" | "baseDefense";
 export type CouncilRegion =

@@ -180,7 +180,7 @@ export interface Weapon {
 }
 
 /** Kind of a consumable battlefield item. */
-export type ItemKind = "grenade" | "medkit" | "smoke";
+export type ItemKind = "grenade" | "medkit" | "smoke" | "scanner" | "proxMine";
 
 /** A consumable battlefield item definition (data-driven; names are rebrandable). */
 export interface Item {
@@ -197,6 +197,8 @@ export interface Item {
   throwRange?: number;
   /** Medkit: HP restored per use. */
   healAmount?: number;
+  /** Scanner: Chebyshev radius (tiles) of the motion reveal applied on use. */
+  scanRadius?: number;
 }
 
 /** A specific carried instance of an {@link Item}. */
@@ -231,6 +233,20 @@ export interface SmokeCloud {
   pos: Vec2;
   radius: number;
   turnsLeft: number;
+}
+
+/**
+ * A planted proximity mine. inert until a unit whose faction differs from the
+ * placer's MOVES onto or adjacent to {@link pos}, at which point it detonates a
+ * Chebyshev {@link radius} blast dealing {@link damage} (see resolveBlast). The
+ * placer's own faction never trips it; the blast itself is indiscriminate.
+ */
+export interface Mine {
+  pos: Vec2;
+  radius: number;
+  damage: number;
+  /** Faction of the unit that planted the mine; its members never trigger it. */
+  placedByFaction: Faction;
 }
 
 /** A template used to spawn units (data-driven content). */
@@ -285,6 +301,12 @@ export interface Unit {
   controlledByFaction?: Faction;
   /** Turns of mind control remaining; decremented once per round, reverting at 0. */
   mcTurnsLeft?: number;
+  /**
+   * Motion-scanner reveal radius. Set when a unit activates a scanner; while set,
+   * los.visibleEnemyIds treats every enemy within this Chebyshev radius as seen
+   * (through walls) for the rest of the turn. Cleared at each faction's turn start.
+   */
+  scanRadius?: number;
   sightRange: number;
   visionHalfAngleDeg: number;
 }
@@ -335,6 +357,12 @@ export interface BattleState {
    * sight/fire across its tiles and ticks down once per round; see SmokeCloud.
    */
   smokeClouds?: SmokeCloud[];
+  /**
+   * Active proximity mines (planted via a thrown proxMine). Each detonates when a
+   * non-placer-faction unit moves onto or adjacent to its tile; see Mine. Removed
+   * once detonated.
+   */
+  mines?: Mine[];
   /**
    * Mind-control hard-cap counter: how many mind-control attempts have landed
    * this battle. Capped at {@link PSI.MC_MAX_PER_BATTLE} (1) — at most one MC
@@ -399,6 +427,15 @@ export type GameEvent =
   | { type: "turnEnded"; faction: Faction }
   | { type: "gameOver"; status: BattleStatus }
   | { type: "itemThrown"; unitId: UnitId; itemId: string; from: Vec2; to: Vec2; tuLeft: number }
+  | {
+      type: "scanActivated";
+      unitId: UnitId;
+      itemId: string;
+      /** Chebyshev radius of the motion reveal now active on the unit. */
+      radius: number;
+      tuLeft: number;
+    }
+  | { type: "minePlaced"; unitId: UnitId; itemId: string; pos: Vec2; tuLeft: number }
   | { type: "blastDetonated"; itemId: string; center: Vec2; radius: number; hits: BlastHit[] }
   | { type: "itemUsed"; unitId: UnitId; targetId: UnitId; itemId: string; healed: number; tuLeft: number }
   | { type: "panicked"; unitId: UnitId; behavior: PanicBehavior }
@@ -544,6 +581,28 @@ export const SMOKE = {
   DURATION_TURNS: 3,
   /** Cloud radius (Chebyshev tiles) when the smoke item omits blastRadius. */
   DEFAULT_RADIUS: 2,
+} as const;
+
+/**
+ * Motion scanner tuning. On use, the unit gains a `scanRadius` reveal: every
+ * enemy within that many Chebyshev tiles becomes visible through walls for the
+ * rest of the turn (see los.visibleEnemyIds). The reveal lapses at turn handover.
+ */
+export const MOTION_SCANNER = {
+  /** Default reveal radius (Chebyshev tiles) when the item omits scanRadius. */
+  DEFAULT_RADIUS: 8,
+} as const;
+
+/**
+ * Proximity mine tuning. A thrown mine plants at the target tile and detonates
+ * when a non-placer-faction unit moves onto or adjacent to it, resolving a blast
+ * (radius + damage) at that position. Defaults apply when the item omits a field.
+ */
+export const PROX_MINE = {
+  /** Default Chebyshev blast radius when the item omits blastRadius. */
+  DEFAULT_RADIUS: 2,
+  /** Default blast damage at the mine's center when the item omits damage. */
+  DEFAULT_DAMAGE: 50,
 } as const;
 
 /**

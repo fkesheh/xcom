@@ -19,6 +19,7 @@ import type {
   Dir8,
   Faction,
   GameEvent,
+  Item,
   ItemInstance,
   PanicBehavior,
   PsiKind,
@@ -29,7 +30,7 @@ import type {
   UnitStance,
   Vec2,
 } from "./types";
-import { DIR8_VECTORS, MORALE, PSI, SMOKE, STANCE, TU_COST } from "./types";
+import { DIR8_VECTORS, MORALE, MOTION_SCANNER, PROX_MINE, PSI, SMOKE, STANCE, TU_COST } from "./types";
 import { cellIndex, destroyCoverAt, moveCost } from "./grid";
 import { blocksMove, inBounds } from "./grid";
 import { canSee, dir8Towards, lineOfFire, visibleEnemyIds, visibleTiles } from "./los";
@@ -381,6 +382,18 @@ export function executeMove(state: BattleState, unitId: UnitId, to: Vec2): GameE
       tuLeft: unit.tu,
     });
 
+    // Proximity mine: detonates the moment a mover steps onto or adjacent to a
+    // planted mine whose faction differs from the placer's (friendlies are
+    // spared). Resolved before reaction fire so the blast reads as the trigger.
+    events.push(...detonateMinesForMover(state, unit));
+    if (state.status !== "playing") break;
+    if (!unit.alive) {
+      events.push(...dropObjectiveIfCarrierDown(state, unit.id));
+      const over = checkVictory(state);
+      if (over) events.push(over);
+      break;
+    }
+
     events.push(...triggerReactions(state, unit));
 
     if (!unit.alive) {
@@ -397,6 +410,53 @@ export function executeMove(state: BattleState, unitId: UnitId, to: Vec2): GameE
     if (state.status !== "playing") break;
   }
 
+  return events;
+}
+
+/**
+ * Detonate any proximity mine the mover has just stepped onto or adjacent to.
+ * Only mines planted by a faction DIFFERENT from the mover's trip (the placer's
+ * own side is spared); the blast itself is indiscriminate, so any unit in radius
+ * — including friendlies — takes damage. Each tripped mine resolves an area blast
+ * at its position, chews through destructible cover like a grenade, emits a
+ * `blastDetonated` plus per-casualty morale/died events, and is then removed.
+ * Deterministic: mines are checked in insertion order; spent mines are removed
+ * back-to-front so the in-place splice stays index-stable.
+ */
+function detonateMinesForMover(state: BattleState, mover: Unit): GameEvent[] {
+  const events: GameEvent[] = [];
+  if (!state.mines || state.mines.length === 0) return events;
+  const spent: number[] = [];
+  for (let i = 0; i < state.mines.length; i++) {
+    const mine = state.mines[i]!;
+    if (mine.placedByFaction === mover.faction) continue; // friendlies don't trip it
+    if (chebyshev(mover.pos, mine.pos) > 1) continue; // must be on/adjacent
+    spent.push(i);
+    const { hits } = resolveBlast(state, mine.pos, mine.radius, mine.damage);
+    destroyCoverInBlast(state, mine.pos, mine.radius);
+    state.log.push(`${mover.name} trips a proximity mine.`);
+    events.push({
+      type: "blastDetonated",
+      itemId: "proxMine",
+      center: { x: mine.pos.x, y: mine.pos.y },
+      radius: mine.radius,
+      hits,
+    });
+    for (const hit of hits) {
+      events.push(...moraleEventsForCasualty(state, hit.unitId, hit.killed));
+      if (hit.killed) {
+        events.push({ type: "died", unitId: hit.unitId });
+        events.push(...dropObjectiveIfCarrierDown(state, hit.unitId));
+      }
+    }
+  }
+  for (let j = spent.length - 1; j >= 0; j--) {
+    state.mines.splice(spent[j]!, 1);
+  }
+  if (spent.length > 0) {
+    const over = checkVictory(state);
+    if (over) events.push(over);
+  }
   return events;
 }
 
@@ -561,18 +621,24 @@ function destroyCoverInBlast(state: BattleState, center: Vec2, radius: number): 
 }
 
 /**
- * Throw a grenade or smoke grenade at `target` and resolve its effect. Performs
- * no faction check: the same path serves the player command and the enemy AI
- * executor (mirroring how executeMove/executeShoot back the AiExecutor
- * move/shoot). TU is spent and the charge consumed. A frag grenade resolves an
- * area blast (with morale/died events for every struck unit); a smoke grenade
- * instead deploys a line-of-sight-blocking cloud at the impact tile. Throwing
- * does NOT trigger reaction fire.
+ * Throw a grenade, smoke grenade, or proximity mine at `target` and resolve its
+ * effect. Performs no faction check: the same path serves the player command and
+ * the enemy AI executor (mirroring how executeMove/executeShoot back the
+ * AiExecutor move/shoot). TU is spent and the charge consumed. A frag grenade
+ * resolves an area blast (with morale/died events for every struck unit); a smoke
+ * grenade instead deploys a line-of-sight-blocking cloud at the impact tile; a
+ * proximity mine plants at the impact tile and detonates only later, when a
+ * non-placer-faction unit moves onto or adjacent to it (see executeMove).
+ * Throwing does NOT trigger reaction fire.
  */
 function performThrow(state: BattleState, unit: Unit, target: Vec2, itemId: string): GameEvent[] {
   const inst = unit.items?.find((it) => it.itemId === itemId && it.uses > 0);
   const def = state.items?.[itemId];
-  if (!inst || !def || (def.kind !== "grenade" && def.kind !== "smoke")) {
+  if (
+    !inst ||
+    !def ||
+    (def.kind !== "grenade" && def.kind !== "smoke" && def.kind !== "proxMine")
+  ) {
     return [{ type: "blocked", reason: "no grenade" }];
   }
   const cost = Math.ceil((unit.stats.timeUnits * def.tuPercent) / 100);
@@ -612,6 +678,30 @@ function performThrow(state: BattleState, unit: Unit, target: Vec2, itemId: stri
     return events;
   }
 
+  // A proximity mine plants at the impact tile with NO immediate blast. It arms
+  // itself and waits: when any unit whose faction differs from the placer's
+  // moves onto or adjacent to the mined tile, it detonates (see executeMove).
+  if (def.kind === "proxMine") {
+    const radius = def.blastRadius ?? PROX_MINE.DEFAULT_RADIUS;
+    const damage = def.damage ?? PROX_MINE.DEFAULT_DAMAGE;
+    if (!state.mines) state.mines = [];
+    state.mines.push({
+      pos: { x: target.x, y: target.y },
+      radius,
+      damage,
+      placedByFaction: unit.faction,
+    });
+    state.log.push(`${unit.name} plants a ${def.name}.`);
+    events.push({
+      type: "minePlaced",
+      unitId: unit.id,
+      itemId,
+      pos: { x: target.x, y: target.y },
+      tuLeft: unit.tu,
+    });
+    return events;
+  }
+
   const radius = def.blastRadius ?? 1;
   const { hits } = resolveBlast(state, target, radius, def.damage ?? 0);
   // A frag grenade chews through cover: destructible tiles in the blast become
@@ -643,17 +733,27 @@ function performThrow(state: BattleState, unit: Unit, target: Vec2, itemId: stri
   return events;
 }
 
-/** Use a medkit on an adjacent ally, restoring HP capped at the target's max. */
+/** Use a medkit on an adjacent ally, or activate a motion scanner on the user. */
 function executeUseItem(
   state: BattleState,
   unit: Unit,
   targetId: UnitId,
   itemId: string,
 ): GameEvent[] {
-  const target = unitById(state, targetId);
-  if (!target || !target.alive) return [{ type: "blocked", reason: "no target" }];
   const inst = unit.items?.find((it) => it.itemId === itemId && it.uses > 0);
   const def = state.items?.[itemId];
+
+  // Motion scanner: a self-carried device. Activates on the user regardless of
+  // target (main.ts passes the user's own id); the sweep ignores line of sight,
+  // revealing every enemy within the scan radius through walls for the turn.
+  if (def?.kind === "scanner") {
+    if (!inst) return [{ type: "blocked", reason: "no scanner" }];
+    return activateScanner(state, unit, inst, def);
+  }
+
+  // Medkit: heal an adjacent ally.
+  const target = unitById(state, targetId);
+  if (!target || !target.alive) return [{ type: "blocked", reason: "no target" }];
   if (!inst || !def || def.kind !== "medkit") {
     return [{ type: "blocked", reason: "no medkit" }];
   }
@@ -676,6 +776,28 @@ function executeUseItem(
       tuLeft: unit.tu,
     },
   ];
+}
+
+/**
+ * Activate a motion scanner on `unit`. Spends TU and a charge, then stamps the
+ * item's scan radius onto `unit.scanRadius` — los.visibleEnemyIds treats every
+ * enemy within that radius as seen through walls. The reveal lapses at turn
+ * handover (see {@link startFactionTurn}).
+ */
+function activateScanner(
+  state: BattleState,
+  unit: Unit,
+  inst: ItemInstance,
+  def: Item,
+): GameEvent[] {
+  const cost = Math.ceil((unit.stats.timeUnits * def.tuPercent) / 100);
+  if (unit.tu < cost) return [{ type: "blocked", reason: "not enough TU" }];
+  unit.tu -= cost;
+  consumeItem(unit, inst);
+  const radius = def.scanRadius ?? MOTION_SCANNER.DEFAULT_RADIUS;
+  unit.scanRadius = radius;
+  state.log.push(`${unit.name} activates a ${def.name}, sweeping for nearby movement.`);
+  return [{ type: "scanActivated", unitId: unit.id, itemId: def.id, radius, tuLeft: unit.tu }];
 }
 
 /**
@@ -1020,8 +1142,13 @@ function resolvePanicPhase(state: BattleState, faction: Faction): GameEvent[] {
  * recover morale, then resolve panic. Short-circuits once the battle is decided.
  * Emits nothing and advances no rng for factions whose units carry no items and
  * no morale (the default-skirmish case), so this is a no-op for legacy tests.
+ *
+ * Also lapses every motion-scanner reveal: a scanner's through-wall ping lasts
+ * only for the rest of the activating unit's turn, so scanRadius is cleared for
+ * ALL units here (the previous turn's reveals expire as the new turn begins).
  */
 function startFactionTurn(state: BattleState, faction: Faction): GameEvent[] {
+  for (const u of state.units) u.scanRadius = undefined;
   const events: GameEvent[] = [];
   events.push(...detonatePrimedGrenades(state, faction));
   if (state.status !== "playing") return events;

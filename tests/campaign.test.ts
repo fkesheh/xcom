@@ -54,6 +54,7 @@ import {
   loadCampaign,
   manufacturingCost,
   manufacturingDuration,
+  MANUFACTURING_PROJECTS,
   MEDBAY_FACILITY_ID,
   RESEARCH_COSTS,
   facilityConstructionDuration,
@@ -1006,6 +1007,85 @@ describe("campaign state", () => {
         };
       }
     }
+  });
+});
+
+describe("manufacturing catalog", () => {
+  const BASE = { lat: 2, lon: 14.2, region: "Africa" } as const;
+
+  /** A resource-flush campaign so every project is affordable once its research clears. */
+  function stocked(seed = 12345): CampaignState {
+    const campaign = createCampaign(BASE, seed);
+    return {
+      ...campaign,
+      resources: { credits: 1500, alloys: 50, elerium: 10, alienData: 20 },
+    };
+  }
+
+  it("exposes the original three weapon projects plus five new gear projects", () => {
+    const ids = MANUFACTURING_PROJECTS.map((project) => project.id);
+    expect(ids).toHaveLength(8);
+    expect(new Set(ids)).toEqual(
+      new Set(["pistol", "rifle", "plasma", "grenade", "medkit", "sniper", "armor", "cannon"]),
+    );
+    // The original three projects still produce their weapon into armory.weapons.
+    for (const id of ["pistol", "rifle", "plasma"] as const) {
+      const project = MANUFACTURING_PROJECTS.find((entry) => entry.id === id)!;
+      expect(project.product).toEqual({ kind: "weapon", weaponId: id, quantity: 1 });
+    }
+  });
+
+  it("fabricates an item batch (grenades) and single items (medkit, sniper) into armory.items", () => {
+    const before = stocked();
+    const grenadeStarted = startManufacturing(before, "grenade");
+    const grenadeDone = advanceGeoscape(grenadeStarted, manufacturingDuration(before, "grenade"));
+    const medkitStarted = startManufacturing(grenadeDone, "medkit");
+    const medkitDone = advanceGeoscape(medkitStarted, manufacturingDuration(grenadeDone, "medkit"));
+    const sniperStarted = startManufacturing(medkitDone, "sniper");
+    const sniperDone = advanceGeoscape(sniperStarted, manufacturingDuration(medkitDone, "sniper"));
+
+    // Frag grenade project fabricates a batch of 2; medkit and sniper add one each.
+    expect(grenadeDone.armory.items?.grenade).toBe((before.armory.items?.grenade ?? 0) + 2);
+    expect(medkitDone.armory.items?.medkit).toBe((before.armory.items?.medkit ?? 0) + 1);
+    // A sniper rifle is durable gear, not one of the four CampaignWeaponId slots, so it stocks as an item.
+    expect(sniperDone.armory.items?.sniper).toBe(1);
+    // Completing clears the active slot and logs a manufacturing report.
+    expect(grenadeDone.activeManufacturing).toBeUndefined();
+    expect(grenadeDone.projectReports[0]).toMatchObject({ kind: "manufacturing", id: "grenade" });
+  });
+
+  it("fabricates the heavy plasma cannon into armory.weapons once heavy plasma research clears", () => {
+    const base = stocked();
+    // Locked until the heavy plasma cannon research line completes.
+    expect(canStartManufacturing(base, "cannon")).toBe(false);
+    const plasmaReady = completeResearch(base, "plasmaWeapons");
+    expect(canStartManufacturing(plasmaReady, "cannon")).toBe(false);
+    const heavyReady = completeResearch(plasmaReady, "heavyPlasma");
+    expect(canStartManufacturing(heavyReady, "cannon")).toBe(true);
+
+    const started = startManufacturing(heavyReady, "cannon");
+    const completed = advanceGeoscape(started, manufacturingDuration(heavyReady, "cannon"));
+    expect(completed.armory.weapons.cannon).toBe(heavyReady.armory.weapons.cannon + 1);
+    expect(completed.projectReports[0]).toMatchObject({ kind: "manufacturing", id: "cannon" });
+  });
+
+  it("fabricates alloy armor into armory.items once alloy armor research clears", () => {
+    const base = stocked();
+    expect(canStartManufacturing(base, "armor")).toBe(false);
+    const armored = completeResearch(base, "alloyArmor");
+    expect(canStartManufacturing(armored, "armor")).toBe(true);
+
+    const started = startManufacturing(armored, "armor");
+    const completed = advanceGeoscape(started, manufacturingDuration(armored, "armor"));
+    expect(completed.armory.items?.armor).toBe((armored.armory.items?.armor ?? 0) + 1);
+  });
+
+  it("keeps the workshop committed to a single manufacturing order at a time", () => {
+    const before = stocked();
+    const started = startManufacturing(before, "grenade");
+    expect(canStartManufacturing(started, "sniper")).toBe(false);
+    // While busy, starting a second order is a no-op.
+    expect(startManufacturing(started, "sniper")).toBe(started);
   });
 });
 

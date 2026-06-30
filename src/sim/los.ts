@@ -243,16 +243,32 @@ export function visibleTiles(grid: Grid, unit: Unit): Vec2[] {
 /**
  * Union of enemy unit ids visible to any LIVING unit of `faction`.
  * "Enemy" means a unit whose faction differs from `faction`.
+ *
+ * A unit with an active motion-scanner reveal (`scanRadius`) additionally sees
+ * every enemy within that Chebyshev radius THROUGH walls — the scanner pings
+ * movement, ignoring line of sight, cover, and vision cones. The reveal is
+ * per-turn and cleared at turn handover (see battle.ts).
  */
 export function visibleEnemyIds(state: BattleState, faction: Faction): Set<UnitId> {
   const seen = new Set<UnitId>();
   const observers = state.units.filter((u) => u.faction === faction && u.alive);
   const enemies = state.units.filter((u) => u.faction !== faction && u.alive);
   for (const observer of observers) {
+    // Motion scanner: reveal nearby enemies through any obstruction.
+    const scan = observer.scanRadius ?? 0;
+    for (const enemy of enemies) {
+      if (seen.has(enemy.id)) continue;
+      if (scan > 0 && chebyDist(observer.pos, enemy.pos) <= scan) seen.add(enemy.id);
+    }
     for (const enemy of enemies) {
       if (seen.has(enemy.id)) continue;
       if (canSee(state.grid, observer, enemy.pos, state.smokeClouds)) seen.add(enemy.id);
     }
   }
   return seen;
+}
+
+/** Chebyshev (chessboard) distance between two tiles. Local to avoid a los<-combat cycle. */
+function chebyDist(a: Vec2, b: Vec2): number {
+  return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
 }

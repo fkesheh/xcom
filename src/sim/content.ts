@@ -105,6 +105,23 @@ export const ITEMS: Record<string, Item> = {
     blastRadius: 2,
     throwRange: 8,
   },
+  scanner: {
+    id: "scanner",
+    name: "Motion Scanner",
+    kind: "scanner",
+    tuPercent: 25,
+    // Chebyshev radius of the through-wall reveal applied to the user this turn.
+    scanRadius: 8,
+  },
+  proxMine: {
+    id: "proxMine",
+    name: "Proximity Mine",
+    kind: "proxMine",
+    tuPercent: 35,
+    blastRadius: 2,
+    damage: 50,
+    throwRange: 8,
+  },
 };
 
 /** Spawnable unit templates. Keyed by stable id (also stored on the template). */

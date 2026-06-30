@@ -564,7 +564,13 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
     onOpenGeoscape: () => abortMissionToGeoscape(),
     onReturnToBase: () => returnToBase(),
     onThrowItem: (itemId) => beginTargeting("throw", itemId),
-    onUseItem: (itemId) => beginTargeting("heal", itemId),
+    onUseItem: (itemId) => {
+      // The motion scanner is a self-use device: activate it on the spot instead
+      // of entering ally-targeting (which is the medkit flow).
+      const def = state.items?.[itemId];
+      if (def?.kind === "scanner") activateScanner(itemId);
+      else beginTargeting("heal", itemId);
+    },
     onPrimeItem: (itemId) => primeSelected(itemId),
     onPsiAttack: (kind) => beginPsiTargeting(kind),
     onSetStance: (stance) => {
@@ -733,6 +739,14 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
     void dispatch({ type: "primeItem", unitId: sel.id, itemId, fuseTurns: 1 });
   }
 
+  /** Immediately activate a motion scanner on the selected unit (self-use device). */
+  function activateScanner(itemId: string): void {
+    if (busy || state.status !== "playing") return;
+    const sel = selectedUnit();
+    if (!sel) return;
+    void dispatch({ type: "useItem", unitId: sel.id, targetId: sel.id, itemId });
+  }
+
   /** Resolve an item-targeting click into the appropriate Command. */
   function handleTargetingClick(clientX: number, clientY: number): void {
     const sel = selectedUnit();
@@ -781,7 +795,9 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
         const effect =
           def?.kind === "smoke"
             ? `smoke cloud ${def.blastRadius ?? 2}`
-            : `blast ${def?.blastRadius ?? 1}`;
+            : def?.kind === "proxMine"
+              ? `mine (blast ${def.blastRadius ?? 2})`
+              : `blast ${def?.blastRadius ?? 1}`;
         currentHover = {
           kind: inRange ? "move" : "blocked",
           label: `Throw ${name}`,
@@ -1147,6 +1163,16 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
         const target = unitById(state, ev.targetId)?.name ?? "ally";
         const def = state.items?.[ev.itemId];
         pushLog(`${name} uses ${def?.name ?? ev.itemId} on ${target} (+${ev.healed} HP)`);
+        break;
+      }
+      case "scanActivated": {
+        const name = unitById(state, ev.unitId)?.name ?? "Unit";
+        const def = state.items?.[ev.itemId];
+        pushLog(`${name} sweeps with ${def?.name ?? ev.itemId} (radius ${ev.radius})`);
+        break;
+      }
+      case "minePlaced": {
+        pushLog(`Proximity mine armed at (${ev.pos.x}, ${ev.pos.y})`);
         break;
       }
       case "panicked": {
