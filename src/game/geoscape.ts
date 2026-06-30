@@ -51,7 +51,7 @@ import {
   interceptionForecast,
   isInterceptorReady,
 } from "../campaign/geoscape";
-import { campaignObjectiveProgress, DIFFICULTY_CONFIGS, highestRegionalPanic, transportCraft } from "../campaign/storage";
+import { campaignObjectiveProgress, canBuildNewBase, DIFFICULTY_CONFIGS, highestRegionalPanic, MAX_EXTRA_BASES, NEW_BASE_COST, transportCraft } from "../campaign/storage";
 import {
   WORLD_CITY_POINTS,
   WORLD_LAND_RINGS,
@@ -67,6 +67,8 @@ interface GeoscapeOptions {
   onResetCampaign: () => void;
   /** Fires for each Close / Attack / Disengage choice during an active interception encounter. */
   onInterceptionAction?: (action: InterceptionAction) => void;
+  /** Designate a new radar base on the globe (multi-base campaign). */
+  onBuildNewBase?: (location: BaseLocation) => void;
 }
 
 export interface GeoscapeTimeAction {
@@ -1180,6 +1182,12 @@ export class GeoscapeView {
   private readonly trajectoryLine: Line;
   /** Faint great-circle trail of the UFO's recent positions while it flies. */
   private readonly ufoTrailLine: Line;
+  /** Cyan marker pool for extra radar bases (up to MAX_EXTRA_BASES), synced in refreshMarkers. */
+  private readonly extraBaseMarkers = new Group();
+  /** True while the player is designating a new base site on the globe. */
+  private buildMode = false;
+  /** Hint line below the globe; text refreshed by refreshHint(). */
+  private hintEl: HTMLDivElement | null = null;
   private selectedBase: BaseLocation | null;
   private selectedDifficulty: DifficultyLevel = "veteran";
   private raf = 0;
@@ -1500,6 +1508,12 @@ export class GeoscapeView {
     this.earthGroup.add(this.baseMarker);
     if (this.selectedBase) this.placeMarker(this.selectedBase);
     else this.baseMarker.visible = false;
+    for (let i = 0; i < MAX_EXTRA_BASES; i++) {
+      const marker = this.buildExtraBaseMarker();
+      marker.visible = false;
+      this.extraBaseMarkers.add(marker);
+    }
+    this.earthGroup.add(this.extraBaseMarkers);
     this.buildUfoMarker(this.opts.campaign?.ufoContact?.missionType);
     this.earthGroup.add(this.ufoMarker);
     if (this.opts.campaign?.ufoContact) this.placeUfoMarker(this.opts.campaign.ufoContact);
@@ -1805,6 +1819,43 @@ export class GeoscapeView {
     this.baseMarker.add(pulse, cone, ring);
   }
 
+  /** A slimmed-down cyan marker for an extra radar base (distinct from the gold primary). */
+  private buildExtraBaseMarker(): Group {
+    const group = new Group();
+    const pulse = new Mesh(
+      new SphereGeometry(0.04, 14, 8),
+      new MeshBasicMaterial({
+        color: 0x67e8f9,
+        transparent: true,
+        opacity: 0.9,
+        blending: AdditiveBlending,
+      }),
+    );
+    const cone = new Mesh(
+      new ConeGeometry(0.04, 0.13, 14),
+      new MeshStandardMaterial({
+        color: 0x67e8f9,
+        emissive: new Color(0x22d3ee),
+        emissiveIntensity: 1.8,
+        roughness: 0.35,
+        metalness: 0.3,
+      }),
+    );
+    cone.position.y = 0.07;
+    const ring = new Mesh(
+      new SphereGeometry(0.07, 14, 6, 0, Math.PI * 2, 0, Math.PI * 0.42),
+      new MeshBasicMaterial({
+        color: 0x67e8f9,
+        transparent: true,
+        opacity: 0.26,
+        wireframe: true,
+        side: DoubleSide,
+      }),
+    );
+    group.add(pulse, cone, ring);
+    return group;
+  }
+
   private buildUfoMarker(missionType: MissionType | undefined): void {
     const info = missionTypeInfo(missionType);
     const core = new Mesh(
@@ -1909,9 +1960,7 @@ export class GeoscapeView {
     this.root.appendChild(right);
 
     const hint = el("div", "geo-hint");
-    hint.textContent = this.opts.campaign
-      ? "Time controls scan the globe / intercept UFOs / launch recovery from base"
-      : "Drag to rotate / wheel to zoom / click Earth to designate base";
+    this.hintEl = hint;
     this.root.appendChild(hint);
     const overlaySlot = el("div", "geo-overlay-host");
     this.root.appendChild(overlaySlot);
@@ -1951,6 +2000,17 @@ export class GeoscapeView {
     this.refreshMarkers();
     this.refreshInterceptor();
     this.refreshSpeedState();
+    this.refreshHint();
+  }
+
+  /** Set the hint line below the globe from the current interaction mode. */
+  private refreshHint(): void {
+    if (!this.hintEl) return;
+    this.hintEl.textContent = this.buildMode
+      ? "Click a site on the globe to build a new radar base (2000c, 48h)."
+      : this.campaign
+        ? "Time controls scan the globe / intercept UFOs / launch recovery from base"
+        : "Drag to rotate / wheel to zoom / click Earth to designate base";
   }
 
   /** True while an interactive interception encounter overlay is open. */
@@ -2187,6 +2247,17 @@ export class GeoscapeView {
       this.speedButtons.push(btn);
     }
     this.actionsSlot.append(speedGroup);
+    const can = canBuildNewBase(c);
+    const build = el("button");
+    build.textContent = this.buildMode ? "Cancel build" : `Build base (${NEW_BASE_COST.credits}c)`;
+    build.disabled = !this.buildMode && !can.ok;
+    build.title = this.buildMode ? "Exit base-placement mode" : can.ok ? "Designate a new radar base on the globe" : (can.reason ?? "Cannot build a new base right now");
+    build.setAttribute("aria-pressed", String(this.buildMode));
+    build.addEventListener("click", () => {
+      this.buildMode = !this.buildMode;
+      this.refresh();
+    });
+    this.actionsSlot.append(build);
     if (this.loitering) {
       // A Skyranger is on station: deploy on demand instead of offering a fresh
       // launch/intercept (the squad is already inbound to this site).
@@ -2227,6 +2298,20 @@ export class GeoscapeView {
     const c = this.campaign;
     if (c?.base) this.placeMarker(c.base);
     else this.baseMarker.visible = false;
+    const extras = c?.bases ?? [];
+    const pool = this.extraBaseMarkers.children;
+    for (let i = 0; i < pool.length; i++) {
+      const marker = pool[i]!;
+      const loc = extras[i];
+      if (loc) {
+        const normal = latLonToVector(loc.lat, loc.lon, 1).normalize();
+        marker.visible = true;
+        marker.position.copy(normal).multiplyScalar(EARTH_RADIUS + 0.08);
+        marker.quaternion.setFromUnitVectors(UP, normal);
+      } else {
+        marker.visible = false;
+      }
+    }
     const contact = c?.ufoContact;
     if (contact) {
       this.refreshUfoMarkerType(contact.missionType);
@@ -3577,6 +3662,18 @@ export class GeoscapeView {
     const dy = event.clientY - this.down.y;
     this.down = null;
     if (dx * dx + dy * dy > 36) return;
+    if (this.buildMode && this.opts.campaign) {
+      this.updatePointer(event);
+      this.raycaster.setFromCamera(this.pointer, this.camera);
+      const hit = this.raycaster.intersectObject(this.earthMesh, false)[0];
+      if (hit) {
+        const ll = hit.uv ? uvToLatLon(hit.uv) : vectorToLatLon(this.earthGroup.worldToLocal(hit.point.clone()));
+        this.opts.onBuildNewBase?.(makeBase(ll.lat, ll.lon));
+      }
+      this.buildMode = false;
+      this.refresh();
+      return;
+    }
     if (!canSelectBaseSite(this.opts.campaign)) return;
 
     this.updatePointer(event);

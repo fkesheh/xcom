@@ -43,6 +43,7 @@ import {
 } from "../campaign/base";
 import {
   activeSoldiers,
+  allBases,
   availableItemCount,
   availableWeaponCount,
   availableBaseFacilities,
@@ -66,6 +67,7 @@ import {
   type ManufacturingProject,
   MANUFACTURING_PROJECTS,
   MARKET_CONFIG,
+  MAX_EXTRA_BASES,
   type ResearchProject,
   RESEARCH_PROJECTS,
   canStartManufacturing,
@@ -2554,6 +2556,7 @@ export class BaseView {
       this.topChip("⚙", "Engineers", `${engineers}`, undefined, "staffed workshop engineers — more = faster manufacturing"),
       this.topChip("▲", "Threat", `${threat}%`, threatCls, "global X-COM threat — high threat raises council panic"),
       this.topChip("◆", "Difficulty", difficultyConfig(campaign).label, undefined, "campaign difficulty — affects enemy counts and starting threat"),
+      this.topChip("⌖", "Bases", `${allBases(campaign).length}/${MAX_EXTRA_BASES + 1}`, undefined, "Primary base + built radar bases (max 3 extra)"),
     );
   }
 

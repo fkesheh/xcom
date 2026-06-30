@@ -1,5 +1,6 @@
 import type {
   ActiveFlight,
+  BaseLocation,
   CampaignClock,
   CampaignResources,
   CampaignState,
@@ -20,11 +21,13 @@ import {
   activeSoldiers,
   adjustRegionalInfiltration,
   adjustRegionalPanic,
+  allBases,
   campaignInfiltration,
   canRecruitSoldier,
   chooseInterceptor,
   COUNCIL_REGIONS,
   councilRegionFor,
+  completeFinishedBaseConstruction,
   completeFinishedConstruction,
   completeFinishedResearch,
   completeFinishedManufacturing,
@@ -109,7 +112,30 @@ function hash(seed: number): number {
 }
 
 function contactInterval(campaign: CampaignState): number {
-  return hasBaseFacility(campaign, "radar-2") ? 12 : 18;
+  const base = hasBaseFacility(campaign, "radar-2") ? 12 : 18;
+  const extra = campaign.bases?.length ?? 0;
+  return Math.max(6, base - extra * 3);
+}
+
+/** Squared great-circle-ish distance from a base to a lat/lon (lat/lon weighted by cos(lat)). */
+function baseDistanceSq(a: BaseLocation, lat: number, lon: number): number {
+  const dLat = a.lat - lat;
+  const dLon = (a.lon - lon) * Math.cos((lat * Math.PI) / 180);
+  return dLat * dLat + dLon * dLon;
+}
+
+function nearestBase(lat: number, lon: number, bases: readonly BaseLocation[]): BaseLocation {
+  let best = bases[0]!;
+  let bestD = baseDistanceSq(best, lat, lon);
+  for (let i = 1; i < bases.length; i++) {
+    const b = bases[i]!;
+    const d = baseDistanceSq(b, lat, lon);
+    if (d < bestD) {
+      best = b;
+      bestD = d;
+    }
+  }
+  return best;
 }
 
 function clockAt(clock: CampaignClock, elapsedHours: number): CampaignClock {
@@ -216,7 +242,12 @@ export function createUfoContact(
   const zoneLon = lonRaw > 180 ? lonRaw - 360 : lonRaw < -180 ? lonRaw + 360 : lonRaw;
   const lat = atBase ? campaign.base.lat : zoneLat;
   const lon = atBase ? campaign.base.lon : zoneLon;
-  const region = atBase ? campaign.base.region : zone.region;
+  const all = allBases(campaign);
+  const region = atBase
+    ? campaign.base.region
+    : all.length > 1
+      ? nearestBase(lat, lon, all).region
+      : zone.region;
   // Ground assaults (landed UFO, terror, base defense) spawn already on the ground;
   // only crash-site contacts begin tracked for an air-to-air shoot-down.
   const groundAssault = missionType !== "crashSite";
@@ -1217,7 +1248,7 @@ export function advanceGeoscape(
     activeFlights,
     fleet: advancedFleet,
   })))));
-  return restockMarket(composed, Math.max(0, Math.floor(hours)));
+  return restockMarket(completeFinishedBaseConstruction(composed), Math.max(0, Math.floor(hours)));
 }
 
 export function formatCampaignClock(clock: CampaignClock): string {

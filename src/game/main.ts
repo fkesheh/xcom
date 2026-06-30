@@ -63,6 +63,7 @@ import {
   assignSoldierWeapon,
   clearCampaign,
   buildFacility,
+  buildNewBase,
   campaignSoldierStatBonus,
   createCampaign,
   deploymentItemIds,
@@ -300,6 +301,12 @@ function buildGeoscapeCallbacks(campaign: CampaignState | null) {
         return;
       }
       void mountPlaneCombat(currentCampaign);
+    },
+    onBuildNewBase: (location: BaseLocation) => {
+      if (!currentCampaign) return;
+      currentCampaign = buildNewBase(currentCampaign, location);
+      debouncedSave(currentCampaign);
+      geoscape?.update(currentCampaign);
     },
     onResetCampaign: () => {
       // Flush before clearing so a pending debounced save can't resurrect it.

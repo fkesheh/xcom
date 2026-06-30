@@ -320,6 +320,10 @@ export interface CampaignState {
   activeResearch?: ActiveResearch;
   activeManufacturing?: ActiveManufacturing;
   activeConstruction?: ActiveConstruction;
+  /** Extra radar bases built on the globe. The primary base is `base`, NOT in this list. */
+  bases?: BaseLocation[];
+  /** In-progress extra-base construction (completion fires a project report ~48h later). */
+  activeBaseConstruction?: { location: BaseLocation; startedAtHour: number; completesAtHour: number };
   missionsCompleted: number;
   missionsAttempted: number;
   lastMission?: MissionReport;

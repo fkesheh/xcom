@@ -52,6 +52,9 @@ export const MEDBAY_WOUND_RECOVERY_MULTIPLIER = 0.75;
 export const WOUND_RECOVERY_MIN_HOURS = 12;
 export const WOUND_RECOVERY_MAX_HOURS = 72;
 export const PROJECT_REPORT_LIMIT = 6;
+export const NEW_BASE_COST: CampaignResources = { credits: 2000, alloys: 0, elerium: 0, alienData: 0 };
+export const MAX_EXTRA_BASES = 3;
+export const NEW_BASE_CONSTRUCTION_HOURS = 48;
 export const CAMPAIGN_WEAPON_IDS = ["rifle", "pistol", "plasma", "cannon"] as const satisfies readonly CampaignWeaponId[];
 export const STARTING_INTERCEPTOR: InterceptorState = {
   damage: 0,
@@ -1444,6 +1447,52 @@ export function completeFinishedConstruction(campaign: CampaignState): CampaignS
   }, constructionReport(facility, campaign.clock.elapsedHours));
 }
 
+export interface NewBaseOutcome {
+  ok: boolean;
+  reason?: string;
+}
+
+/** Primary base plus every extra radar base built on the globe. */
+export function allBases(campaign: CampaignState): BaseLocation[] {
+  return [campaign.base, ...(campaign.bases ?? [])];
+}
+
+export function canBuildNewBase(campaign: CampaignState): NewBaseOutcome {
+  if (campaign.strategic.status !== "active") return { ok: false, reason: "Campaign not active" };
+  if (campaign.activeBaseConstruction) return { ok: false, reason: "A base is already under construction" };
+  if ((campaign.bases?.length ?? 0) >= MAX_EXTRA_BASES) return { ok: false, reason: "Maximum number of bases reached" };
+  if (!canAfford(campaign.resources, NEW_BASE_COST)) return { ok: false, reason: "Not enough credits" };
+  return { ok: true };
+}
+
+export function buildNewBase(campaign: CampaignState, location: BaseLocation): CampaignState {
+  if (!canBuildNewBase(campaign).ok) return campaign;
+  const startedAtHour = campaign.clock.elapsedHours;
+  return {
+    ...campaign,
+    resources: spend(campaign.resources, NEW_BASE_COST),
+    bases: [...(campaign.bases ?? []), location],
+    activeBaseConstruction: {
+      location,
+      startedAtHour,
+      completesAtHour: startedAtHour + NEW_BASE_CONSTRUCTION_HOURS,
+    },
+  };
+}
+
+export function completeFinishedBaseConstruction(campaign: CampaignState): CampaignState {
+  const active = campaign.activeBaseConstruction;
+  if (!active || campaign.clock.elapsedHours < active.completesAtHour) return campaign;
+  const report: ProjectReport = {
+    kind: "construction",
+    id: `base-built-${campaign.clock.elapsedHours}`,
+    title: "Base construction complete",
+    summary: `New radar base online at ${active.location.region} (${active.location.lat.toFixed(1)}°, ${active.location.lon.toFixed(1)}°). UFO detection range extended.`,
+    completedAtHour: campaign.clock.elapsedHours,
+  };
+  return addProjectReport({ ...campaign, activeBaseConstruction: undefined }, report);
+}
+
 export function manufacturingProject(id: ManufacturingProjectId): ManufacturingProject {
   return MANUFACTURING_PROJECTS.find((project) => project.id === id)!;
 }
@@ -2123,6 +2172,8 @@ export function loadCampaign(): CampaignState | null {
       activeResearch: normalizeActiveResearch(parsed.activeResearch, clock, completedResearch),
       activeManufacturing: normalizeActiveManufacturing(parsed.activeManufacturing, clock),
       activeConstruction: normalizeActiveConstruction(parsed.activeConstruction, clock, parsed.facilities),
+      bases: normalizeBases(parsed.bases),
+      activeBaseConstruction: normalizeActiveBaseConstruction(parsed.activeBaseConstruction, clock),
       missionsCompleted: parsed.missionsCompleted,
       missionsAttempted:
         typeof parsed.missionsAttempted === "number"
@@ -2140,7 +2191,7 @@ export function loadCampaign(): CampaignState | null {
           : undefined,
       projectReports: normalizeProjectReports(parsed.projectReports),
     };
-    return completeFinishedConstruction(completeFinishedManufacturing(recoverWoundedSoldiers(completeFinishedResearch(normalized))));
+    return completeFinishedBaseConstruction(completeFinishedConstruction(completeFinishedManufacturing(recoverWoundedSoldiers(completeFinishedResearch(normalized)))));
   } catch {
     return null;
   }
@@ -2781,6 +2832,58 @@ function normalizeActiveConstruction(
   }
   return {
     facilityId: maybe.facilityId,
+    startedAtHour: Math.max(0, Math.floor(maybe.startedAtHour)),
+    completesAtHour: Math.max(clock.elapsedHours, Math.floor(maybe.completesAtHour)),
+  };
+}
+
+function normalizeBases(value: unknown): BaseLocation[] {
+  if (!Array.isArray(value)) return [];
+  const out: BaseLocation[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const maybe = entry as Partial<BaseLocation>;
+    if (
+      typeof maybe.lat !== "number" ||
+      typeof maybe.lon !== "number" ||
+      typeof maybe.region !== "string"
+    ) {
+      continue;
+    }
+    out.push({
+      lat: Math.round(maybe.lat * 10) / 10,
+      lon: Math.round(maybe.lon * 10) / 10,
+      region: maybe.region,
+    });
+    if (out.length >= MAX_EXTRA_BASES) break;
+  }
+  return out;
+}
+
+function normalizeActiveBaseConstruction(
+  value: unknown,
+  clock: CampaignClock,
+): CampaignState["activeBaseConstruction"] {
+  if (!value || typeof value !== "object") return undefined;
+  const maybe = value as Partial<NonNullable<CampaignState["activeBaseConstruction"]>>;
+  const loc = maybe.location;
+  if (
+    !loc ||
+    typeof loc !== "object" ||
+    typeof loc.lat !== "number" ||
+    typeof loc.lon !== "number" ||
+    typeof loc.region !== "string" ||
+    typeof maybe.startedAtHour !== "number" ||
+    typeof maybe.completesAtHour !== "number"
+  ) {
+    return undefined;
+  }
+  return {
+    location: {
+      lat: Math.round(loc.lat * 10) / 10,
+      lon: Math.round(loc.lon * 10) / 10,
+      region: loc.region,
+    },
     startedAtHour: Math.max(0, Math.floor(maybe.startedAtHour)),
     completesAtHour: Math.max(clock.elapsedHours, Math.floor(maybe.completesAtHour)),
   };
