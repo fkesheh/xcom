@@ -75,6 +75,7 @@ import {
   startResearch,
   STARTING_INFILTRATION,
   STARTING_REGIONAL_PANIC,
+  THREAT_LOSS_THRESHOLD,
   updateCampaignBase,
 } from "../src/campaign/storage";
 import { ITEMS, WEAPONS } from "../src/sim/content";
@@ -333,10 +334,12 @@ describe("campaign state", () => {
 
     expect(detected.ufoContact).toBeDefined();
     expect(expired.ufoContact).toBeUndefined();
-    expect(expired.strategic.threat - campaign.strategic.threat).toBe(6);
+    // Veteran threatGainMult (0.55) scales the ignored-contact threat gain: round(6 * 0.55) = 3.
+    expect(expired.strategic.threat - campaign.strategic.threat).toBe(3);
     expect(campaign.strategic.funding - expired.strategic.funding).toBe(15);
+    // Baseline ignore panic (18 local) is now scaled by veteran panicMult 0.75: round(18 * 0.75) = 14.
     expect(regionalPanicFor(expired, detected.ufoContact!.region)).toBe(
-      regionalPanicFor(campaign, detected.ufoContact!.region)! + 18,
+      regionalPanicFor(campaign, detected.ufoContact!.region)! + 14,
     );
     expect(highestRegionalPanic(expired).region).toBe(detected.ufoContact!.region);
     expect(expired.clock.lastContactHour).toBe(expired.clock.elapsedHours);
@@ -381,10 +384,12 @@ describe("campaign state", () => {
     expect(failed.interceptor.damage).toBeGreaterThan(0);
     expect(failed.interceptor.repairedAtHour).toBeGreaterThan(failed.clock.elapsedHours);
     expect(failed.clock.lastContactHour).toBe(failed.clock.elapsedHours);
-    expect(failed.strategic.threat - detected.strategic.threat).toBe(6);
+    // Escaped-interception threat gain is scaled by veteran threatGainMult: round(6 * 0.55) = 3.
+    expect(failed.strategic.threat - detected.strategic.threat).toBe(3);
     expect(detected.strategic.funding - failed.strategic.funding).toBe(15);
+    // Escape panic (8 local) is scaled by veteran panicMult 0.75: round(8 * 0.75) = 6.
     expect(regionalPanicFor(failed, detected.ufoContact!.region)).toBe(
-      regionalPanicFor(detected, detected.ufoContact!.region)! + 8,
+      regionalPanicFor(detected, detected.ufoContact!.region)! + 6,
     );
     expect(recovered.ufoContact?.status).toBe("crashed");
     expect(radarForecast).toMatchObject({
@@ -396,15 +401,21 @@ describe("campaign state", () => {
   });
 
   it("repairs interceptor damage over geoscape time while the standby interceptor covers launches", () => {
-    // Seed 33 rolls a harvester (strength 3): the first interception escapes and deals 72%
-    // damage, so int-1 is still repairing at hour 60 when the next contact spawns — letting
-    // the standby (int-2) cover. (A scout would deal too little damage and int-1 would return first.)
+    // Seed 33 rolls a harvester (strength 3) at hour 18; the auto-resolve shoots it down,
+    // dealing 41% damage to int-1 (a 48h repair window). While int-1 is grounded a fresh
+    // tracked crash-site contact appears, so the standby interceptor (int-2) covers the
+    // launch. (CRASH_SITE_LIFETIME_HOURS now equals int-1's 48h repair window, so advancing
+    // by it would repair the primary exactly when the crash site expires; staging a fresh
+    // tracked contact isolates the standby-launch behaviour from that timing collision.)
     const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 33);
     const detected = advanceGeoscape(campaign, 18);
     const damaged = interceptUfo(detected);
     const repairHours = damaged.interceptor.repairedAtHour! - damaged.clock.elapsedHours;
-    const contact = advanceGeoscape(damaged, CRASH_SITE_LIFETIME_HOURS);
-    const repairingWithContact = advanceGeoscape(contact, 18);
+    // Stage a fresh tracked crash-site contact for the standby to engage while int-1 repairs.
+    const repairingWithContact: CampaignState = {
+      ...damaged,
+      ufoContact: createUfoContact(damaged, damaged.clock.elapsedHours),
+    };
     const repaired = advanceGeoscape(damaged, repairHours);
     const stocked = {
       ...campaign,
@@ -459,11 +470,12 @@ describe("campaign state", () => {
     expect(firstReport.resources.credits).toBe(campaign.resources.credits + 253);
     expect(firstReport.strategic.score).toBe(campaign.strategic.score + 25);
 
-    expect(highThreat.strategic.funding).toBe(campaign.strategic.funding - 45);
-    expect(highThreat.lastFundingReport?.summary).toContain("High threat cut future funding by 45c");
+    // Veteran fundingPressureMult (0.85) scales the pressure cuts: round(45 * 0.85) = 38, round(80 * 0.85) = 68.
+    expect(highThreat.strategic.funding).toBe(campaign.strategic.funding - 38);
+    expect(highThreat.lastFundingReport?.summary).toContain("High threat cut future funding by 38c");
 
-    expect(highPanic.strategic.funding).toBe(campaign.strategic.funding - 80);
-    expect(highPanic.lastFundingReport?.summary).toContain("regional panic cut 80c");
+    expect(highPanic.strategic.funding).toBe(campaign.strategic.funding - 68);
+    expect(highPanic.lastFundingReport?.summary).toContain("regional panic cut 68c");
   });
 
   it.each<[string, number]>([
@@ -503,8 +515,9 @@ describe("campaign state", () => {
     expect(afterWin.strategic.threat).toBeLessThan(campaign.strategic.threat);
     expect(afterWin.strategic.funding).toBeGreaterThan(campaign.strategic.funding);
     expect(afterWin.strategic.score).toBeGreaterThan(campaign.strategic.score);
+    // Success panic relief (-18 base) is scaled by veteran panicMult 0.75: round(-18 * 0.75) = -13.
     expect(regionalPanicFor(afterWin, firstOperation.region)).toBe(
-      regionalPanicFor(campaign, firstOperation.region)! - 18,
+      regionalPanicFor(campaign, firstOperation.region)! - 13,
     );
     expect(afterWin.resources).toEqual({
       credits: campaign.resources.credits + firstOperation.reward.credits,
@@ -522,8 +535,9 @@ describe("campaign state", () => {
     expect(afterLoss.missionsCompleted).toBe(1);
     expect(afterLoss.strategic.threat).toBeGreaterThan(afterWin.strategic.threat);
     expect(afterLoss.strategic.funding).toBeLessThan(afterWin.strategic.funding);
+    // Failure panic (+18 base) is scaled by veteran panicMult 0.75: round(18 * 0.75) = 14.
     expect(regionalPanicFor(afterLoss, secondOperation.region)).toBe(
-      regionalPanicFor(afterWin, secondOperation.region)! + 18,
+      regionalPanicFor(afterWin, secondOperation.region)! + 14,
     );
     expect(afterLoss.resources.credits).toBe(afterWin.resources.credits + 50);
     expect(afterLoss.resources.alloys).toBe(afterWin.resources.alloys);
@@ -749,11 +763,19 @@ describe("campaign state", () => {
     });
 
     let losing = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 12345);
+    // The raised doom-clock ceiling (THREAT_LOSS_THRESHOLD) plus the veteran threatGainMult
+    // (0.55) mean five failures no longer collapse a fresh campaign. Stage a campaign already
+    // deep in the doom clock so the accumulated failure penalties (round(16 * 0.55) = 9 each)
+    // tip it over the threshold exactly on the fifth defeat.
+    losing = {
+      ...losing,
+      strategic: { ...losing.strategic, threat: THREAT_LOSS_THRESHOLD - 45 },
+    };
     for (let i = 0; i < 5; i++) {
       losing = recordMissionResult(losing, "failure", generateOperation(losing), `2026-06-${15 + i}T00:00:00.000Z`);
     }
     expect(losing.strategic.status).toBe("lost");
-    expect(losing.strategic.threat).toBeGreaterThanOrEqual(100);
+    expect(losing.strategic.threat).toBeGreaterThanOrEqual(THREAT_LOSS_THRESHOLD);
     expect(campaignObjectiveProgress(losing)).toMatchObject({
       completed: 0,
       remaining: CAMPAIGN_VICTORY_OPERATIONS,
@@ -926,8 +948,9 @@ describe("campaign state", () => {
 
     const failedWithoutRadar = recordMissionResult(campaign, "failure", baseOperation, "2026-06-15T00:00:00.000Z");
     const failedWithRadar = recordMissionResult(radar, "failure", radarOperation, "2026-06-15T00:00:00.000Z");
-    expect(failedWithoutRadar.strategic.threat - campaign.strategic.threat).toBe(16);
-    expect(failedWithRadar.strategic.threat - radar.strategic.threat).toBe(12);
+    // Failure threat gain is scaled by veteran threatGainMult (0.55): round(16 * 0.55) = 9 without radar, round(12 * 0.55) = 7 with radar.
+    expect(failedWithoutRadar.strategic.threat - campaign.strategic.threat).toBe(9);
+    expect(failedWithRadar.strategic.threat - radar.strategic.threat).toBe(7);
 
     expect(researchCost(campaign, "plasmaWeapons")).toEqual(RESEARCH_COSTS.plasmaWeapons);
     expect(researchCost(annex, "plasmaWeapons")).toEqual({
@@ -951,7 +974,8 @@ describe("campaign state", () => {
     expect(first.region).toBe("Africa");
     expect(["farmland", "urban", "desert", "arctic", "jungle", "forest"]).toContain(first.themeId);
     expect(first.durationHours).toBeGreaterThanOrEqual(6);
-    expect(first.enemyCount).toBeGreaterThanOrEqual(5);
+    // Veteran enemyCountMult (0.7) scales the baseline crew down from the legacy ~6 to 4.
+    expect(first.enemyCount).toBeGreaterThanOrEqual(4);
     expect(first.reward.credits).toBeGreaterThan(0);
     expect(second.missionNumber).toBe(2);
     expect(second.missionSeed).not.toBe(first.missionSeed);
@@ -1217,8 +1241,8 @@ describe("infiltration and defection", () => {
     const expired = advanceGeoscape(staged, 6);
 
     expect(expired.ufoContact).toBeUndefined();
-    // crashSite baseline gain is 10 at the veteran panicMult of 1.0.
-    expect(regionalInfiltrationFor(expired, "Europe")).toBe(10);
+    // crashSite baseline gain (10) is scaled by veteran panicMult 0.75: round(10 * 0.75) = 8.
+    expect(regionalInfiltrationFor(expired, "Europe")).toBe(8);
     // The ignored contact raises infiltration, not the fresh campaign.
     expect(regionalInfiltrationFor(campaign, "Europe")).toBe(0);
     expect(defectedRegions(expired)).toEqual([]);
@@ -1235,9 +1259,10 @@ describe("infiltration and defection", () => {
     const landed = run("landedUfo");
     const terror = run("terror");
 
-    expect(regionalInfiltrationFor(crash, "Europe")).toBe(10);
-    expect(regionalInfiltrationFor(landed, "Europe")).toBe(20);
-    expect(regionalInfiltrationFor(terror, "Europe")).toBe(30);
+    // Infiltration gains are scaled by veteran panicMult 0.75: round(10*0.75)=8, round(20*0.75)=15, round(30*0.75)=23.
+    expect(regionalInfiltrationFor(crash, "Europe")).toBe(8);
+    expect(regionalInfiltrationFor(landed, "Europe")).toBe(15);
+    expect(regionalInfiltrationFor(terror, "Europe")).toBe(23);
     expect(regionalInfiltrationFor(terror, "Europe")!).toBeGreaterThan(
       regionalInfiltrationFor(crash, "Europe")!,
     );
@@ -1249,7 +1274,8 @@ describe("infiltration and defection", () => {
       ufoContact: stagedContact("Europe", "crashSite", 6),
     };
     state = advanceGeoscape(state, 6);
-    expect(regionalInfiltrationFor(state, "Europe")).toBe(10);
+    // Each crash-site contact adds round(10 * 0.75) = 8 infiltration at veteran.
+    expect(regionalInfiltrationFor(state, "Europe")).toBe(8);
 
     // A second ignored crash-site contact deepens the same region's meter.
     state = {
@@ -1257,7 +1283,7 @@ describe("infiltration and defection", () => {
       ufoContact: stagedContact("Europe", "crashSite", state.clock.elapsedHours + 6),
     };
     state = advanceGeoscape(state, 6);
-    expect(regionalInfiltrationFor(state, "Europe")).toBe(20);
+    expect(regionalInfiltrationFor(state, "Europe")).toBe(16);
   });
 
   it("defects a nation when infiltration reaches 100, cutting funding permanently", () => {

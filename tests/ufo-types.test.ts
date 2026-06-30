@@ -40,28 +40,28 @@ describe("UFO type profiling", () => {
     expect(UFO_TYPE_PROFILES.scout).toEqual({
       strength: 1,
       speed: 1.4,
-      lifetimeHours: 16,
+      lifetimeHours: 30,
       infiltrationMult: 0.5,
       panicMult: 0.5,
     });
     expect(UFO_TYPE_PROFILES.harvester).toEqual({
       strength: 3,
       speed: 0.6,
-      lifetimeHours: 30,
+      lifetimeHours: 44,
       infiltrationMult: 1.0,
       panicMult: 1.0,
     });
     expect(UFO_TYPE_PROFILES.terror).toEqual({
       strength: 5,
       speed: 0.35,
-      lifetimeHours: 48,
+      lifetimeHours: 66,
       infiltrationMult: 1.6,
       panicMult: 1.6,
     });
     expect(UFO_TYPE_PROFILES.battleship).toEqual({
       strength: 8,
       speed: 0.15,
-      lifetimeHours: 72,
+      lifetimeHours: 96,
       infiltrationMult: 2.2,
       panicMult: 2.2,
     });

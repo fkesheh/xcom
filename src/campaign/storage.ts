@@ -45,8 +45,14 @@ import {
 
 export const CAMPAIGN_STORAGE_KEY = "blacksite.campaign.v1";
 export const CAMPAIGN_VICTORY_OPERATIONS = 5;
+// Doom-clock ceilings. Raised from 100 so a competent player has time to recover
+// CAMPAIGN_VICTORY_OPERATIONS cores before the clock collapses. The per-difficulty
+// SLOPE (threatGainMult / panicMult) discriminates rookie vs commander; the
+// threshold itself is shared so the slope is what does the tuning.
+export const THREAT_LOSS_THRESHOLD = 150;
+export const PANIC_LOSS_THRESHOLD = 150;
 export const DEPLOYMENT_SIZE = 4;
-export const RECRUIT_COST = 90;
+export const RECRUIT_COST = 60;
 export const MEDBAY_FACILITY_ID = "medbay-2";
 export const MEDBAY_WOUND_RECOVERY_MULTIPLIER = 0.75;
 export const WOUND_RECOVERY_MIN_HOURS = 12;
@@ -277,6 +283,10 @@ export interface DifficultyConfig {
   interceptionDamageMult: number;
   fundingPressureMult: number;
   panicMult: number;
+  // Scales threat PENALTIES (ignored contacts, escaped intercepts, failed missions).
+  // Success relief is intentionally unscaled so winning missions sets the doom clock
+  // back by a fixed amount at every difficulty.
+  threatGainMult: number;
   upkeepMult: number;
 }
 
@@ -286,11 +296,12 @@ export const DIFFICULTY_CONFIGS: Record<DifficultyLevel, DifficultyConfig> = {
     startingThreat: 12,
     startingFunding: 760,
     startingCredits: 900,
-    enemyCountMult: 0.8,
+    enemyCountMult: 0.4,
     ufoStrengthBonus: 0,
     interceptionDamageMult: 0.8,
-    fundingPressureMult: 0.6,
-    panicMult: 0.65,
+    fundingPressureMult: 0.45,
+    panicMult: 0.4,
+    threatGainMult: 0.3,
     upkeepMult: 0.8,
   },
   veteran: {
@@ -298,23 +309,25 @@ export const DIFFICULTY_CONFIGS: Record<DifficultyLevel, DifficultyConfig> = {
     startingThreat: STARTING_STRATEGIC.threat,
     startingFunding: STARTING_STRATEGIC.funding,
     startingCredits: STARTING_RESOURCES.credits,
-    enemyCountMult: 1.0,
+    enemyCountMult: 0.7,
     ufoStrengthBonus: 0,
     interceptionDamageMult: 1.0,
-    fundingPressureMult: 1.0,
-    panicMult: 1.0,
+    fundingPressureMult: 0.85,
+    panicMult: 0.75,
+    threatGainMult: 0.55,
     upkeepMult: 1.0,
   },
   commander: {
     label: "Commander",
-    startingThreat: 28,
-    startingFunding: 560,
-    startingCredits: 650,
-    enemyCountMult: 1.2,
+    startingThreat: 65,
+    startingFunding: 420,
+    startingCredits: 560,
+    enemyCountMult: 1.35,
     ufoStrengthBonus: 1,
     interceptionDamageMult: 1.15,
-    fundingPressureMult: 1.2,
+    fundingPressureMult: 1.25,
     panicMult: 1.3,
+    threatGainMult: 1.1,
     upkeepMult: 1.2,
   },
 };
@@ -990,7 +1003,7 @@ export function adjustRegionalPanic(
   const scaledSpillover = Math.round(spilloverDelta * panicMult);
   for (const one of COUNCIL_REGIONS) {
     const delta = one === councilRegion ? scaledLocal : scaledSpillover;
-    next[one] = Math.max(0, Math.min(100, Math.round((next[one] ?? STARTING_REGIONAL_PANIC[one]) + delta)));
+    next[one] = Math.max(0, Math.min(PANIC_LOSS_THRESHOLD, Math.round((next[one] ?? STARTING_REGIONAL_PANIC[one]) + delta)));
   }
   return next;
 }
@@ -1868,18 +1881,22 @@ function updateStrategic(
 
   const success = result === "success";
   const trackingUplink = hasBaseFacility(campaign, "radar-2");
-  const threatDelta = success ? (trackingUplink ? -16 : -14) : trackingUplink ? 12 : 16;
-  const threat = Math.max(0, Math.min(100, strategic.threat + threatDelta));
-  const funding = Math.max(0, strategic.funding + (success ? 80 : -75));
+  // Relief (success) stays flat; only penalties are eased on easier difficulties.
+  // Success relief is deliberately large so a player who wins missions outruns the
+  // doom clock — that positive feedback is the intended X-COM survival loop.
+  const rawThreatDelta = success ? (trackingUplink ? -28 : -25) : trackingUplink ? 12 : 16;
+  const threatDelta = rawThreatDelta > 0 ? Math.round(rawThreatDelta * difficultyConfig(campaign).threatGainMult) : rawThreatDelta;
+  const threat = Math.max(0, Math.min(THREAT_LOSS_THRESHOLD, strategic.threat + threatDelta));
+  const funding = Math.max(0, strategic.funding + (success ? 100 : -75));
   const score = strategic.score + (success ? 100 + operation.enemyCount * 10 : -50);
   const canFieldSquad =
     soldiers.some((soldier) => soldier.status !== "kia") ||
     resources.credits >= RECRUIT_COST;
-  const panicCollapse = Math.max(...Object.values(regionalPanic)) >= 100;
+  const panicCollapse = Math.max(...Object.values(regionalPanic)) >= PANIC_LOSS_THRESHOLD;
   const status =
     missionsCompleted >= CAMPAIGN_VICTORY_OPERATIONS
       ? "won"
-      : threat >= 100 || funding <= 0 || !canFieldSquad || panicCollapse
+      : threat >= THREAT_LOSS_THRESHOLD || funding <= 0 || !canFieldSquad || panicCollapse
         ? "lost"
         : "active";
 
@@ -2207,7 +2224,7 @@ function normalizeCampaignStatus(
   const canFieldSquad =
     soldiers.some((soldier) => soldier.status !== "kia") ||
     resources.credits >= RECRUIT_COST;
-  const panicCollapse = Math.max(...Object.values(regionalPanic)) >= 100;
+  const panicCollapse = Math.max(...Object.values(regionalPanic)) >= PANIC_LOSS_THRESHOLD;
   return canFieldSquad && !panicCollapse ? strategic : { ...strategic, status: "lost" };
 }
 
@@ -2222,7 +2239,7 @@ function normalizeStrategic(value: unknown): StrategicState {
       : STARTING_STRATEGIC.status;
   return {
     status,
-    threat: typeof maybe.threat === "number" ? Math.max(0, Math.min(100, maybe.threat)) : STARTING_STRATEGIC.threat,
+    threat: typeof maybe.threat === "number" ? Math.max(0, Math.min(THREAT_LOSS_THRESHOLD, maybe.threat)) : STARTING_STRATEGIC.threat,
     funding: typeof maybe.funding === "number" ? Math.max(0, maybe.funding) : STARTING_STRATEGIC.funding,
     score: typeof maybe.score === "number" ? maybe.score : STARTING_STRATEGIC.score,
     difficulty: normalizeDifficultyLevel(maybe.difficulty),
@@ -2240,7 +2257,7 @@ function normalizeRegionalPanic(value: unknown): Record<CouncilRegion, number> {
   for (const region of COUNCIL_REGIONS) {
     const panic = maybe[region];
     result[region] = typeof panic === "number"
-      ? Math.max(0, Math.min(100, Math.round(panic)))
+      ? Math.max(0, Math.min(PANIC_LOSS_THRESHOLD, Math.round(panic)))
       : STARTING_REGIONAL_PANIC[region];
   }
   return result;
@@ -2298,7 +2315,7 @@ function normalizeFundingReport(value: unknown): FundingReport | undefined {
     upkeep: Math.max(0, Math.floor(maybe.upkeep)),
     net: Math.floor(maybe.net),
     funding: Math.max(0, Math.floor(maybe.funding)),
-    threat: Math.max(0, Math.min(100, Math.floor(maybe.threat))),
+    threat: Math.max(0, Math.min(THREAT_LOSS_THRESHOLD, Math.floor(maybe.threat))),
     score: Math.floor(maybe.score),
     summary: maybe.summary,
   };

@@ -8,7 +8,7 @@ import {
   UFO_CONTACT_LIFETIME_HOURS,
 } from "../src/campaign/geoscape";
 import { generateOperation } from "../src/campaign/operations";
-import { createCampaign, regionalPanicFor } from "../src/campaign/storage";
+import { createCampaign, DIFFICULTY_CONFIGS, regionalPanicFor } from "../src/campaign/storage";
 import type { CampaignState, MissionType, UfoContact } from "../src/campaign/types";
 
 const BASE = { lat: 48.2, lon: 14.6, region: "Europe" };
@@ -35,14 +35,21 @@ describe("un-addressed UFOs carry out their mission and cause terror", () => {
 
     const expired = advanceGeoscape(campaign, UFO_CONTACT_LIFETIME_HOURS);
 
-    // Baseline ignore penalty (18, no radar) + terror mission bonus (18) at veteran panicMult 1.0.
+    // Baseline ignore penalty (18, no radar) and terror mission bonus (18) are BOTH scaled
+    // by veteran panicMult (0.75); the rolled UFO is a harvester (profile panicMult 1.0), so
+    // each term adds round(18 * 0.75) = 14, for +28 local panic.
     expect(expired.ufoContact).toBeUndefined();
-    expect(regionalPanicFor(expired, region)!).toBe(panicBefore + 18 + 18);
+    expect(regionalPanicFor(expired, region)!).toBe(
+      panicBefore +
+        Math.round(18 * DIFFICULTY_CONFIGS.veteran.panicMult) +
+        Math.round(18 * DIFFICULTY_CONFIGS.veteran.panicMult),
+    );
 
     const report = expired.projectReports.find((entry) => entry.title === "Alien terror strike");
     expect(report).toBeDefined();
     expect(report!.summary).toContain(region);
-    expect(report!.summary).toContain("+36 panic");
+    // Report total mirrors the actual applied panic: scaled baseline (14) + scaled bonus (14) = 28.
+    expect(report!.summary).toContain("+28 panic");
   });
 
   it("is fully deterministic across repeated runs from the same seed", () => {
@@ -66,9 +73,9 @@ describe("un-addressed UFOs carry out their mission and cause terror", () => {
     // Let the crash-site recovery window lapse.
     const expired = advanceGeoscape(shot, CRASH_SITE_LIFETIME_HOURS);
 
-    // Only the baseline ignore penalty fires (+18); no mission-type terror bonus, no report.
+    // Only the baseline ignore penalty fires, scaled by veteran panicMult: round(18 * 0.75) = 14.
     expect(expired.projectReports.some((entry) => entry.id.startsWith("alien-activity-"))).toBe(false);
-    expect(regionalPanicFor(expired, region)!).toBe(panicBefore + 18);
+    expect(regionalPanicFor(expired, region)!).toBe(panicBefore + 14);
   });
 
   it("scales the terror panic up at commander difficulty via panicMult", () => {
@@ -95,9 +102,13 @@ describe("un-addressed UFOs carry out their mission and cause terror", () => {
     const commanderDelta =
       regionalPanicFor(commanderExpired, commanderRegion)! - regionalPanicFor(commander, commanderRegion)!;
 
-    // Baseline (18) is unscaled; only the terror bonus (18) is multiplied by panicMult.
-    expect(rookieDelta).toBe(18 + Math.round(18 * 0.65));
-    expect(commanderDelta).toBe(18 + Math.round(18 * 1.3));
+    // Both the baseline ignore penalty (18) and the terror bonus (18) are scaled by the
+    // difficulty panicMult (the baseline previously ignored it). The rolled UFO is a
+    // harvester (profile panicMult 1.0), so each term is round(18 * panicMult).
+    const rookiePanicMult = DIFFICULTY_CONFIGS.rookie.panicMult;
+    const commanderPanicMult = DIFFICULTY_CONFIGS.commander.panicMult;
+    expect(rookieDelta).toBe(Math.round(18 * rookiePanicMult) + Math.round(18 * rookiePanicMult));
+    expect(commanderDelta).toBe(Math.round(18 * commanderPanicMult) + Math.round(18 * commanderPanicMult));
     expect(commanderDelta).toBeGreaterThan(rookieDelta);
   });
 });

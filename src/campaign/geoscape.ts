@@ -40,10 +40,12 @@ import {
   highestRegionalPanic,
   livingSoldiers,
   PROJECT_REPORT_LIMIT,
+  PANIC_LOSS_THRESHOLD,
   recoverWoundedSoldiers,
   readyInterceptors,
   repairFleet,
   restockMarket,
+  THREAT_LOSS_THRESHOLD,
 } from "./storage";
 
 export const GEOSCAPE_SCAN_HOURS = 6;
@@ -57,10 +59,10 @@ export interface UfoTypeProfile {
 }
 
 export const UFO_TYPE_PROFILES: Record<UfoType, UfoTypeProfile> = {
-  scout: { strength: 1, speed: 1.4, lifetimeHours: 16, infiltrationMult: 0.5, panicMult: 0.5 },
-  harvester: { strength: 3, speed: 0.6, lifetimeHours: 30, infiltrationMult: 1.0, panicMult: 1.0 },
-  terror: { strength: 5, speed: 0.35, lifetimeHours: 48, infiltrationMult: 1.6, panicMult: 1.6 },
-  battleship: { strength: 8, speed: 0.15, lifetimeHours: 72, infiltrationMult: 2.2, panicMult: 2.2 },
+  scout: { strength: 1, speed: 1.4, lifetimeHours: 30, infiltrationMult: 0.5, panicMult: 0.5 },
+  harvester: { strength: 3, speed: 0.6, lifetimeHours: 44, infiltrationMult: 1.0, panicMult: 1.0 },
+  terror: { strength: 5, speed: 0.35, lifetimeHours: 66, infiltrationMult: 1.6, panicMult: 1.6 },
+  battleship: { strength: 8, speed: 0.15, lifetimeHours: 96, infiltrationMult: 2.2, panicMult: 2.2 },
 };
 
 export interface UfoTypeInfo {
@@ -88,7 +90,7 @@ export function ufoTypeInfo(ufoType?: UfoType): UfoTypeInfo {
 // The harvester profile is the identity/default lifetime (×1.0); legacy code that
 // pinned UFO_CONTACT_LIFETIME_HOURS reads it from here so the two never drift.
 export const UFO_CONTACT_LIFETIME_HOURS = UFO_TYPE_PROFILES.harvester.lifetimeHours;
-export const CRASH_SITE_LIFETIME_HOURS = 24;
+export const CRASH_SITE_LIFETIME_HOURS = 48;
 export const FUNDING_REPORT_INTERVAL_HOURS = 24 * 30;
 export const INTERCEPTOR_REPAIR_MIN_HOURS = 6;
 export const INTERCEPTOR_REPAIR_MAX_HOURS = 72;
@@ -435,10 +437,11 @@ function applyInterceptionOutcome(
   const overOcean = result === "crashed" && !isLand(contact.lat, contact.lon);
   const report = makeInterceptionReport(contact, result, reportDamage, afterCraft.clock.elapsedHours, overOcean);
   if (result === "escaped") {
-    const regionalPanic = adjustRegionalPanic(afterCraft.regionalPanic, contact.region, 8, 1);
+    const cfg = difficultyConfig(campaign);
+    const regionalPanic = adjustRegionalPanic(afterCraft.regionalPanic, contact.region, 8, 1, cfg.panicMult);
     const strategic = statusAfterStrategicChange({ ...afterCraft, regionalPanic }, {
       ...afterCraft.strategic,
-      threat: Math.min(100, afterCraft.strategic.threat + 6),
+      threat: Math.min(THREAT_LOSS_THRESHOLD, afterCraft.strategic.threat + Math.round(6 * cfg.threatGainMult)),
       funding: Math.max(0, afterCraft.strategic.funding - 15),
       score: afterCraft.strategic.score - 20,
     });
@@ -634,24 +637,31 @@ function repairInterceptor(campaign: CampaignState): CampaignState {
 function statusAfterStrategicChange(campaign: CampaignState, strategic: StrategicState): StrategicState {
   if (strategic.status !== "active") return strategic;
   const canFieldSquad = livingSoldiers(campaign).length > 0 || canRecruitSoldier(campaign);
-  const panicCollapse = highestRegionalPanic(campaign).panic >= 100;
+  const panicCollapse = highestRegionalPanic(campaign).panic >= PANIC_LOSS_THRESHOLD;
   return {
     ...strategic,
-    status: strategic.threat >= 100 || strategic.funding <= 0 || !canFieldSquad || panicCollapse ? "lost" : "active",
+    status: strategic.threat >= THREAT_LOSS_THRESHOLD || strategic.funding <= 0 || !canFieldSquad || panicCollapse ? "lost" : "active",
   };
 }
 
 function penalizeIgnoredContact(campaign: CampaignState, strategic: StrategicState): CampaignState {
+  const cfg = difficultyConfig(campaign);
   const trackingUplink = hasBaseFacility(campaign, "radar-2");
+  // panicMult was previously omitted (hardcoded to 1), so ignored contacts hammered
+  // panic at full strength regardless of difficulty. Pass the difficulty scaler now.
+  // Spillover is intentionally small: it applies to EVERY council region, so even a
+  // low per-region value universalizes panic inflation over a long campaign.
   const regionalPanic = adjustRegionalPanic(
     campaign.regionalPanic,
     campaign.ufoContact?.region ?? campaign.base.region,
     trackingUplink ? 12 : 18,
-    trackingUplink ? 1 : 2,
+    trackingUplink ? 0 : 1,
+    cfg.panicMult,
   );
+  const threatGain = Math.round((trackingUplink ? 4 : 6) * cfg.threatGainMult);
   const next = {
     ...strategic,
-    threat: Math.min(100, strategic.threat + (trackingUplink ? 4 : 6)),
+    threat: Math.min(THREAT_LOSS_THRESHOLD, strategic.threat + threatGain),
     funding: Math.max(0, strategic.funding - (trackingUplink ? 10 : 15)),
     score: strategic.score - 25,
   };
@@ -780,7 +790,9 @@ function applyContactTerror(campaign: CampaignState, contact: UfoContact): Campa
   const missionType = contactMissionType(contact);
   const bonus = contactTerrorBonus(contact);
   const panicMult = difficultyConfig(campaign).panicMult;
-  const baselineLocal = hasBaseFacility(campaign, "radar-2") ? 12 : 18;
+  // Match the scaled baseline that penalizeIgnoredContact actually applied, so the
+  // report's panic total reflects the real effect rather than the raw pre-scale value.
+  const baselineLocal = Math.round((hasBaseFacility(campaign, "radar-2") ? 12 : 18) * panicMult);
   const bonusLocal = Math.round(bonus.local * panicMult);
   const totalLocal = baselineLocal + bonusLocal;
 
