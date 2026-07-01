@@ -23,6 +23,7 @@ import type {
 import { coverDefenseFor } from "../sim/combat";
 import { visibleEnemyIds } from "../sim/index";
 import type { SoldierRank, SoldierStatGrowth } from "../campaign/types";
+import { UI_TOKENS, UI_BASE, UI_COMPONENTS } from "./uiTheme";
 
 export interface HudHover {
   kind: "target" | "move" | "blocked";
@@ -161,17 +162,17 @@ const LOG_TAIL = 7;
 /** Morale at/above this value reads as "Steady"; below PANIC_THRESHOLD reads as "PANIC". */
 const MORALE_STEADY_FLOOR = 67;
 
-const CSS = `
+const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
 :root {
-  --hud-cyan: #67e8f9;
+  --hud-cyan: var(--ui-cyan);
   --hud-cyan-soft: rgba(103,232,249,.16);
-  --hud-amber: #fbbf24;
-  --hud-green: #4ade80;
-  --hud-red: #fb7185;
-  --hud-text: #e5f0f8;
-  --hud-muted: #86a0b5;
-  --hud-panel: rgba(7,13,20,.88);
-  --hud-border: rgba(132,165,188,.25);
+  --hud-amber: var(--ui-amber);
+  --hud-green: var(--ui-green);
+  --hud-red: var(--ui-red);
+  --hud-text: var(--ui-text);
+  --hud-muted: var(--ui-muted);
+  --hud-panel: var(--ui-panel);
+  --hud-border: var(--ui-border);
 }
 #hud {
   position: absolute;
@@ -179,7 +180,7 @@ const CSS = `
   z-index: 5;
   pointer-events: none;
   color: var(--hud-text);
-  font: 12px/1.35 Inter, ui-sans-serif, system-ui, sans-serif;
+  font: 14px/1.45 Inter, ui-sans-serif, system-ui, sans-serif;
   letter-spacing: .01em;
 }
 #hud::before {
@@ -212,26 +213,29 @@ const CSS = `
 }
 #hud .eyebrow {
   color: var(--hud-cyan);
-  font: 700 9px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
+  font: 700 12px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
   letter-spacing: .18em;
   text-transform: uppercase;
 }
 #hud .muted { color: var(--hud-muted); }
+#hud .log,
+#hud .unit,
+#hud .squad { pointer-events: auto; }
 #hud button {
   pointer-events: auto;
   min-height: 38px;
   cursor: pointer;
   color: var(--hud-text);
-  border: 1px solid rgba(130,160,181,.28);
+  border: 1px solid var(--ui-border);
   border-radius: 7px;
   background: linear-gradient(180deg, rgba(34,51,65,.92), rgba(16,26,35,.94));
-  font: 700 11px/1.1 ui-monospace, "SF Mono", Menlo, monospace;
+  font: 700 13px/1.1 ui-monospace, "SF Mono", Menlo, monospace;
   letter-spacing: .04em;
   transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
 }
 #hud button:hover:not(:disabled) {
-  border-color: rgba(103,232,249,.75);
-  background: linear-gradient(180deg, rgba(38,69,86,.96), rgba(18,39,51,.96));
+  border-color: var(--ui-border-bright);
+  background: linear-gradient(180deg, rgba(40,75,94,.97), rgba(20,44,58,.97));
 }
 #hud button:active:not(:disabled) { transform: translateY(1px); }
 #hud button:focus-visible { outline: 2px solid var(--hud-cyan); outline-offset: 2px; }
@@ -246,21 +250,21 @@ const CSS = `
 #hud .mission {
   top: max(14px, env(safe-area-inset-top));
   left: max(14px, env(safe-area-inset-left));
-  width: 292px;
-  padding: 13px 15px 12px;
+  width: 250px;
+  padding: 12px 14px 11px;
 }
-#hud .mission-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
+#hud .mission-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; }
 #hud .mission h1 { margin: 3px 0 0; font-size: 17px; line-height: 1; letter-spacing: .08em; text-transform: uppercase; }
-#hud .turn { color: var(--hud-muted); text-align: right; font: 600 10px/1.35 ui-monospace, monospace; }
-#hud .turn b { display: block; color: var(--hud-cyan); font-size: 12px; text-transform: uppercase; }
-#hud .mission-meta { display: flex; gap: 6px; margin-top: 10px; }
+#hud .turn { color: var(--hud-muted); text-align: right; font: 600 13px/1.35 ui-monospace, monospace; }
+#hud .turn b { display: block; color: var(--hud-cyan); font-size: 13px; text-transform: uppercase; }
+#hud .mission-meta { display: flex; gap: 6px; margin-top: 9px; }
 #hud .chip {
-  padding: 4px 7px;
-  border: 1px solid rgba(130,160,181,.2);
+  padding: 4px 8px;
+  border: 1px solid var(--ui-border);
   border-radius: 999px;
   color: var(--hud-muted);
   background: rgba(0,0,0,.18);
-  font: 700 9px/1 ui-monospace, monospace;
+  font: 700 12px/1 ui-monospace, monospace;
   letter-spacing: .08em;
   text-transform: uppercase;
 }
@@ -270,14 +274,14 @@ const CSS = `
 #hud .objective {
   top: max(14px, env(safe-area-inset-top));
   left: 50%;
-  width: 390px;
-  padding: 12px 16px;
+  width: min(440px, calc(100vw - 600px));
+  padding: 9px 14px;
   transform: translateX(-50%);
 }
-#hud .objective-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-#hud .objective-title { margin-top: 3px; font-size: 13px; font-weight: 760; letter-spacing: .04em; }
-#hud .objective-count { color: var(--hud-amber); font: 800 22px/1 ui-monospace, monospace; }
-#hud .objective-track { height: 3px; margin-top: 10px; border-radius: 4px; background: rgba(255,255,255,.07); overflow: hidden; }
+#hud .objective-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+#hud .objective-title { margin-top: 2px; font-size: 13px; font-weight: 760; letter-spacing: .04em; }
+#hud .objective-count { color: var(--hud-amber); font: 800 20px/1 ui-monospace, monospace; white-space: nowrap; }
+#hud .objective-track { height: 3px; margin-top: 8px; border-radius: 4px; background: rgba(255,255,255,.07); overflow: hidden; }
 #hud .objective-track i { display: block; height: 100%; background: linear-gradient(90deg, var(--hud-cyan), var(--hud-green)); }
 
 #hud .tools {
@@ -298,41 +302,45 @@ const CSS = `
 #hud .log {
   top: 74px;
   right: max(14px, env(safe-area-inset-right));
-  width: 330px;
+  width: 300px;
+  max-height: 240px;
   padding: 12px 14px;
+  overflow-y: auto;
 }
 #hud .log-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }
 #hud .log .line {
   padding: 4px 0;
-  color: #8fa6b9;
+  color: var(--ui-muted);
   border-top: 1px solid rgba(255,255,255,.035);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  font: 500 10px/1.25 ui-monospace, monospace;
+  font: 500 13px/1.3 ui-monospace, monospace;
 }
-#hud .log .line.current { color: #dbeaf4; }
+#hud .log .line.current { color: var(--ui-text); }
 
 #hud .unit {
   left: max(14px, env(safe-area-inset-left));
   bottom: max(14px, env(safe-area-inset-bottom));
   width: 320px;
+  max-height: calc(100vh - 160px);
   padding: 15px;
+  overflow-y: auto;
 }
 #hud .identity { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 12px; }
 #hud .identity h2 { margin: 3px 0 2px; font-size: 20px; line-height: 1; letter-spacing: .03em; }
-#hud .weapon { color: var(--hud-muted); font-size: 11px; }
+#hud .weapon { color: var(--hud-muted); font-size: 13px; }
 #hud .unit-badge {
-  min-width: 62px;
+  min-width: 64px;
   padding: 7px 8px;
   border-radius: 6px;
   color: var(--hud-cyan);
   background: var(--hud-cyan-soft);
   border: 1px solid rgba(103,232,249,.25);
   text-align: center;
-  font: 800 10px/1.15 ui-monospace, monospace;
+  font: 800 12px/1.15 ui-monospace, monospace;
 }
-#hud .meter-head { display: flex; justify-content: space-between; margin-top: 8px; color: var(--hud-muted); font: 700 9px/1 ui-monospace, monospace; letter-spacing: .1em; text-transform: uppercase; }
+#hud .meter-head { display: flex; justify-content: space-between; margin-top: 8px; color: var(--hud-muted); font: 700 12px/1 ui-monospace, monospace; letter-spacing: .1em; text-transform: uppercase; }
 #hud .meter-head b { color: var(--hud-text); font-weight: 700; letter-spacing: 0; }
 #hud .meter-right { display: inline-flex; align-items: baseline; gap: 8px; }
 #hud .bar { position: relative; height: 7px; margin-top: 6px; border-radius: 7px; background: rgba(255,255,255,.07); overflow: hidden; }
@@ -358,9 +366,9 @@ const CSS = `
 #hud .morale-tag.panic { color: var(--hud-red); animation: panic-pulse 1s ease-in-out infinite; }
 #hud .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-top: 12px; }
 #hud .stat { padding: 7px; border: 1px solid rgba(255,255,255,.06); border-radius: 6px; background: rgba(0,0,0,.13); }
-#hud .stat span { display: block; color: var(--hud-muted); font: 700 9px/1 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
-#hud .stat b { display: block; margin-top: 4px; font: 750 12px/1 ui-monospace, monospace; }
-#hud .details-btn { min-height: 28px; min-width: 96px; margin-top: 10px; padding: 0 12px; font-size: 9px; text-transform: uppercase; }
+#hud .stat span { display: block; color: var(--hud-muted); font: 700 12px/1 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+#hud .stat b { display: block; margin-top: 4px; font: 750 15px/1 ui-monospace, monospace; }
+#hud .details-btn { min-height: 30px; min-width: 96px; margin-top: 10px; padding: 0 12px; font-size: 13px; text-transform: uppercase; }
 
 #hud .actions {
   left: 50%;
@@ -371,38 +379,38 @@ const CSS = `
 }
 #hud .context { display: flex; justify-content: space-between; gap: 16px; min-height: 42px; }
 #hud .context h3 { margin: 3px 0 0; font-size: 14px; line-height: 1.2; }
-#hud .context-detail { max-width: 190px; color: var(--hud-muted); text-align: right; font-size: 10px; }
+#hud .context-detail { max-width: 200px; color: var(--hud-muted); text-align: right; font-size: 13px; }
 #hud .context-cost { color: var(--hud-green); font: 800 15px/1 ui-monospace, monospace; }
 #hud .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-top: 11px; }
 #hud .modes button { min-height: 57px; padding: 7px 6px; }
 #hud .modes .mode-name { display: block; text-transform: uppercase; }
-#hud .modes .mode-meta { display: flex; justify-content: center; gap: 7px; margin-top: 5px; color: #9db1c1; font-size: 9px; }
+#hud .modes .mode-meta { display: flex; justify-content: center; gap: 7px; margin-top: 5px; color: var(--ui-muted); font-size: 12px; }
 #hud .modes .chance { color: var(--hud-amber); }
 #hud .reserve-row,
 #hud .reload-row,
 #hud .items-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
 #hud .reserve-row > span,
 #hud .reload-row > span,
-#hud .items-row > span { width: 76px; color: var(--hud-muted); font: 700 8px/1.2 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+#hud .items-row > span { width: 110px; color: var(--hud-muted); font: 700 12px/1.2 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
 #hud .reserve { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; flex: 1; }
-#hud .reserve button { min-height: 30px; padding: 4px; font-size: 8px; text-transform: uppercase; }
-#hud .reload-row button { flex: 1; min-height: 32px; padding: 4px 8px; font-size: 9px; text-transform: uppercase; }
+#hud .reserve button { min-height: 32px; padding: 4px; font-size: 12px; text-transform: uppercase; }
+#hud .reload-row button { flex: 1; min-height: 34px; padding: 4px 8px; font-size: 13px; text-transform: uppercase; }
 /* Carried-items action grid. Each line is one item: primary action + optional grenade prime. */
 #hud .items-stack { flex: 1; display: flex; flex-direction: column; gap: 5px; }
 #hud .item-line { display: flex; gap: 5px; }
-#hud .item-line button { flex: 1; min-height: 34px; padding: 5px 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 9px; text-align: left; text-transform: none; letter-spacing: .02em; }
-#hud .item-line button.prime { flex: 0 0 auto; min-width: 78px; justify-content: center; text-transform: uppercase; }
+#hud .item-line button { flex: 1; min-height: 36px; padding: 5px 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; text-align: left; text-transform: none; letter-spacing: .02em; }
+#hud .item-line button.prime { flex: 0 0 auto; min-width: 82px; justify-content: center; text-transform: uppercase; }
 #hud .item-line .item-label { display: flex; flex-direction: column; gap: 1px; overflow: hidden; }
-#hud .item-line .item-label b { font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#hud .item-line .item-label small { color: var(--hud-muted); font-size: 9px; }
-#hud .item-line .item-verb { color: var(--hud-cyan); font-size: 9px; text-transform: uppercase; }
+#hud .item-line .item-label b { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#hud .item-line .item-label small { color: var(--hud-muted); font-size: 12px; }
+#hud .item-line .item-verb { color: var(--hud-cyan); font-size: 12px; text-transform: uppercase; }
 #hud .item-line button:disabled .item-verb { color: var(--hud-muted); }
-#hud .items-empty { color: var(--hud-muted); font: 600 9px/1.3 ui-monospace, monospace; padding: 4px 2px; }
+#hud .items-empty { color: var(--hud-muted); font: 600 13px/1.3 ui-monospace, monospace; padding: 4px 2px; }
 
 /* Stance toggle (actions panel) — mirrors the reload-row layout. */
 #hud .stance-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-#hud .stance-row > span { width: 76px; color: var(--hud-muted); font: 700 8px/1.2 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
-#hud .stance-row button { flex: 1; min-height: 32px; padding: 4px 8px; font-size: 9px; text-transform: uppercase; }
+#hud .stance-row > span { width: 110px; color: var(--hud-muted); font: 700 12px/1.2 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+#hud .stance-row button { flex: 1; min-height: 34px; padding: 4px 8px; font-size: 13px; text-transform: uppercase; }
 #hud .stance-row .stance-glyph { color: var(--hud-cyan); margin-right: 5px; }
 #hud .stance-row .stance-tu { color: var(--hud-cyan); }
 #hud .stance-row button:disabled .stance-glyph,
@@ -413,7 +421,7 @@ const CSS = `
    cost so state is never conveyed by colour alone; the MC button reads "SPENT"
    once the per-battle hard cap is used. */
 #hud .psi-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-#hud .psi-row > span { width: 76px; color: var(--hud-muted); font: 700 8px/1.2 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+#hud .psi-row > span { width: 110px; color: var(--hud-muted); font: 700 12px/1.2 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
 #hud .psi-actions { flex: 1; display: grid; grid-template-columns: repeat(2, 1fr); gap: 5px; }
 #hud .psi-actions button {
   min-height: 38px;
@@ -422,11 +430,11 @@ const CSS = `
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  font-size: 9px;
+  font-size: 13px;
   text-transform: uppercase;
 }
-#hud .psi-actions .psi-glyph { color: var(--hud-cyan); font-size: 12px; line-height: 1; }
-#hud .psi-actions .psi-cost { color: var(--hud-muted); font-size: 8px; letter-spacing: .04em; text-transform: none; }
+#hud .psi-actions .psi-glyph { color: var(--hud-cyan); font-size: 14px; line-height: 1; }
+#hud .psi-actions .psi-cost { color: var(--hud-muted); font-size: 12px; letter-spacing: .04em; text-transform: none; }
 #hud .psi-actions button:disabled .psi-glyph,
 #hud .psi-actions button:disabled .psi-cost { color: var(--hud-muted); }
 /* Armed psi-targeting mode reads as an active state on the chosen sub-button. */
@@ -446,25 +454,27 @@ const CSS = `
   right: max(14px, env(safe-area-inset-right));
   bottom: 75px;
   width: 334px;
+  max-height: calc(100vh - 200px);
   padding: 13px;
+  overflow-y: auto;
 }
 #hud .squad-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 #hud .roster { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
 #hud .roster button { min-height: 48px; padding: 7px 9px; text-align: left; }
 #hud .roster .roster-top { display: flex; justify-content: space-between; align-items: center; gap: 7px; }
-#hud .roster .roster-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#hud .roster .roster-status { color: var(--hud-green); font-size: 8px; }
+#hud .roster .roster-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+#hud .roster .roster-status { color: var(--hud-green); font-size: 12px; }
 #hud .roster .roster-status.spent { color: var(--hud-amber); }
 #hud .roster .roster-status.kia { color: var(--hud-red); }
 #hud .roster .panic-tag {
   display: inline-block;
   margin-left: 5px;
-  padding: 1px 4px;
+  padding: 1px 5px;
   border-radius: 3px;
   color: #ffe4e6;
   background: rgba(251,113,133,.22);
   border: 1px solid rgba(251,113,133,.5);
-  font: 800 9px/1.2 ui-monospace, monospace;
+  font: 800 12px/1.2 ui-monospace, monospace;
   letter-spacing: .08em;
   animation: panic-pulse 1s ease-in-out infinite;
 }
@@ -476,17 +486,14 @@ const CSS = `
   position: absolute;
   right: max(14px, env(safe-area-inset-right));
   bottom: max(14px, env(safe-area-inset-bottom));
-  min-width: 156px;
+  min-width: 168px;
   min-height: 50px;
-  padding: 0 16px;
-  color: #ecfeff;
-  border-color: rgba(103,232,249,.78);
-  background: linear-gradient(180deg, rgba(16,93,115,.95), rgba(9,49,64,.98));
+  padding: 0 20px;
   text-transform: uppercase;
   letter-spacing: .09em;
 }
 #hud .endturn.ready { animation: endturn-pulse 1.8s ease-in-out infinite; }
-@keyframes endturn-pulse { 50% { box-shadow: 0 0 24px rgba(103,232,249,.2); } }
+@keyframes endturn-pulse { 50% { box-shadow: 0 0 28px rgba(103,232,249,.35); } }
 @keyframes panic-pulse { 50% { opacity: .4; } }
 
 #hud .toast {
@@ -500,10 +507,10 @@ const CSS = `
   border: 1px solid rgba(103,232,249,.4);
   border-radius: 7px;
   color: var(--hud-text);
-  background: rgba(7,15,22,.94);
+  background: var(--ui-panel-solid);
   box-shadow: 0 14px 40px rgba(0,0,0,.38);
   text-align: center;
-  font: 750 11px/1.3 ui-monospace, monospace;
+  font: 750 13px/1.3 ui-monospace, monospace;
   letter-spacing: .04em;
   opacity: 0;
   transform: translate(-50%, -8px);
@@ -558,7 +565,7 @@ const CSS = `
 }
 #hud .briefing h2,
 #hud .banner h1 { margin: 7px 0 10px; font-size: clamp(30px, 6vw, 54px); line-height: .95; letter-spacing: .04em; text-transform: uppercase; }
-#hud .briefing-lede { max-width: 590px; margin: 0; color: #a9bdcb; font-size: 14px; }
+#hud .briefing-lede { max-width: 590px; margin: 0; color: var(--ui-muted); font-size: 14px; }
 #hud .debrief-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -574,7 +581,7 @@ const CSS = `
 #hud .debrief-stat span {
   display: block;
   color: var(--hud-muted);
-  font: 800 8px/1 ui-monospace, monospace;
+  font: 800 12px/1 ui-monospace, monospace;
   letter-spacing: .12em;
   text-transform: uppercase;
 }
@@ -582,7 +589,7 @@ const CSS = `
   display: block;
   margin-top: 7px;
   color: var(--hud-text);
-  font: 850 11px/1.2 ui-monospace, monospace;
+  font: 850 14px/1.2 ui-monospace, monospace;
   text-transform: uppercase;
 }
 
@@ -604,7 +611,7 @@ const CSS = `
 }
 #hud .debrief-count {
   color: var(--hud-muted);
-  font: 700 9px/1 ui-monospace, monospace;
+  font: 700 12px/1 ui-monospace, monospace;
   letter-spacing: .08em;
   text-transform: uppercase;
 }
@@ -619,7 +626,7 @@ const CSS = `
 #hud .debrief-campaign.lost { border-color: rgba(251,113,133,.45); background: rgba(251,113,133,.07); }
 #hud .debrief-campaign.won .eyebrow { color: var(--hud-green); }
 #hud .debrief-campaign.lost .eyebrow { color: var(--hud-red); }
-#hud .debrief-campaign-line { margin-top: 5px; color: #c3d4df; font: 600 11px/1.35 ui-monospace, monospace; }
+#hud .debrief-campaign-line { margin-top: 5px; color: var(--ui-text); font: 600 13px/1.35 ui-monospace, monospace; }
 
 /* Loot bar — four resource chips, each a glyph + amount + label. */
 #hud .debrief-loot-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin-top: 8px; }
@@ -651,7 +658,7 @@ const CSS = `
   display: block;
   margin-top: 4px;
   color: var(--hud-muted);
-  font: 700 8px/1 ui-monospace, monospace;
+  font: 700 12px/1 ui-monospace, monospace;
   letter-spacing: .1em;
   text-transform: uppercase;
 }
@@ -663,7 +670,7 @@ const CSS = `
   margin-top: 6px;
   padding: 2px 7px;
   border-radius: 4px;
-  font: 800 9px/1.2 ui-monospace, monospace;
+  font: 800 12px/1.2 ui-monospace, monospace;
   letter-spacing: .08em;
   text-transform: uppercase;
 }
@@ -683,9 +690,9 @@ const CSS = `
 #hud .debrief-roster li.kia { border-color: rgba(251,113,133,.28); background: rgba(251,113,133,.05); }
 #hud .debrief-soldier-line { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 #hud .debrief-soldier-name { font: 750 13px/1.2 ui-monospace, monospace; letter-spacing: .02em; }
-#hud .debrief-rank { color: var(--hud-cyan); font: 700 9px/1 ui-monospace, monospace; letter-spacing: .1em; text-transform: uppercase; }
-#hud .debrief-bio { margin-top: 5px; color: var(--hud-muted); font: 500 10px/1.45 ui-monospace, monospace; }
-#hud .debrief-tag { margin-top: 6px; font: 800 9px/1.2 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+#hud .debrief-rank { color: var(--hud-cyan); font: 700 12px/1 ui-monospace, monospace; letter-spacing: .1em; text-transform: uppercase; }
+#hud .debrief-bio { margin-top: 5px; color: var(--hud-muted); font: 500 13px/1.45 ui-monospace, monospace; }
+#hud .debrief-tag { margin-top: 6px; font: 800 12px/1.2 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
 #hud .debrief-tag.kia { color: var(--hud-red); }
 #hud .debrief-tag.wounded { color: var(--hud-amber); }
 #hud .debrief-tag.promoted { color: var(--hud-green); }
@@ -695,7 +702,7 @@ const CSS = `
   border-radius: 4px;
   color: var(--hud-green);
   background: rgba(74,222,128,.12);
-  font: 700 9px/1.2 ui-monospace, monospace;
+  font: 700 12px/1.2 ui-monospace, monospace;
   letter-spacing: .03em;
 }
 #hud .debrief-empty {
@@ -703,16 +710,16 @@ const CSS = `
   border: 1px dashed rgba(255,255,255,.1);
   border-radius: 8px;
   color: var(--hud-muted);
-  font: 600 10px/1.3 ui-monospace, monospace;
+  font: 600 13px/1.3 ui-monospace, monospace;
 }
 #hud .briefing-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 26px 0; }
 #hud .briefing-step { padding: 13px; border: 1px solid rgba(255,255,255,.08); border-radius: 8px; background: rgba(0,0,0,.14); }
-#hud .briefing-step b { display: block; margin: 5px 0; font-size: 13px; text-transform: uppercase; }
-#hud .briefing-step p { margin: 0; color: var(--hud-muted); font-size: 10px; }
+#hud .briefing-step b { display: block; margin: 5px 0; font-size: 15px; text-transform: uppercase; }
+#hud .briefing-step p { margin: 0; color: var(--hud-muted); font-size: 14px; }
 #hud .briefing-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-#hud .briefing-actions span { color: var(--hud-muted); font: 600 9px/1.45 ui-monospace, monospace; }
+#hud .briefing-actions span { color: var(--hud-muted); font: 600 12px/1.45 ui-monospace, monospace; }
 #hud .briefing-actions button,
-#hud .banner button { min-width: 174px; padding: 0 18px; border-color: var(--hud-cyan); }
+#hud .banner button { min-width: 174px; padding: 0 18px; }
 #hud .banner-actions { display: flex; gap: 10px; justify-content: center; margin-top: 6px; }
 #hud .banner-card { text-align: center; }
 #hud .banner.win h1 { color: var(--hud-green); }
@@ -722,12 +729,12 @@ const CSS = `
 
 /* Soldier dossier (details overlay). */
 #hud .dossier h2 { margin: 4px 0 0; font-size: 26px; line-height: 1; letter-spacing: .03em; }
-#hud .dossier .rank { margin-top: 6px; color: var(--hud-cyan); font: 700 11px/1 ui-monospace, monospace; letter-spacing: .1em; text-transform: uppercase; }
+#hud .dossier .rank { margin-top: 6px; color: var(--hud-cyan); font: 700 13px/1 ui-monospace, monospace; letter-spacing: .1em; text-transform: uppercase; }
 #hud .dossier-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin: 18px 0; }
 #hud .dossier-section { margin-top: 14px; }
 #hud .dossier-section > .eyebrow { margin-bottom: 7px; }
 #hud .dossier ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 5px; }
-#hud .dossier li { display: flex; justify-content: space-between; gap: 10px; padding: 6px 9px; border: 1px solid rgba(255,255,255,.06); border-radius: 6px; background: rgba(0,0,0,.18); font: 600 10px/1.3 ui-monospace, monospace; }
+#hud .dossier li { display: flex; justify-content: space-between; gap: 10px; padding: 6px 9px; border: 1px solid rgba(255,255,255,.06); border-radius: 6px; background: rgba(0,0,0,.18); font: 600 13px/1.3 ui-monospace, monospace; }
 #hud .dossier li small { color: var(--hud-muted); }
 #hud .dossier-actions { display: flex; justify-content: flex-end; margin-top: 18px; }
 #hud .dossier-actions button { min-width: 130px; }
@@ -766,7 +773,7 @@ const CSS = `
   #hud .psi-row { display: none; }
   #hud .modes { margin-top: 7px; }
   #hud .modes button { min-height: 48px; }
-  #hud .endturn { right: 20px; bottom: 36px; min-width: 104px; min-height: 46px; font-size: 9px; }
+  #hud .endturn { right: 20px; bottom: 36px; min-width: 124px; min-height: 46px; font-size: 12px; }
   #hud .briefing-grid { grid-template-columns: 1fr; }
   #hud .briefing-step { padding: 10px 12px; }
   #hud .briefing-actions { align-items: stretch; flex-direction: column; }
@@ -1205,7 +1212,7 @@ export class Hud {
     squad.append(squadHead, this.rosterEl);
     this.root.appendChild(squad);
 
-    this.endTurn = el("button", "endturn");
+    this.endTurn = el("button", "endturn ui-cta");
     this.endTurn.textContent = "End turn [Enter]";
     this.endTurn.addEventListener("click", () => this.cb.onEndTurn());
     this.root.appendChild(this.endTurn);
@@ -1978,6 +1985,8 @@ export class Hud {
       this.bannerReport.replaceChildren();
     }
     this.bannerNewCampaignBtn.style.display = campaignOver ? "" : "none";
+    this.bannerReturnBtn.classList.toggle("ui-cta", !campaignOver);
+    this.bannerNewCampaignBtn.classList.toggle("ui-cta", campaignOver);
     this.banner.classList.add("show");
     this.banner.classList.toggle("win", win);
     this.banner.classList.toggle("lose", !win);
@@ -2373,7 +2382,7 @@ export class Hud {
     const keys = el("span");
     keys.textContent =
       "1/2/3 MODE · K KNEEL · R RESERVE · L RELOAD · ENTER END TURN · TAB CYCLE · WASD PAN · Q/E ROTATE · WHEEL ZOOM · H HELP · M MUTE";
-    const begin = el("button");
+    const begin = el("button", "ui-cta");
     begin.textContent = "Deploy squad";
     begin.addEventListener("click", () => this.toggleBriefing(false));
     actions.append(keys, begin);

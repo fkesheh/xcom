@@ -20,6 +20,7 @@ import {
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
+  type Object3D,
   PerspectiveCamera,
   Points,
   PointsMaterial,
@@ -35,6 +36,7 @@ import {
   WebGLRenderer,
 } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { UI_TOKENS, UI_BASE, UI_COMPONENTS } from "./uiTheme";
 
 import type {
   BaseLocation,
@@ -202,18 +204,18 @@ interface EventSnapshot {
 let resumedTimeSpeed = 0;
 let lastEventSnapshot: EventSnapshot | null = null;
 
-const CSS = `
+const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
 #geoscape {
   position: fixed;
   inset: 0;
   overflow: hidden;
-  color: #dff7ff;
+  color: var(--ui-text);
   background:
     radial-gradient(circle at 48% 42%, rgba(10,44,61,.88), rgba(3,8,14,.96) 42%, #010308 100%);
-  font: 12px/1.4 Inter, ui-sans-serif, system-ui, sans-serif;
+  font: 400 var(--ui-text-base)/var(--ui-leading) var(--ui-font-ui);
   letter-spacing: .02em;
 }
-#geoscape canvas { width: 100%; height: 100%; cursor: crosshair; }
+#geoscape canvas { width: 100%; height: 100%; cursor: grab; }
 #geoscape::before {
   content: "";
   position: absolute;
@@ -233,15 +235,13 @@ const CSS = `
 }
 #geoscape .geo-panel {
   position: absolute;
-  z-index: 4;
+  z-index: var(--ui-z-panel);
   width: min(360px, calc(100vw - 28px));
-  padding: 16px;
-  border: 1px solid rgba(103,232,249,.28);
-  border-radius: 10px;
-  background:
-    linear-gradient(145deg, rgba(12,30,43,.92), rgba(3,9,15,.94) 62%),
-    rgba(3,9,15,.94);
-  box-shadow: 0 24px 80px rgba(0,0,0,.38), inset 0 1px rgba(255,255,255,.035);
+  padding: var(--ui-sp-4);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-panel-raised);
+  box-shadow: var(--ui-shadow), inset 0 1px rgba(255,255,255,.04);
   backdrop-filter: blur(10px);
 }
 #geoscape .geo-panel::before {
@@ -251,7 +251,7 @@ const CSS = `
   left: 0;
   width: 36%;
   height: 2px;
-  background: linear-gradient(90deg, #67e8f9, transparent);
+  background: linear-gradient(90deg, var(--ui-cyan), transparent);
 }
 #geoscape .geo-left {
   top: max(18px, env(safe-area-inset-top));
@@ -259,11 +259,11 @@ const CSS = `
 }
 #geoscape .geo-right {
   right: max(18px, env(safe-area-inset-right));
-  bottom: max(18px, env(safe-area-inset-bottom));
+  bottom: calc(max(18px, env(safe-area-inset-bottom)) + 64px);
 }
 #geoscape .eyebrow {
-  color: #67e8f9;
-  font: 800 9px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--ui-cyan);
+  font: 700 var(--ui-text-xs)/var(--ui-leading-tight) var(--ui-font-mono);
   letter-spacing: .2em;
   text-transform: uppercase;
 }
@@ -276,86 +276,87 @@ const CSS = `
 }
 #geoscape h2 {
   margin: 7px 0 8px;
-  font-size: 20px;
+  font-size: var(--ui-text-xl);
   line-height: 1;
   letter-spacing: .06em;
   text-transform: uppercase;
 }
 #geoscape p {
   margin: 0;
-  color: #95adbf;
+  color: var(--ui-muted);
 }
 #geoscape .geo-status {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 7px;
-  margin-top: 15px;
+  gap: var(--ui-sp-2);
+  margin-top: var(--ui-sp-4);
 }
 #geoscape .geo-stat {
-  padding: 9px;
-  border: 1px solid rgba(255,255,255,.07);
-  border-radius: 7px;
-  background: rgba(0,0,0,.16);
+  padding: var(--ui-sp-2);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-panel);
 }
 #geoscape .geo-stat span {
   display: block;
-  color: #7190a4;
-  font: 750 8px/1 ui-monospace, monospace;
+  color: var(--ui-muted);
+  font: 700 var(--ui-text-xs)/1 var(--ui-font-mono);
   letter-spacing: .12em;
   text-transform: uppercase;
 }
 #geoscape .geo-stat b {
   display: block;
   margin-top: 5px;
-  color: #e8fbff;
-  font: 800 11px/1 ui-monospace, monospace;
+  color: var(--ui-text);
+  font: 800 var(--ui-text-base)/1 var(--ui-font-mono);
 }
 #geoscape .geo-site {
-  margin: 13px 0;
-  padding: 13px;
-  border: 1px solid rgba(103,232,249,.18);
-  border-radius: 8px;
-  background: rgba(2,12,20,.5);
+  margin: var(--ui-sp-3) 0;
+  padding: var(--ui-sp-3);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius);
+  background: var(--ui-panel);
 }
 #geoscape .geo-site strong {
   display: block;
   margin-bottom: 7px;
-  color: #fbbf24;
-  font: 850 17px/1 ui-monospace, monospace;
+  color: var(--ui-amber);
+  font: 800 var(--ui-text-lg)/1 var(--ui-font-mono);
   text-transform: uppercase;
 }
 #geoscape .geo-coords {
-  color: #a9c8d7;
-  font: 650 10px/1.5 ui-monospace, monospace;
+  color: var(--ui-muted);
+  font: 600 var(--ui-text-xs)/var(--ui-leading) var(--ui-font-mono);
 }
 #geoscape .geo-contact {
-  margin-top: 13px;
-  padding: 13px;
-  border: 1px solid rgba(251,113,133,.34);
-  border-radius: 8px;
-  background: rgba(45,11,18,.28);
+  margin-top: var(--ui-sp-3);
+  padding: var(--ui-sp-3);
+  border: 1px solid var(--ui-red);
+  border-radius: var(--ui-radius);
+  background: var(--ui-panel);
 }
 #geoscape .geo-contact.idle {
-  border-color: rgba(103,232,249,.16);
-  background: rgba(2,12,20,.42);
+  border-color: var(--ui-border);
+  background: var(--ui-panel);
 }
 #geoscape .geo-contact.lost {
-  border-color: rgba(100,116,139,.5);
-  background: rgba(15,23,42,.4);
+  border-color: var(--ui-border);
+  background: var(--ui-panel);
 }
-#geoscape .geo-contact.lost strong { color: #94a3b8; }
+#geoscape .geo-contact.lost strong { color: var(--ui-muted); }
 #geoscape .geo-contact strong {
   display: block;
-  color: #fb7185;
-  font: 850 13px/1.2 ui-monospace, monospace;
+  color: var(--ui-red);
+  font: 800 var(--ui-text-sm)/var(--ui-leading-tight) var(--ui-font-mono);
   text-transform: uppercase;
 }
 #geoscape .geo-contact.idle strong {
-  color: #67e8f9;
+  color: var(--ui-cyan);
 }
 #geoscape .geo-contact p {
   margin-top: 7px;
-  font-size: 10px;
+  color: var(--ui-text);
+  font-size: var(--ui-text-base);
 }
 #geoscape .geo-actions {
   display: flex;
@@ -363,43 +364,51 @@ const CSS = `
 }
 #geoscape button {
   min-height: 42px;
-  padding: 0 13px;
-  cursor: pointer;
-  color: #ecfeff;
-  border: 1px solid rgba(132,165,188,.32);
-  border-radius: 7px;
-  background: linear-gradient(180deg, rgba(34,51,65,.95), rgba(11,24,34,.96));
-  font: 800 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+  padding: 0 var(--ui-sp-3);
+  color: var(--ui-text);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius);
+  background: var(--ui-panel-raised);
+  font: 800 var(--ui-text-sm)/1 var(--ui-font-mono);
   letter-spacing: .07em;
   text-transform: uppercase;
+  transition: border-color var(--ui-fast) var(--ui-ease), filter var(--ui-fast) var(--ui-ease);
 }
 #geoscape button.primary {
   flex: 1;
-  border-color: rgba(103,232,249,.78);
-  background: linear-gradient(180deg, rgba(17,94,117,.98), rgba(8,49,65,.98));
+  min-height: 46px;
+  color: var(--ui-bg-deep);
+  border: 1px solid var(--ui-border-bright);
+  border-radius: var(--ui-radius);
+  background: linear-gradient(180deg, var(--ui-cyan), #2bc5e0);
+  box-shadow: var(--ui-shadow-glow);
+  font-weight: 800;
 }
 #geoscape button:hover:not(:disabled) {
-  border-color: rgba(103,232,249,.9);
-  background: linear-gradient(180deg, rgba(38,76,92,.98), rgba(11,39,52,.98));
+  border-color: var(--ui-border-bright);
+  filter: brightness(1.12);
+}
+#geoscape button.primary:hover:not(:disabled) {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
 }
 #geoscape button:disabled {
-  cursor: default;
-  opacity: .4;
+  opacity: .42;
 }
 #geoscape .geo-hint {
   position: absolute;
   left: 50%;
-  bottom: max(22px, env(safe-area-inset-bottom));
-  z-index: 3;
+  bottom: calc(max(18px, env(safe-area-inset-bottom)) + 72px);
+  z-index: var(--ui-z-panel);
   width: min(520px, calc(100vw - 36px));
-  padding: 10px 14px;
-  border: 1px solid rgba(103,232,249,.16);
-  border-radius: 999px;
-  color: #94aebe;
-  background: rgba(0,0,0,.3);
+  padding: var(--ui-sp-2) var(--ui-sp-3);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-pill);
+  color: var(--ui-muted);
+  background: var(--ui-panel);
   text-align: center;
   transform: translateX(-50%);
-  font: 700 10px/1.3 ui-monospace, monospace;
+  font: 700 var(--ui-text-sm)/var(--ui-leading) var(--ui-font-mono);
   letter-spacing: .08em;
   text-transform: uppercase;
 }
@@ -410,8 +419,8 @@ const CSS = `
   margin-top: 13px;
 }
 #geoscape .geo-difficulty-eye {
-  color: #67e8f9;
-  font: 800 9px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--ui-cyan);
+  font: 700 var(--ui-text-xs)/var(--ui-leading-tight) var(--ui-font-mono);
   letter-spacing: .2em;
   text-transform: uppercase;
 }
@@ -419,35 +428,34 @@ const CSS = `
   display: flex;
   flex-direction: column;
   gap: 3px;
-  padding: 9px 11px;
-  cursor: pointer;
+  padding: var(--ui-sp-2) var(--ui-sp-3);
   text-align: left;
-  color: #cfe6f2;
-  border: 1px solid rgba(132,165,188,.24);
-  border-radius: 7px;
-  background: rgba(0,0,0,.18);
-  font: 700 11px/1.3 ui-monospace, monospace;
+  color: var(--ui-text);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-panel);
+  font: 700 var(--ui-text-sm)/var(--ui-leading) var(--ui-font-mono);
 }
 #geoscape .geo-diff-option .geo-diff-name {
-  color: #e8fbff;
+  color: var(--ui-text-strong);
   font-weight: 800;
   letter-spacing: .06em;
   text-transform: uppercase;
 }
 #geoscape .geo-diff-option .geo-diff-name::before {
   content: "○  ";
-  color: #67e8f9;
+  color: var(--ui-cyan);
 }
 #geoscape .geo-diff-option .geo-diff-desc {
-  color: #8aa6b6;
-  font-size: 10px;
+  color: var(--ui-muted);
+  font-size: var(--ui-text-xs);
   font-weight: 600;
   text-transform: none;
   letter-spacing: 0;
 }
 #geoscape .geo-diff-option[aria-checked="true"] {
-  border-color: rgba(103,232,249,.85);
-  background: linear-gradient(180deg, rgba(17,94,117,.95), rgba(8,49,65,.95));
+  border-color: var(--ui-border-strong);
+  background: linear-gradient(180deg, rgba(17,94,117,.6), rgba(8,49,65,.7));
 }
 #geoscape .geo-diff-option[aria-checked="true"] .geo-diff-name::before {
   content: "●  ";
@@ -458,108 +466,108 @@ const CSS = `
   gap: 6px;
   align-self: flex-start;
   margin-bottom: 7px;
-  padding: 4px 9px;
-  border-radius: 999px;
-  border: 1px solid rgba(255,255,255,.14);
-  background: rgba(0,0,0,.32);
-  color: #f1f5f9;
-  font: 800 9px/1 ui-monospace, monospace;
+  padding: 4px var(--ui-sp-2);
+  border-radius: var(--ui-radius-pill);
+  border: 1px solid var(--ui-border);
+  background: var(--ui-panel);
+  color: var(--ui-text);
+  font: 800 var(--ui-text-xs)/1 var(--ui-font-mono);
   letter-spacing: .12em;
   text-transform: uppercase;
 }
 #geoscape .geo-mission-badge.urgent {
-  border-color: rgba(249,115,22,.7);
-  background: rgba(67,20,7,.5);
-  color: #fed7aa;
+  border-color: var(--ui-amber);
+  background: var(--ui-panel);
+  color: var(--ui-amber);
 }
-#geoscape .geo-mission-badge .geo-mission-icon { font-size: 12px; }
+#geoscape .geo-mission-badge .geo-mission-icon { font-size: var(--ui-text-xs); }
 #geoscape .geo-mission-badge.lost {
-  border-color: rgba(100,116,139,.6);
-  background: rgba(15,23,42,.55);
-  color: #cbd5e1;
+  border-color: var(--ui-border);
+  background: var(--ui-panel);
+  color: var(--ui-muted);
 }
 #geoscape .geo-empty {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  padding: 10px 6px 4px;
+  padding: var(--ui-sp-2) var(--ui-sp-2) 4px;
   text-align: center;
 }
 #geoscape .geo-empty .geo-empty-icon {
-  font-size: 20px;
+  font-size: var(--ui-text-xl);
   line-height: 1;
-  color: #67e8f9;
+  color: var(--ui-cyan);
   opacity: .75;
 }
 #geoscape .geo-notice {
   display: flex;
   align-items: center;
-  gap: 11px;
-  margin-top: 13px;
-  padding: 11px 13px;
-  border-radius: 8px;
-  border: 1px solid rgba(103,232,249,.3);
-  background: rgba(2,12,20,.55);
+  gap: var(--ui-sp-3);
+  margin-top: var(--ui-sp-3);
+  padding: var(--ui-sp-3);
+  border-radius: var(--ui-radius);
+  border: 1px solid var(--ui-border);
+  background: var(--ui-panel);
 }
 #geoscape .geo-notice.won {
-  border-color: rgba(134,239,172,.6);
-  background: rgba(8,30,16,.45);
+  border-color: var(--ui-green);
+  background: var(--ui-panel);
 }
 #geoscape .geo-notice.lost {
-  border-color: rgba(248,113,113,.6);
-  background: rgba(45,11,18,.4);
+  border-color: var(--ui-red);
+  background: var(--ui-panel);
 }
-#geoscape .geo-notice .geo-notice-icon { font-size: 18px; line-height: 1; }
-#geoscape .geo-notice.won .geo-notice-icon { color: #86efac; }
-#geoscape .geo-notice.lost .geo-notice-icon { color: #fda4af; }
+#geoscape .geo-notice .geo-notice-icon { font-size: var(--ui-text-lg); line-height: 1; }
+#geoscape .geo-notice.won .geo-notice-icon { color: var(--ui-green); }
+#geoscape .geo-notice.lost .geo-notice-icon { color: var(--ui-red); }
 #geoscape .geo-notice b {
   display: block;
-  color: #e8fbff;
-  font: 800 11px/1.3 ui-monospace, monospace;
+  color: var(--ui-text);
+  font: 800 var(--ui-text-sm)/var(--ui-leading) var(--ui-font-mono);
   letter-spacing: .06em;
   text-transform: uppercase;
 }
-#geoscape .geo-notice p { margin-top: 3px; font-size: 10px; }
+#geoscape .geo-notice p { margin-top: 3px; color: var(--ui-muted); font-size: var(--ui-text-base); }
 #geoscape .geo-overlay {
   position: absolute;
   inset: 0;
-  z-index: 8;
+  z-index: var(--ui-z-overlay);
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
-  background: rgba(2,8,14,.62);
+  padding: var(--ui-sp-6);
+  background: var(--ui-panel-solid);
   backdrop-filter: blur(4px);
 }
-#geoscape .geo-bar { margin: 8px 0; }
+#geoscape .geo-bar { margin: var(--ui-sp-2) 0; }
 #geoscape .geo-bar-label {
   display: flex;
   justify-content: space-between;
   margin-bottom: 4px;
-  color: #cbd5e1;
-  font: 700 9px/1 ui-monospace, monospace;
+  color: var(--ui-muted);
+  font: 700 var(--ui-text-xs)/1 var(--ui-font-mono);
   letter-spacing: .12em;
   text-transform: uppercase;
 }
 #geoscape .geo-bar-track {
   height: 10px;
-  border: 1px solid rgba(255,255,255,.1);
-  border-radius: 999px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-pill);
   background: rgba(255,255,255,.08);
   overflow: hidden;
 }
 #geoscape .geo-bar-fill {
   height: 100%;
-  border-radius: 999px;
-  transition: width .2s;
+  border-radius: var(--ui-radius-pill);
+  transition: width var(--ui-mid) var(--ui-ease);
 }
-#geoscape .geo-bar-fill.ufo { background: linear-gradient(90deg, #fb7185, #f43f5e); }
-#geoscape .geo-bar-fill.interceptor { background: linear-gradient(90deg, #67e8f9, #22d3ee); }
+#geoscape .geo-bar-fill.ufo { background: var(--ui-red); }
+#geoscape .geo-bar-fill.interceptor { background: var(--ui-cyan); }
 #geoscape .geo-overlay-host {
   position: absolute;
   inset: 0;
-  z-index: 8;
+  z-index: var(--ui-z-overlay);
   pointer-events: none;
 }
 #geoscape .geo-overlay-host .geo-overlay { pointer-events: auto; }
@@ -567,19 +575,18 @@ const CSS = `
   position: absolute;
   top: max(18px, env(safe-area-inset-top));
   right: max(18px, env(safe-area-inset-right));
-  z-index: 6;
-  min-width: 42px;
-  min-height: 42px;
+  z-index: var(--ui-z-sticky);
+  min-width: 44px;
+  min-height: 44px;
   padding: 0;
-  border-radius: 8px;
-  border: 1px solid rgba(103,232,249,.5);
-  color: #67e8f9;
-  background: rgba(2,12,20,.82);
-  font: 800 16px/1 ui-monospace, monospace;
-  cursor: pointer;
-  box-shadow: 0 10px 30px rgba(0,0,0,.4);
+  border-radius: var(--ui-radius);
+  border: 1px solid var(--ui-border-strong);
+  color: var(--ui-cyan);
+  background: var(--ui-panel);
+  font: 800 var(--ui-text-lg)/1 var(--ui-font-mono);
+  box-shadow: var(--ui-shadow);
 }
-#geoscape .geo-help:hover { border-color: rgba(103,232,249,.95); background: rgba(14,52,67,.95); }
+#geoscape .geo-help:hover { border-color: var(--ui-border-bright); background: var(--ui-panel-raised); }
 /* The HELP overlay lives permanently in the DOM (toggled via .show), so override
    the always-on display:flex of .geo-overlay and gate it on .show. */
 #geoscape .geo-help-overlay { display: none; }
@@ -587,108 +594,149 @@ const CSS = `
 #geoscape .geo-help-card {
   width: min(560px, 100%);
   padding: clamp(22px, 4vw, 36px);
-  border: 1px solid rgba(103,232,249,.32);
-  border-radius: 14px;
-  background: linear-gradient(135deg, rgba(19,42,55,.96), rgba(5,11,17,.98) 62%);
-  box-shadow: 0 30px 100px rgba(0,0,0,.55);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-panel-solid);
+  box-shadow: var(--ui-shadow);
 }
-#geoscape .geo-help-card .eyebrow { color: #67e8f9; font: 700 9px/1.2 ui-monospace, monospace; letter-spacing: .18em; text-transform: uppercase; }
-#geoscape .geo-help-card h2 { margin: 7px 0 8px; color: #e8fbff; font-size: 24px; letter-spacing: .04em; text-transform: uppercase; }
-#geoscape .geo-help-card p.lede { margin: 0; max-width: 480px; color: #a9c8d7; font-size: 12px; }
-#geoscape .geo-help-card ul { margin: 16px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
-#geoscape .geo-help-card li { padding: 9px 12px; border: 1px solid rgba(255,255,255,.07); border-radius: 8px; background: rgba(0,0,0,.18); color: #cfe2ee; font: 600 11px/1.4 ui-monospace, monospace; }
-#geoscape .geo-help-card li b { color: #67e8f9; font-weight: 800; }
-#geoscape .geo-help-actions { display: flex; justify-content: flex-end; margin-top: 16px; }
+#geoscape .geo-help-card .eyebrow { color: var(--ui-cyan); font: 700 var(--ui-text-xs)/var(--ui-leading-tight) var(--ui-font-mono); letter-spacing: .18em; text-transform: uppercase; }
+#geoscape .geo-help-card h2 { margin: 7px 0 8px; color: var(--ui-text); font-size: var(--ui-text-2xl); letter-spacing: .04em; text-transform: uppercase; }
+#geoscape .geo-help-card p.lede { margin: 0; max-width: 480px; color: var(--ui-muted); font-size: var(--ui-text-base); }
+#geoscape .geo-help-card ul { margin: var(--ui-sp-4) 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--ui-sp-2); }
+#geoscape .geo-help-card li { padding: var(--ui-sp-2) var(--ui-sp-3); border: 1px solid var(--ui-border); border-radius: var(--ui-radius); background: var(--ui-panel); color: var(--ui-muted); font: 600 var(--ui-text-sm)/var(--ui-leading) var(--ui-font-mono); }
+#geoscape .geo-help-card li b { color: var(--ui-cyan); font-weight: 800; }
+#geoscape .geo-help-actions { display: flex; justify-content: flex-end; margin-top: var(--ui-sp-4); }
 #geoscape .geo-help-actions button { min-width: 130px; min-height: 38px; }
 #geoscape .geo-welcome {
   position: absolute;
   top: max(68px, calc(env(safe-area-inset-top) + 56px));
   left: 50%;
   transform: translateX(-50%);
-  z-index: 6;
+  z-index: var(--ui-z-sticky);
   display: none;
   width: min(440px, calc(100vw - 36px));
-  padding: 13px 15px;
-  border: 1px solid rgba(103,232,249,.5);
-  border-radius: 12px;
-  background: linear-gradient(145deg, rgba(12,30,43,.96), rgba(3,9,15,.97));
-  box-shadow: 0 24px 70px rgba(0,0,0,.55);
+  padding: var(--ui-sp-3) var(--ui-sp-4);
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-panel-raised);
+  box-shadow: var(--ui-shadow);
 }
 #geoscape .geo-welcome.show { display: block; }
-#geoscape .geo-welcome .eyebrow { color: #67e8f9; font: 700 9px/1.2 ui-monospace, monospace; letter-spacing: .18em; text-transform: uppercase; }
-#geoscape .geo-welcome b { display: block; margin: 5px 0 7px; color: #e8fbff; font: 800 13px/1.2 ui-monospace, monospace; letter-spacing: .04em; }
-#geoscape .geo-welcome ol { margin: 0; padding-left: 18px; color: #cfe2ee; font: 600 11px/1.5 ui-monospace, monospace; }
+#geoscape .geo-welcome .eyebrow { color: var(--ui-cyan); font: 700 var(--ui-text-xs)/var(--ui-leading-tight) var(--ui-font-mono); letter-spacing: .18em; text-transform: uppercase; }
+#geoscape .geo-welcome b { display: block; margin: 5px 0 7px; color: var(--ui-text); font: 800 var(--ui-text-sm)/var(--ui-leading-tight) var(--ui-font-mono); letter-spacing: .04em; }
+#geoscape .geo-welcome ol { margin: 0; padding-left: 18px; color: var(--ui-muted); font: 600 var(--ui-text-sm)/var(--ui-leading) var(--ui-font-mono); }
 #geoscape .geo-welcome ol li { margin-bottom: 3px; }
-#geoscape .geo-welcome-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
-#geoscape .geo-welcome-actions button { min-height: 32px; min-width: 96px; padding: 0 12px; }
+#geoscape .geo-welcome-actions { display: flex; justify-content: flex-end; margin-top: var(--ui-sp-2); }
+#geoscape .geo-welcome-actions button { min-height: 36px; min-width: 96px; padding: 0 var(--ui-sp-3); }
+/* Time controls are the primary verb on the geoscape: a prominent centered
+   bottom bar so flowing time is always the obvious next action. The four
+   .geo-speed-btn (Pause / 1x / 5x / 30x) keep their data-speed + aria-pressed. */
+#geoscape .geo-speed-bar {
+  position: absolute;
+  left: 50%;
+  bottom: max(18px, env(safe-area-inset-bottom));
+  z-index: var(--ui-z-sticky);
+  transform: translateX(-50%);
+  display: flex;
+  gap: var(--ui-sp-2);
+  padding: var(--ui-sp-2);
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--ui-radius-pill);
+  background: var(--ui-panel-raised);
+  backdrop-filter: blur(10px);
+  box-shadow: var(--ui-shadow);
+}
+/* No campaign (new-game screen) -> no speed group -> hide the empty bar. */
+#geoscape .geo-speed-bar:empty { display: none; }
 #geoscape .geo-speed {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 6px;
-  flex: 1;
+  gap: var(--ui-sp-2);
 }
 #geoscape .geo-speed-btn {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 2px;
-  min-height: 40px;
-  padding: 4px 6px;
-  font-size: 9px;
+  gap: 3px;
+  min-width: 78px;
+  min-height: 46px;
+  padding: var(--ui-sp-2) var(--ui-sp-3);
+  color: var(--ui-text);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius);
+  background: var(--ui-panel);
+  font: 800 var(--ui-text-sm)/1 var(--ui-font-mono);
+  letter-spacing: .04em;
+  text-transform: uppercase;
 }
 #geoscape .geo-speed-btn .geo-speed-icon {
-  font-size: 12px;
+  font-size: var(--ui-text-lg);
   line-height: 1;
-  color: #67e8f9;
+  color: var(--ui-cyan);
+}
+#geoscape .geo-speed-btn:hover:not(:disabled) {
+  border-color: var(--ui-border-bright);
+  background: var(--ui-panel-raised);
+  filter: brightness(1.1);
 }
 #geoscape .geo-speed-btn[aria-pressed="true"] {
-  border-color: rgba(103,232,249,.9);
-  background: linear-gradient(180deg, rgba(17,94,117,.98), rgba(8,49,65,.98));
+  border-color: var(--ui-border-bright);
+  background: linear-gradient(180deg, var(--ui-cyan), #2bc5e0);
+  color: var(--ui-bg-deep);
+  box-shadow: var(--ui-shadow-glow);
 }
-#geoscape .geo-speed-btn[aria-pressed="true"] .geo-speed-icon { color: #ecfeff; }
+#geoscape .geo-speed-btn[aria-pressed="true"] .geo-speed-icon { color: var(--ui-bg-deep); }
+/* Pause reads as distinct from the flow speeds (amber, "frozen" mood). */
+#geoscape .geo-speed-btn[data-speed="0"] .geo-speed-icon { color: var(--ui-amber); }
+#geoscape .geo-speed-btn[data-speed="0"][aria-pressed="true"] {
+  background: linear-gradient(180deg, var(--ui-amber), #b45309);
+  border-color: var(--ui-amber);
+  box-shadow: 0 0 0 1px var(--ui-amber), 0 8px 24px rgba(0, 0, 0, 0.6);
+}
+#geoscape .geo-speed-btn[data-speed="0"][aria-pressed="true"] .geo-speed-icon { color: var(--ui-bg-deep); }
 #geoscape .geo-contact .geo-contact-status {
   margin-top: 7px;
-  color: #fbbf24;
-  font: 800 10px/1.3 ui-monospace, monospace;
+  color: var(--ui-amber);
+  font: 800 var(--ui-text-sm)/var(--ui-leading) var(--ui-font-mono);
   letter-spacing: .04em;
   text-transform: uppercase;
 }
 #geoscape .geo-contact .geo-contact-meta {
   margin-top: 4px;
-  color: #8aa6b6;
-  font: 600 10px/1.4 ui-monospace, monospace;
+  color: var(--ui-muted);
+  font: 600 var(--ui-text-xs)/var(--ui-leading) var(--ui-font-mono);
 }
 #geoscape .geo-toast {
   position: absolute;
   top: max(18px, env(safe-area-inset-top));
   left: 50%;
-  z-index: 9;
+  z-index: var(--ui-z-toast);
   transform: translate(-50%, -16px);
   opacity: 0;
   pointer-events: none;
-  padding: 10px 16px;
-  border-radius: 999px;
-  border: 1px solid rgba(103,232,249,.5);
-  background: rgba(2,12,20,.85);
-  color: #e8fbff;
-  font: 800 11px/1.3 ui-monospace, monospace;
+  padding: var(--ui-sp-2) var(--ui-sp-4);
+  border-radius: var(--ui-radius-pill);
+  border: 1px solid var(--ui-border-strong);
+  background: var(--ui-panel);
+  color: var(--ui-text);
+  font: 800 var(--ui-text-sm)/var(--ui-leading) var(--ui-font-mono);
   letter-spacing: .08em;
   text-transform: uppercase;
-  box-shadow: 0 16px 50px rgba(0,0,0,.45);
-  transition: opacity .2s ease, transform .2s ease;
+  box-shadow: var(--ui-shadow);
+  transition: opacity var(--ui-mid) var(--ui-ease), transform var(--ui-mid) var(--ui-ease);
 }
 #geoscape .geo-toast.visible {
   opacity: 1;
   transform: translate(-50%, 0);
 }
 #geoscape .geo-toast[data-kind="won"] {
-  border-color: rgba(134,239,172,.7);
-  color: #bbf7d0;
+  border-color: var(--ui-green);
+  color: var(--ui-green);
 }
 #geoscape .geo-toast[data-kind="lost"] {
-  border-color: rgba(248,113,113,.7);
-  color: #fecaca;
+  border-color: var(--ui-red);
+  color: var(--ui-red);
 }
 #geoscape .geo-damage-layer {
   position: absolute;
@@ -699,15 +747,32 @@ const CSS = `
 #geoscape .geo-dmg {
   position: absolute;
   transform: translate(-50%, -50%);
-  color: #fff;
-  font: 800 14px/1 ui-monospace, monospace;
+  color: var(--ui-text-strong);
+  font: 800 var(--ui-text-base)/1 var(--ui-font-mono);
   letter-spacing: .03em;
   text-shadow: 0 1px 3px rgba(0,0,0,.9), 0 0 8px rgba(0,0,0,.6);
   animation: geo-dmg-float .9s ease-out forwards;
   white-space: nowrap;
 }
-#geoscape .geo-dmg.ufo { color: #fdba74; }
-#geoscape .geo-dmg.interceptor { color: #fda4af; }
+#geoscape .geo-dmg.ufo { color: var(--ui-amber); }
+#geoscape .geo-dmg.interceptor { color: var(--ui-red); }
+/* Callout pinned to the active UFO marker so the player sees where to act. */
+#geoscape .geo-contact-label {
+  position: absolute;
+  transform: translate(-50%, -150%);
+  z-index: var(--ui-z-sticky);
+  padding: 3px var(--ui-sp-2);
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--ui-radius-pill);
+  background: var(--ui-panel-solid);
+  color: var(--ui-text);
+  font: 800 var(--ui-text-xs)/var(--ui-leading-tight) var(--ui-font-mono);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: var(--ui-shadow);
+}
 @keyframes geo-dmg-float {
   0% { opacity: 0; transform: translate(-50%, -30%) scale(.7); }
   15% { opacity: 1; transform: translate(-50%, -55%) scale(1.05); }
@@ -719,16 +784,16 @@ const CSS = `
 }
 #geoscape .geo-deploy-panel {
   width: min(420px, calc(100vw - 48px));
-  padding: 18px;
-  border: 1px solid rgba(103,232,249,.5);
-  border-radius: 12px;
-  background: linear-gradient(145deg, rgba(12,30,43,.96), rgba(3,9,15,.97));
-  box-shadow: 0 30px 90px rgba(0,0,0,.55);
+  padding: var(--ui-sp-4);
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-panel-solid);
+  box-shadow: var(--ui-shadow);
   text-align: center;
 }
-#geoscape .geo-deploy-panel .eyebrow { color: #67e8f9; }
-#geoscape .geo-deploy-panel h2 { color: #e8fbff; margin-bottom: 6px; }
-#geoscape .geo-deploy-panel p { color: #a9c8d7; font-size: 11px; }
+#geoscape .geo-deploy-panel .eyebrow { color: var(--ui-cyan); }
+#geoscape .geo-deploy-panel h2 { color: var(--ui-text); margin-bottom: 6px; }
+#geoscape .geo-deploy-panel p { color: var(--ui-muted); font-size: var(--ui-text-base); }
 #geoscape .geo-deploy-panel .geo-bar { margin: 12px 0 0; text-align: left; }
 #geoscape .geo-deploy-actions { display: flex; gap: 8px; margin-top: 14px; }
 #geoscape .geo-deploy-actions button { flex: 1; }
@@ -737,16 +802,16 @@ const CSS = `
   align-items: center;
   gap: 6px;
   margin-top: 6px;
-  padding: 4px 9px;
-  border-radius: 999px;
-  border: 1px solid rgba(248,113,113,.7);
-  background: rgba(60,12,18,.55);
-  color: #fecaca;
-  font: 800 10px/1 ui-monospace, monospace;
+  padding: 4px var(--ui-sp-2);
+  border-radius: var(--ui-radius-pill);
+  border: 1px solid var(--ui-red);
+  background: var(--ui-panel);
+  color: var(--ui-red);
+  font: 800 var(--ui-text-xs)/1 var(--ui-font-mono);
   letter-spacing: .1em;
   text-transform: uppercase;
   opacity: 0;
-  transition: opacity .12s ease;
+  transition: opacity var(--ui-fast) var(--ui-ease);
 }
 #geoscape .geo-threat-tag.active { opacity: 1; animation: geo-threat-pulse .42s ease-out 2; }
 @keyframes geo-threat-pulse {
@@ -766,14 +831,16 @@ const CSS = `
 }
 #geoscape .geo-threat-flash.active { opacity: 1; transition: opacity .05s ease; }
 @media (max-width: 820px) {
-  #geoscape .geo-panel { width: calc(100vw - 24px); padding: 13px; }
+  #geoscape .geo-panel { width: calc(100vw - 24px); padding: var(--ui-sp-3); }
   #geoscape .geo-left { left: 12px; right: 12px; }
-  #geoscape .geo-right { left: 12px; right: 12px; bottom: 12px; }
+  /* Lift the right panel above the centered speed bar so the two never overlap. */
+  #geoscape .geo-right { left: 12px; right: 12px; bottom: calc(12px + 78px); }
   #geoscape h1 { font-size: 30px; }
   #geoscape .geo-status { grid-template-columns: 1fr; }
   #geoscape .geo-hint { display: none; }
   #geoscape .geo-actions { flex-wrap: wrap; }
-  #geoscape .geo-speed-btn { min-height: 36px; }
+  #geoscape .geo-speed-bar { left: 12px; right: 12px; transform: none; width: auto; justify-content: center; }
+  #geoscape .geo-speed-btn { min-height: 40px; min-width: 0; }
 }
 /* Keyboard focus indicators — :focus-visible only fires for keyboard users, so
    mouse-driven screenshots are unaffected. Covers speed buttons, the difficulty
@@ -782,7 +849,7 @@ const CSS = `
 #geoscape .geo-help:focus-visible,
 #geoscape .geo-diff-option:focus-visible,
 #geoscape select:focus-visible {
-  outline: 2px solid #67e8f9;
+  outline: 2px solid var(--ui-cyan);
   outline-offset: 2px;
 }
 /* Respect prefers-reduced-motion: stop the floating damage numbers and the
@@ -1229,6 +1296,8 @@ export class GeoscapeView {
   private readonly actionsSlot: HTMLDivElement;
   private readonly overlaySlot: HTMLDivElement;
   private readonly toast: HTMLDivElement;
+  /** Prominent centered bottom bar holding the time-flow speed controls. */
+  private readonly speedBar: HTMLDivElement;
   /** Concise HELP overlay (controls + mechanics reference). */
   private helpOverlay: HTMLDivElement | null = null;
   /** One-time first-run welcome banner; shown only until dismissed. */
@@ -1276,6 +1345,10 @@ export class GeoscapeView {
   private shakeMagnitude = FX_SHAKE_MAGNITUDE;
   private readonly cameraBase = new Vector3();
   private damageLayer: HTMLDivElement | null = null;
+  /** Screen-space callout pinned to the active UFO marker ("where to act"). */
+  private contactLabel: HTMLDivElement | null = null;
+  /** Cached label text so the DOM is only rewritten when the contact changes. */
+  private contactLabelText = "";
 
   // --- Globe visual upgrades (city lights / atmosphere rim / clouds) ---
   /** City light points; per-vertex color is rewritten each frame from the sun direction. */
@@ -1379,6 +1452,7 @@ export class GeoscapeView {
     this.actionsSlot = panels.actionsSlot;
     this.overlaySlot = panels.overlaySlot;
     this.toast = panels.toast;
+    this.speedBar = panels.speedBar;
     this.ufoMissionType = opts.campaign?.ufoContact?.missionType;
     this.ufoType = opts.campaign?.ufoContact?.ufoType;
     this.updateSelectionHud();
@@ -1413,9 +1487,11 @@ export class GeoscapeView {
     this.canvasWrap.appendChild(this.renderer.domElement);
     this.renderer.domElement.addEventListener("pointerdown", this.onPointerDown);
     this.renderer.domElement.addEventListener("pointerup", this.onPointerUp);
+    this.renderer.domElement.addEventListener("pointermove", this.onPointerMove);
     window.addEventListener("resize", this.resize);
     window.addEventListener("keydown", this.onKeydown);
     this.resize();
+    this.applyCanvasCursor();
     this.frame();
   }
 
@@ -1429,6 +1505,7 @@ export class GeoscapeView {
     window.removeEventListener("keydown", this.onKeydown);
     this.renderer.domElement.removeEventListener("pointerdown", this.onPointerDown);
     this.renderer.domElement.removeEventListener("pointerup", this.onPointerUp);
+    this.renderer.domElement.removeEventListener("pointermove", this.onPointerMove);
     this.controls.dispose();
     disposeObject(this.scene);
     this.renderer.dispose();
@@ -1792,7 +1869,7 @@ export class GeoscapeView {
 
   private buildBaseMarker(): void {
     const pulse = new Mesh(
-      new SphereGeometry(0.055, 16, 10),
+      new SphereGeometry(0.07, 16, 10),
       new MeshBasicMaterial({
         color: 0xfbbf24,
         transparent: true,
@@ -1801,7 +1878,7 @@ export class GeoscapeView {
       }),
     );
     const cone = new Mesh(
-      new ConeGeometry(0.055, 0.18, 18),
+      new ConeGeometry(0.07, 0.2, 18),
       new MeshStandardMaterial({
         color: 0xfbbf24,
         emissive: new Color(0xf59e0b),
@@ -1810,9 +1887,9 @@ export class GeoscapeView {
         metalness: 0.3,
       }),
     );
-    cone.position.y = 0.1;
+    cone.position.y = 0.11;
     const ring = new Mesh(
-      new SphereGeometry(0.095, 18, 8, 0, Math.PI * 2, 0, Math.PI * 0.42),
+      new SphereGeometry(0.12, 18, 8, 0, Math.PI * 2, 0, Math.PI * 0.42),
       new MeshBasicMaterial({
         color: 0xfbbf24,
         transparent: true,
@@ -1865,7 +1942,7 @@ export class GeoscapeView {
     const info = missionTypeInfo(missionType);
     const ufoColor = ufoTypeInfo(ufoType).color;
     const core = new Mesh(
-      new SphereGeometry(0.045, 16, 10),
+      new SphereGeometry(0.06, 16, 10),
       new MeshBasicMaterial({
         color: info.color,
         transparent: true,
@@ -1874,7 +1951,7 @@ export class GeoscapeView {
       }),
     );
     const ring = new Mesh(
-      new RingGeometry(0.075, 0.12, 28),
+      new RingGeometry(0.1, 0.16, 28),
       new MeshBasicMaterial({
         color: info.color,
         transparent: true,
@@ -1900,7 +1977,7 @@ export class GeoscapeView {
     // The type color is always paired with the icon + label in the contact card,
     // so it is never conveyed by color alone.
     const typeRing = new Mesh(
-      new RingGeometry(0.2, 0.24, 28),
+      new RingGeometry(0.27, 0.31, 28),
       new MeshBasicMaterial({
         color: ufoColor,
         transparent: true,
@@ -1942,6 +2019,7 @@ export class GeoscapeView {
     actionsSlot: HTMLDivElement;
     overlaySlot: HTMLDivElement;
     toast: HTMLDivElement;
+    speedBar: HTMLDivElement;
   } {
     const left = el("section", "geo-panel geo-left");
     const eyebrow = el("div", "eyebrow");
@@ -1991,6 +2069,11 @@ export class GeoscapeView {
     toast.setAttribute("aria-live", "polite");
     this.root.appendChild(toast);
 
+    // Prominent centered bottom bar for the time-flow speed controls (the primary
+    // verb on this screen). The .geo-speed group is re-parented here in refreshActions.
+    const speedBar = el("div", "geo-speed-bar");
+    this.root.appendChild(speedBar);
+
     const help = el("button", "geo-help");
     help.type = "button";
     help.textContent = "?";
@@ -2003,7 +2086,7 @@ export class GeoscapeView {
     this.welcomeBanner = this.buildWelcomeBanner();
     this.root.appendChild(this.welcomeBanner);
 
-    return { region, coords, confirm, statsGrid, noticeSlot, cardsSlot, actionsSlot, overlaySlot, toast };
+    return { region, coords, confirm, statsGrid, noticeSlot, cardsSlot, actionsSlot, overlaySlot, toast, speedBar };
   }
 
   /**
@@ -2023,6 +2106,7 @@ export class GeoscapeView {
     this.refreshInterceptor();
     this.refreshSpeedState();
     this.refreshHint();
+    this.applyCanvasCursor();
   }
 
   /** Set the hint line below the globe from the current interaction mode. */
@@ -2235,6 +2319,7 @@ export class GeoscapeView {
    */
   private refreshActions(): void {
     this.actionsSlot.replaceChildren();
+    this.speedBar.replaceChildren();
     this.speedButtons = [];
     const c = this.campaign;
     const reset = el("button");
@@ -2268,7 +2353,7 @@ export class GeoscapeView {
       speedGroup.append(btn);
       this.speedButtons.push(btn);
     }
-    this.actionsSlot.append(speedGroup);
+    this.speedBar.append(speedGroup);
     const can = canBuildNewBase(c);
     const build = el("button");
     build.textContent = this.buildMode ? "Cancel build" : `Build base (${NEW_BASE_COST.credits}c)`;
@@ -2283,14 +2368,14 @@ export class GeoscapeView {
     if (this.loitering) {
       // A Skyranger is on station: deploy on demand instead of offering a fresh
       // launch/intercept (the squad is already inbound to this site).
-      const deploy = el("button", "primary");
+      const deploy = el("button", "primary ui-cta");
       deploy.textContent = "Deploy squad";
       deploy.addEventListener("click", () => this.deploySquad());
       this.actionsSlot.append(deploy);
       return;
     }
     if (c.ufoContact?.status === "tracked") {
-      const intercept = el("button", "primary");
+      const intercept = el("button", "primary ui-cta");
       const forecast = interceptionForecast(c);
       intercept.textContent = isInterceptorReady(c)
         ? forecast?.risk === "dangerous"
@@ -2685,6 +2770,11 @@ export class GeoscapeView {
     const flash = el("div", "geo-threat-flash");
     this.canvasWrap.appendChild(flash);
     this.threatFlash = flash;
+    // Screen-space callout pinned to the active UFO marker (positioned each frame).
+    const label = el("div", "geo-contact-label");
+    label.style.display = "none";
+    this.canvasWrap.appendChild(label);
+    this.contactLabel = label;
   }
 
   /**
@@ -3142,6 +3232,41 @@ export class GeoscapeView {
     window.setTimeout(() => {
       node.remove();
     }, 950);
+  }
+
+  /**
+   * Pin the contact callout to the active UFO marker so the player sees where to
+   * act. Mirrors {@link spawnDamageNumber}'s projection; the label text is cached
+   * so the DOM text node is only rewritten when the contact actually changes.
+   */
+  private updateContactLabel(contact: UfoContact | null | undefined): void {
+    const label = this.contactLabel;
+    if (!label) return;
+    const active =
+      !!contact &&
+      this.ufoMarker.visible &&
+      (contact.status === "tracked" || contact.status === "crashed" || contact.status === "landed");
+    if (!active) {
+      if (label.style.display !== "none") label.style.display = "none";
+      return;
+    }
+    this.ufoMarker.getWorldPosition(this.scratchProject);
+    this.scratchProject.project(this.camera);
+    const rect = this.canvasWrap.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    // Marker behind the camera (projected z escapes NDC) -> hide.
+    if (this.scratchProject.z > 1) {
+      if (label.style.display !== "none") label.style.display = "none";
+      return;
+    }
+    const text = `${missionTypeInfo(contact?.missionType).icon} ${ufoTypeInfo(contact?.ufoType).label}`;
+    if (text !== this.contactLabelText) {
+      this.contactLabelText = text;
+      label.textContent = text;
+    }
+    label.style.left = `${(this.scratchProject.x * 0.5 + 0.5) * rect.width}px`;
+    label.style.top = `${(-this.scratchProject.y * 0.5 + 0.5) * rect.height}px`;
+    if (label.style.display === "none") label.style.display = "";
   }
 
   /**
@@ -3688,8 +3813,35 @@ export class GeoscapeView {
     this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
   }
 
+  /** Globe cursor by mode: crosshair while placing a base, grab otherwise. */
+  private cursorForMode(): string {
+    return this.buildMode || canSelectBaseSite(this.opts.campaign) ? "crosshair" : "grab";
+  }
+
+  private applyCanvasCursor(): void {
+    if (this.disposed) return;
+    this.renderer.domElement.style.cursor = this.cursorForMode();
+  }
+
+  /** Hover affordance: pointer when the pointer is over a clickable marker
+   *  (UFO / base), otherwise the mode cursor. Skipped mid-drag. */
+  private onPointerMove = (event: PointerEvent): void => {
+    if (this.disposed || this.down) return;
+    this.updatePointer(event);
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const targets: Object3D[] = [];
+    if (this.ufoMarker.visible) targets.push(this.ufoMarker);
+    if (this.baseMarker.visible) targets.push(this.baseMarker);
+    for (const child of this.extraBaseMarkers.children) {
+      if (child.visible) targets.push(child);
+    }
+    const hit = targets.length ? this.raycaster.intersectObjects(targets, true)[0] : undefined;
+    this.renderer.domElement.style.cursor = hit ? "pointer" : this.cursorForMode();
+  };
+
   private onPointerDown = (event: PointerEvent): void => {
     this.down = { x: event.clientX, y: event.clientY };
+    this.renderer.domElement.style.cursor = "grabbing";
   };
 
   private onPointerUp = (event: PointerEvent): void => {
@@ -3697,6 +3849,7 @@ export class GeoscapeView {
     const dx = event.clientX - this.down.x;
     const dy = event.clientY - this.down.y;
     this.down = null;
+    this.applyCanvasCursor();
     if (dx * dx + dy * dy > 36) return;
     if (this.buildMode && this.opts.campaign) {
       this.updatePointer(event);
@@ -3733,8 +3886,9 @@ export class GeoscapeView {
     // Urgent contacts (terror / base defense) pulse faster and harder so they
     // read as higher priority against the steady crash-site markers.
     this.ufoMarker.scale.setScalar(
-      1 + (this.reducedMotion ? 0 : Math.sin(now * (urgent ? 0.012 : 0.006)) * (urgent ? 0.2 : 0.14)),
+      1 + (this.reducedMotion ? 0 : Math.sin(now * (urgent ? 0.012 : 0.006)) * (urgent ? 0.2 : 0.18)),
     );
+    this.updateContactLabel(contact);
     this.animateInterceptor(now);
     this.advanceFlowingTime(now);
     // onAdvanceTime may synchronously dispose+remount this view (current controller);
