@@ -1,5 +1,6 @@
 import type {
   ActiveConstruction,
+  ActiveFlight,
   ActiveManufacturing,
   ActiveResearch,
   CampaignArmory,
@@ -2175,6 +2176,7 @@ export function loadCampaign(): CampaignState | null {
       lastFundingReport: normalizeFundingReport(parsed.lastFundingReport),
       interceptor,
       fleet: normalizeFleet(parsed.fleet, interceptor, clock),
+      activeFlights: normalizeActiveFlights(parsed.activeFlights),
       lastInterceptionReport: normalizeInterceptionReport(parsed.lastInterceptionReport),
       ufoContact: normalizeUfoContact(parsed.ufoContact, clock),
       interception: normalizeInterception(parsed.interception),
@@ -2363,6 +2365,51 @@ function normalizeInterceptor(value: unknown, clock: CampaignClock): Interceptor
     sorties: typeof maybe.sorties === "number" ? Math.max(0, Math.floor(maybe.sorties)) : 0,
     repairedAtHour,
   };
+}
+
+/** Validates a single in-flight interceptor/transport; drops anything malformed. */
+function normalizeActiveFlight(value: unknown): ActiveFlight | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const maybe = value as Partial<ActiveFlight>;
+  if (
+    typeof maybe.id !== "string" ||
+    typeof maybe.craftId !== "string" ||
+    (maybe.kind !== "interceptor" && maybe.kind !== "transport") ||
+    typeof maybe.fromLat !== "number" ||
+    typeof maybe.fromLon !== "number" ||
+    typeof maybe.toLat !== "number" ||
+    typeof maybe.toLon !== "number" ||
+    typeof maybe.progress !== "number" ||
+    typeof maybe.speedDegPerHour !== "number" ||
+    typeof maybe.startedAtHour !== "number"
+  ) {
+    return undefined;
+  }
+  return {
+    id: maybe.id,
+    craftId: maybe.craftId,
+    kind: maybe.kind,
+    fromLat: Math.max(-90, Math.min(90, maybe.fromLat)),
+    fromLon: Math.max(-180, Math.min(180, maybe.fromLon)),
+    toLat: Math.max(-90, Math.min(90, maybe.toLat)),
+    toLon: Math.max(-180, Math.min(180, maybe.toLon)),
+    progress: Math.max(0, Math.min(1, maybe.progress)),
+    speedDegPerHour: Math.max(0, maybe.speedDegPerHour),
+    startedAtHour: Math.max(0, maybe.startedAtHour),
+  };
+}
+
+/**
+ * Preserves in-flight interceptors/transports across save/load so an interception
+ * begun before saving is still rendered (and still progressing) after reload.
+ * Returns undefined for an empty/absent roster to match a fresh campaign.
+ */
+function normalizeActiveFlights(value: unknown): ActiveFlight[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const flights = value
+    .map((item) => normalizeActiveFlight(item))
+    .filter((flight): flight is ActiveFlight => flight !== undefined);
+  return flights.length > 0 ? flights : undefined;
 }
 
 /**

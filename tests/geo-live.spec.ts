@@ -3,7 +3,7 @@ import path from "node:path";
 import { test } from "@playwright/test";
 import { createCampaign } from "../src/campaign/storage";
 import { createUfoContact } from "../src/campaign/geoscape";
-import type { BaseLocation, CampaignState } from "../src/campaign/types";
+import type { ActiveFlight, BaseLocation, CampaignState } from "../src/campaign/types";
 
 const SHOTS = path.resolve(process.cwd(), "tests", "smoke-shots");
 const BASE: BaseLocation = { lat: 48.2, lon: 14.6, region: "Europe" };
@@ -11,6 +11,24 @@ const BASE: BaseLocation = { lat: 48.2, lon: 14.6, region: "Europe" };
 test("capture geoscape with UFO + planes + night", async ({ page }) => {
   let c = createCampaign(BASE, 3, "veteran");
   c = { ...c, ufoContact: createUfoContact(c, 0) };
+  // Seed an in-flight interceptor patrol (base -> UFO contact) so the geoscape
+  // shows a plane actually flying toward the UFO. Flights are only spawned at
+  // runtime by manageActiveFlights during time-flow; the screenshot is a static
+  // capture, so the flight is seeded directly with progress mid-route.
+  const contact = c.ufoContact!;
+  const flight: ActiveFlight = {
+    id: `patrol:int-1:${contact.id}`,
+    craftId: "int-1",
+    kind: "interceptor",
+    fromLat: c.base.lat,
+    fromLon: c.base.lon,
+    toLat: contact.lat,
+    toLon: contact.lon,
+    progress: 0.4,
+    speedDegPerHour: 4,
+    startedAtHour: c.clock.elapsedHours,
+  };
+  c = { ...c, activeFlights: [flight] };
   await page.addInitScript((state: CampaignState) => {
     window.localStorage.setItem("blacksite.campaign.v1", JSON.stringify(state));
   }, c);
