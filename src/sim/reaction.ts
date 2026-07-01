@@ -50,7 +50,7 @@ export function triggerReactions(state: BattleState, mover: Unit): GameEvent[] {
       if (!snap) return false;
       if (reactor.ammo < snap.shots) return false;
       if (reactor.tu < tuCostForMode(reactor, snap)) return false;
-      if (!canSee(state.grid, reactor, mover.pos)) return false;
+      if (!canSee(state.grid, reactor, mover.pos, state.smokeClouds)) return false;
       return reactionScore(reactor) > moverScore;
     });
     if (eligible.length === 0) break;

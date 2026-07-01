@@ -47,6 +47,7 @@ import {
   defectedRegions,
   deploymentSoldiers,
   deploymentWeaponIds,
+  difficultyConfig,
   campaignSoldierStatBonus,
   hasBaseFacility,
   hasResearch,
@@ -297,8 +298,11 @@ describe("campaign state", () => {
       strength: detected.ufoContact?.strength,
     });
     expect(intercepted.lastInterceptionReport?.summary).toContain("forced down");
+    // Shooting down a UFO relieves regional panic, scaled by difficulty panicMult
+    // (consistent with every other panic adjustment in the campaign layer).
+    const interceptRelief = Math.round(4 * difficultyConfig(detected).panicMult);
     expect(regionalPanicFor(intercepted, detected.ufoContact!.region)).toBe(
-      regionalPanicFor(detected, detected.ufoContact!.region)! - 4,
+      regionalPanicFor(detected, detected.ufoContact!.region)! - interceptRelief,
     );
     expect(intercepted.ufoContact?.interceptedAtHour).toBe(18);
     expect(intercepted.ufoContact?.expiresAtHour).toBe(18 + CRASH_SITE_LIFETIME_HOURS);
@@ -888,6 +892,7 @@ describe("campaign state", () => {
       MEDBAY_FACILITY_ID,
       "workshop-2",
       "power-2",
+      "containment",
     ]);
     expect(canBuildFacility(campaign, "radar-2")).toBe(false);
     expect(canBuildFacility(recovered, "radar-2")).toBe(true);
@@ -910,6 +915,7 @@ describe("campaign state", () => {
       MEDBAY_FACILITY_ID,
       "workshop-2",
       "power-2",
+      "containment",
     ]);
     expect(hasBaseFacility(partial, "radar-2")).toBe(false);
     expect(partial.activeConstruction?.facilityId).toBe("radar-2");

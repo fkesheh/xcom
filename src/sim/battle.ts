@@ -397,6 +397,7 @@ export function executeMove(state: BattleState, unitId: UnitId, to: Vec2): GameE
     events.push(...triggerReactions(state, unit));
 
     if (!unit.alive) {
+      events.push(...moraleEventsForCasualty(state, unit.id, true));
       events.push(...dropObjectiveIfCarrierDown(state, unit.id));
       const over = checkVictory(state);
       if (over) events.push(over);
@@ -1071,7 +1072,11 @@ function fleeOneTile(state: BattleState, unit: Unit, events: GameEvent[]): boole
 
   const diagonal = best.x !== unit.pos.x && best.y !== unit.pos.y;
   const base = moveCost(state.grid, best.x, best.y);
-  const stepCost = diagonal ? Math.floor(base * TU_COST.DIAGONAL_MULT) : base;
+  // Mirror executeMove's cost math: a kneeling mover pays the kneel multiplier,
+  // combined with the diagonal multiplier before flooring so standing (mult 1)
+  // is byte-for-byte unchanged.
+  const stanceMult = unit.stance === "kneel" ? STANCE.KNEEL_MOVE_MULT : 1;
+  const stepCost = Math.floor(base * (diagonal ? TU_COST.DIAGONAL_MULT : 1) * stanceMult);
 
   const from: Vec2 = { x: unit.pos.x, y: unit.pos.y };
   unit.pos = { x: best.x, y: best.y };
@@ -1085,6 +1090,19 @@ function fleeOneTile(state: BattleState, unit: Unit, events: GameEvent[]): boole
     facing: unit.facing,
     tuLeft: unit.tu,
   });
+
+  // A panicking mover still trips proximity mines and provokes reaction fire on
+  // the tile it flees into — the same post-step handling every normal move step
+  // routes through in executeMove.
+  events.push(...detonateMinesForMover(state, unit));
+  if (state.status === "playing" && unit.alive) {
+    events.push(...triggerReactions(state, unit));
+  }
+  if (!unit.alive) {
+    events.push(...dropObjectiveIfCarrierDown(state, unit.id));
+    const over = checkVictory(state);
+    if (over) events.push(over);
+  }
   return true;
 }
 

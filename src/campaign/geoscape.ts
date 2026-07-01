@@ -462,7 +462,7 @@ function applyInterceptionOutcome(
       ...afterCraft.strategic,
       score: afterCraft.strategic.score + 25,
     },
-    regionalPanic: adjustRegionalPanic(afterCraft.regionalPanic, contact.region, -4),
+    regionalPanic: adjustRegionalPanic(afterCraft.regionalPanic, contact.region, -4, 0, difficultyConfig(campaign).panicMult),
     ufoContact: {
       ...contact,
       status: "crashed",
@@ -842,9 +842,13 @@ function applyContactTerror(campaign: CampaignState, contact: UfoContact): Campa
 }
 
 function addCredits(resources: CampaignResources, credits: number): CampaignResources {
+  // Credits are the commander's treasury balance; it is a non-negative quantity.
+  // Mandatory monthly upkeep can exceed council income, so floor at 0 to avoid an
+  // undefined debt state. The funding report still surfaces the true (possibly
+  // negative) net via its own `income - upkeep` computation.
   return {
     ...resources,
-    credits: resources.credits + credits,
+    credits: Math.max(0, resources.credits + credits),
   };
 }
 

@@ -116,6 +116,16 @@ export interface Grid {
 
 export type Faction = "player" | "enemy" | "civilian";
 
+/**
+ * Rank of a hostile alien, mirroring the classic crew hierarchy. Drives capture
+ * value and interrogation gating in the campaign: soldiers are the rank-and-file,
+ * while navigators / leaders / commanders are the prize captures whose live
+ * interrogation opens the endgame (see the campaign's leaderInterrogation /
+ * commanderInterrogation research). Optional on templates/units — an unset rank
+ * is treated as "soldier".
+ */
+export type EnemyRank = "soldier" | "navigator" | "leader" | "commander";
+
 /** How much TU a unit holds back for reaction fire during its own turn. */
 export type ReserveMode = "none" | "snap" | "aimed" | "auto";
 
@@ -180,7 +190,7 @@ export interface Weapon {
 }
 
 /** Kind of a consumable battlefield item. */
-export type ItemKind = "grenade" | "medkit" | "smoke" | "scanner" | "proxMine";
+export type ItemKind = "grenade" | "medkit" | "smoke" | "scanner" | "proxMine" | "stunRod";
 
 /** A consumable battlefield item definition (data-driven; names are rebrandable). */
 export interface Item {
@@ -199,6 +209,18 @@ export interface Item {
   healAmount?: number;
   /** Scanner: Chebyshev radius (tiles) of the motion reveal applied on use. */
   scanRadius?: number;
+  /**
+   * Stun rod: STUN points delivered per melee strike. Applied to the target's
+   * {@link Unit.stun} pool (NOT hp); when accumulated stun >= the target's
+   * current hp the unit falls {@link Unit.unconscious}. Only meaningful for
+   * kind === "stunRod".
+   */
+  stunPower?: number;
+  /**
+   * Stun rod: melee reach in tiles (Chebyshev). A strike is only possible when
+   * the target is within this range; defaults to 1 (strictly adjacent).
+   */
+  reach?: number;
 }
 
 /** A specific carried instance of an {@link Item}. */
@@ -263,6 +285,12 @@ export interface UnitTemplate {
   sightRange: number;
   /** Half-angle of the forward vision cone in degrees (45 => a 90° arc). */
   visionHalfAngleDeg: number;
+  /**
+   * Hostile crew rank (enemy templates only). Unset is treated as "soldier".
+   * Determines capture value + interrogation gating in the campaign; the crew
+   * composition per UFO type is data in the campaign layer (UFO_CREW_PROFILES).
+   */
+  rank?: EnemyRank;
 }
 
 /** A live unit on the battlefield. */
@@ -286,6 +314,22 @@ export interface Unit {
   /** Carried consumable items (grenades, medkits). Populated by setup. */
   items?: ItemInstance[];
   alive: boolean;
+  /**
+   * Accumulated STUN damage (default 0). Raised by stun-rod strikes; decays by
+   * {@link STUN.DECAY_PER_TURN} each round. When stun >= current hp the unit
+   * falls {@link unconscious}; when decay drops it back below hp the unit wakes
+   * (spending the waking turn with 0 TU). Stun never kills — only hp damage does.
+   */
+  stun?: number;
+  /**
+   * Unconscious marker. While true the unit is out of the fight: excluded from AI
+   * decisions, turn order, reaction fire, and threat vision/targeting — but it
+   * still occupies its tile and can be killed by damage. At player victory an
+   * unconscious ENEMY unit is taken as a capture (see the campaign debrief).
+   */
+  unconscious?: boolean;
+  /** Hostile crew rank (enemy units only). Unset is treated as "soldier". */
+  rank?: EnemyRank;
   /** Optional persistent campaign roster id for player units. */
   campaignSoldierId?: string;
   /** TU the unit reserves for reaction fire during its own turn. */
@@ -581,6 +625,18 @@ export const SMOKE = {
   DURATION_TURNS: 3,
   /** Cloud radius (Chebyshev tiles) when the smoke item omits blastRadius. */
   DEFAULT_RADIUS: 2,
+} as const;
+
+/**
+ * Stun / capture tuning. A stun-rod strike adds the item's `stunPower` to the
+ * target's {@link Unit.stun} pool; once stun >= the target's current hp it falls
+ * {@link Unit.unconscious}. Stun decays by DECAY_PER_TURN at each round; when it
+ * drops back below the unit's hp the unit wakes (with 0 TU that turn). Nothing
+ * here kills — capture happens at player victory for still-unconscious enemies.
+ */
+export const STUN = {
+  /** STUN points a unit sheds at the start of each round. */
+  DECAY_PER_TURN: 5,
 } as const;
 
 /**

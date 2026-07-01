@@ -53,6 +53,8 @@ const FX_SHAKE_MAGNITUDE = 0.06;
 const FX_SHAKE_KILL_MULT = 2.4;
 /** Ms the kill explosion plays before onResolve returns the player to the geoscape. */
 const RESOLVE_DELAY_MS = 950;
+/** Ms the "Disengaged" overlay shows before onResolve (no kill FX to wait for). */
+const RESOLVE_DISENGAGE_DELAY_MS = 500;
 
 /** Pooled particle counts (ring/velocity buffers sized to these at build time). */
 const BURST_PARTICLES = 22;
@@ -422,6 +424,8 @@ export class PlaneCombatView {
   private readonly logBox: HTMLDivElement;
   private readonly actionButtons: HTMLButtonElement[] = [];
   private readonly resolveOverlay: HTMLDivElement;
+  /** Label inside the resolve overlay; updated per outcome (crashed/lost/disengaged). */
+  private readonly resolveText: HTMLElement;
   /** Concise dogfight HELP overlay (controls + outcomes reference). */
   private helpOverlay: HTMLDivElement | null = null;
   private readonly onKeydown = (e: KeyboardEvent): void => {
@@ -492,6 +496,7 @@ export class PlaneCombatView {
     this.logBox = panels.log;
     this.actionButtons = panels.actions;
     this.resolveOverlay = panels.resolve;
+    this.resolveText = panels.resolveText;
     this.refresh();
   }
 
@@ -756,9 +761,12 @@ export class PlaneCombatView {
    * Diff the encounter HP versus the previous render and fire combat FX for any
    * damage dealt. An "attack" round decreases both ufoHp (interceptor volley)
    * and interceptorHp (UFO return fire) in the same update, so both sides can
-   * light up together. When the encounter clears this update (resolved), the
-   * last known UFO HP plays the killing volley + an amplified explosion, then
-   * onResolve fires after the explosion has played (RESOLVE_DELAY_MS).
+   * light up together. When the encounter clears this update (resolved), the FX
+   * + resolve overlay branch on the post-resolve outcome (read from ufoContact):
+   * a crashed UFO plays the killing volley + explosion at the UFO, a lost
+   * interceptor explodes at the interceptor anchor with no friendly volley, and
+   * a disengage shows a neutral overlay with no kill FX. onResolve fires after
+   * the FX has played (RESOLVE_DELAY_MS, shorter for disengage).
    */
   private detectEncounterDamage(): void {
     const enc = this.campaign.interception ?? null;
@@ -774,16 +782,30 @@ export class PlaneCombatView {
       this.wasEngaging = true;
       return;
     }
-    // Encounter just resolved this update: play the killing volley + explosion.
+    // Encounter just resolved this update: branch the FX + resolve overlay on the
+    // actual post-resolve outcome. The campaign distinguishes the three terminal
+    // states cleanly via ufoContact — crashed (UFO down), undefined (interceptor
+    // lost / UFO escaped), or tracked (player disengaged).
     if (this.wasEngaging && this.prevUfoHp !== null && this.prevUfoHp > 0) {
-      this.fireInterceptorVolley(this.prevUfoHp);
-      this.fireExplosion(this.ufoAnchor, performance.now());
-      this.kickCamera(FX_SHAKE_KILL_MULT);
-      this.showResolve();
-      if (this.resolveTimer !== undefined) window.clearTimeout(this.resolveTimer);
-      this.resolveTimer = window.setTimeout(() => {
-        this.opts.onResolve();
-      }, RESOLVE_DELAY_MS);
+      const ufoContact = this.campaign.ufoContact;
+      if (ufoContact?.status === "tracked") {
+        // Disengage: the UFO survived and stays tracked. No kill FX, brief overlay.
+        this.showResolve("Disengaged");
+        this.scheduleResolve(RESOLVE_DISENGAGE_DELAY_MS);
+      } else if (ufoContact === undefined) {
+        // Interceptor lost / UFO escaped: explode the interceptor, no friendly volley.
+        this.fireExplosion(this.interceptorAnchor, performance.now());
+        this.kickCamera(FX_SHAKE_KILL_MULT);
+        this.showResolve("Interceptor lost");
+        this.scheduleResolve(RESOLVE_DELAY_MS);
+      } else {
+        // UFO forced down: full kill sequence (volley + explosion) at the UFO anchor.
+        this.fireInterceptorVolley(this.prevUfoHp);
+        this.fireExplosion(this.ufoAnchor, performance.now());
+        this.kickCamera(FX_SHAKE_KILL_MULT);
+        this.showResolve("Target destroyed");
+        this.scheduleResolve(RESOLVE_DELAY_MS);
+      }
     }
     this.prevUfoHp = null;
     this.prevInterceptorHp = null;
@@ -853,9 +875,18 @@ export class PlaneCombatView {
     this.shakeActive = true;
   }
 
-  private showResolve(): void {
+  private showResolve(label: string): void {
+    this.resolveText.textContent = label;
     this.resolveOverlay.classList.add("active");
     this.setActionsEnabled(false);
+  }
+
+  /** Schedule onResolve after the resolve FX has played; replaces any prior timer. */
+  private scheduleResolve(delayMs: number): void {
+    if (this.resolveTimer !== undefined) window.clearTimeout(this.resolveTimer);
+    this.resolveTimer = window.setTimeout(() => {
+      this.opts.onResolve();
+    }, delayMs);
   }
 
   /** Per-frame FX evolution: fade tracers/flashes, advance burst particles, shake. */
@@ -938,6 +969,7 @@ export class PlaneCombatView {
     log: HTMLDivElement;
     actions: HTMLButtonElement[];
     resolve: HTMLDivElement;
+    resolveText: HTMLElement;
   } {
     const left = el("section", "pc-panel pc-left");
     const eye = el("div", "eyebrow");
@@ -1027,6 +1059,7 @@ export class PlaneCombatView {
       log,
       actions: actionButtons,
       resolve,
+      resolveText,
     };
   }
 

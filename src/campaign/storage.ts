@@ -15,6 +15,9 @@ import type {
   CampaignResources,
   CampaignState,
   CampaignWeaponId,
+  CampaignCaptive,
+  CaptiveRank,
+  AlienHq,
   CouncilRegion,
   Craft,
   DifficultyLevel,
@@ -33,9 +36,11 @@ import type {
   ProjectReport,
   ResearchId,
   UfoContact,
+  UfoType,
 } from "./types";
 import {
   BASE_FACILITIES,
+  CONTAINMENT_FACILITY_ID,
   facilitiesForIds,
   facilityCost,
   findBaseFacility,
@@ -46,6 +51,39 @@ import {
 
 export const CAMPAIGN_STORAGE_KEY = "blacksite.campaign.v1";
 export const CAMPAIGN_VICTORY_OPERATIONS = 5;
+
+/**
+ * Endgame arc constants. The true campaign victory is winning the alien-base
+ * assault at the revealed HQ. CAMPAIGN_VICTORY_OPERATIONS remains a FALLBACK
+ * milestone that auto-reveals the HQ (so a capture-free campaign stays winnable,
+ * preserving the tuned difficulty curve). Losing the assault does NOT end the run.
+ */
+export const ALIEN_HQ_CREW_SIZE = 12;
+/** Operation theme used for the alien-base assault map. */
+export const ALIEN_BASE_THEME: OperationTheme = "alienBase";
+
+/** Ordered rank hierarchy for captive-requirement comparisons (low → high). */
+export const CAPTIVE_RANK_ORDER: readonly CaptiveRank[] = [
+  "soldier",
+  "navigator",
+  "leader",
+  "commander",
+];
+
+/** Per-UFO-type crew rank composition. Bigger UFOs field leaders; terror/battleship can field a commander. */
+export interface UfoCrewProfile {
+  /** Crew includes a leader-rank (navigator/leader) alien. */
+  hasLeader: boolean;
+  /** Deterministic 0..1 chance the crew includes a commander. */
+  commanderChance: number;
+}
+
+export const UFO_CREW_PROFILES: Record<UfoType, UfoCrewProfile> = {
+  scout: { hasLeader: false, commanderChance: 0 },
+  harvester: { hasLeader: true, commanderChance: 0 },
+  terror: { hasLeader: true, commanderChance: 0.35 },
+  battleship: { hasLeader: true, commanderChance: 0.6 },
+};
 // Doom-clock ceilings. Raised from 100 so a competent player has time to recover
 // CAMPAIGN_VICTORY_OPERATIONS cores before the clock collapses. The per-difficulty
 // SLOPE (threatGainMult / panicMult) discriminates rookie vs commander; the
@@ -441,6 +479,24 @@ export const RESEARCH_COSTS: Record<ResearchId, CampaignResources> = {
     elerium: 12,
     alienData: 8,
   },
+  alienInterrogation: {
+    credits: 200,
+    alloys: 0,
+    elerium: 0,
+    alienData: 4,
+  },
+  leaderInterrogation: {
+    credits: 260,
+    alloys: 0,
+    elerium: 2,
+    alienData: 6,
+  },
+  commanderInterrogation: {
+    credits: 340,
+    alloys: 0,
+    elerium: 4,
+    alienData: 8,
+  },
 };
 
 export interface ResearchProject {
@@ -454,6 +510,20 @@ export interface ResearchProject {
   requires: ResearchId[];
   /** Gear unlocked for market purchase / armory stock when this project completes. */
   unlocks?: ResearchUnlocks;
+  /** When true, the project can only start if a live captive of ANY rank is held. */
+  requiresCaptive?: boolean;
+  /**
+   * When set, the project can only start if a live captive of AT LEAST this rank
+   * is held (rank order: soldier < navigator < leader < commander). Implies
+   * requiresCaptive.
+   */
+  requiresCaptiveRank?: CaptiveRank;
+  /** When true, completing the project consumes (removes) the qualifying captive. */
+  consumesCaptive?: boolean;
+  /** When true, completing the project REVEALS the alien HQ location. */
+  revealsAlienHq?: boolean;
+  /** When true, completing the project unlocks the final alien-base assault. */
+  unlocksFinalAssault?: boolean;
 }
 
 /**
@@ -580,6 +650,41 @@ export const RESEARCH_PROJECTS: readonly ResearchProject[] = [
     cost: RESEARCH_COSTS.mindShield,
     requires: ["alienBiotech", "eleriumPowerSource"],
     unlocks: { items: ["smoke"] },
+  },
+  {
+    id: "alienInterrogation",
+    title: "Alien interrogation",
+    description: "Interrogate a live captive to extract intel on the invasion's structure and intent.",
+    completedDescription: "The captive's debrief charts the alien command chain and hints at a coordinating headquarters.",
+    durationHours: 24,
+    cost: RESEARCH_COSTS.alienInterrogation,
+    requires: ["alienBiotech"],
+    requiresCaptive: true,
+    consumesCaptive: true,
+  },
+  {
+    id: "leaderInterrogation",
+    title: "Leader interrogation",
+    description: "Break a captured alien leader to pinpoint the terrestrial headquarters coordinating the invasion.",
+    completedDescription: "The leader's intel reveals the alien headquarters — a transport assault is now possible.",
+    durationHours: 30,
+    cost: RESEARCH_COSTS.leaderInterrogation,
+    requires: ["alienInterrogation"],
+    requiresCaptiveRank: "leader",
+    consumesCaptive: true,
+    revealsAlienHq: true,
+  },
+  {
+    id: "commanderInterrogation",
+    title: "Commander interrogation",
+    description: "Interrogate a captured alien commander to expose the headquarters' defenses and unlock a decapitating strike.",
+    completedDescription: "The commander's intel clears the way for the final assault on the alien headquarters.",
+    durationHours: 36,
+    cost: RESEARCH_COSTS.commanderInterrogation,
+    requires: ["leaderInterrogation"],
+    requiresCaptiveRank: "commander",
+    consumesCaptive: true,
+    unlocksFinalAssault: true,
   },
 ] as const;
 
@@ -1387,6 +1492,11 @@ export function hasBaseFacility(campaign: CampaignState, id: string): boolean {
   return campaign.facilities.includes(id) && findBaseFacility(id) !== undefined;
 }
 
+/** Whether any base can hold live captives (a built Alien Containment facility). */
+export function hasContainment(campaign: CampaignState): boolean {
+  return hasBaseFacility(campaign, CONTAINMENT_FACILITY_ID);
+}
+
 export function availableBaseFacilities(campaign: CampaignState): BaseFacility[] {
   return BASE_FACILITIES.filter(
     (facility) =>
@@ -1618,6 +1728,19 @@ export interface MissionRosterOutcome {
   civilianCount?: number;
   civiliansRescued?: number;
   civilianCasualties?: number;
+  /**
+   * Enemy units left unconscious at a player victory, taken as captures. The game
+   * builds this from the battle's still-unconscious hostiles; the debrief turns
+   * each into a {@link CampaignCaptive} IF a base has a built containment facility.
+   */
+  captures?: readonly MissionCapture[];
+}
+
+/** One captured (unconscious-at-victory) alien reported from a battle. */
+export interface MissionCapture {
+  /** Sim unit-template id of the captured species. */
+  templateId: string;
+  rank: CaptiveRank;
 }
 
 export function recordMissionResult(
@@ -2209,6 +2332,8 @@ export function loadCampaign(): CampaignState | null {
           ? normalizeMissionReport(parsed.lastMission)
           : undefined,
       projectReports: normalizeProjectReports(parsed.projectReports),
+      captives: normalizeCaptives(parsed.captives),
+      alienHq: normalizeAlienHq(parsed.alienHq),
     };
     return completeFinishedBaseConstruction(completeFinishedConstruction(completeFinishedManufacturing(recoverWoundedSoldiers(completeFinishedResearch(normalized)))));
   } catch {
@@ -2523,6 +2648,15 @@ function normalizeUfoContact(value: unknown, clock: CampaignClock): UfoContact |
     missionSeed: maybe.missionSeed >>> 0,
     strength: Math.max(1, Math.floor(maybe.strength)),
     missionType: normalizeUfoContactMissionType(maybe.missionType),
+    // ufoType drives panic/infiltration multipliers (UFO_TYPE_PROFILES) and the
+    // geoscape marker label; persist it so post-reload expiry uses the right profile.
+    ufoType:
+      maybe.ufoType === "scout" ||
+      maybe.ufoType === "harvester" ||
+      maybe.ufoType === "terror" ||
+      maybe.ufoType === "battleship"
+        ? maybe.ufoType
+        : undefined,
     interceptorDamage:
       typeof maybe.interceptorDamage === "number" ? Math.max(0, Math.floor(maybe.interceptorDamage)) : undefined,
     // Tracked-UFO flight vector + ocean flag are optional; default to undefined on load.
@@ -2597,9 +2731,58 @@ function normalizeProjectReports(value: unknown): ProjectReport[] {
 
 function normalizeTheme(value: unknown): OperationTheme {
   return value === "farmland" || value === "urban" || value === "desert" ||
-    value === "arctic" || value === "jungle" || value === "forest"
+    value === "arctic" || value === "jungle" || value === "forest" || value === "alienBase"
     ? value
     : "farmland";
+}
+
+function normalizeCaptiveRank(value: unknown): CaptiveRank | undefined {
+  return (CAPTIVE_RANK_ORDER as readonly string[]).includes(value as string)
+    ? (value as CaptiveRank)
+    : undefined;
+}
+
+/**
+ * Reconstruct the live captive list. Drops any entry with a bad shape/rank.
+ * Returns undefined when absent so a fresh campaign keeps its historical shape.
+ */
+function normalizeCaptives(value: unknown): CampaignCaptive[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const captives: CampaignCaptive[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const maybe = entry as Partial<CampaignCaptive>;
+    const rank = normalizeCaptiveRank(maybe.rank);
+    if (
+      typeof maybe.id !== "string" ||
+      typeof maybe.templateId !== "string" ||
+      rank === undefined ||
+      typeof maybe.capturedAtHour !== "number"
+    ) {
+      continue;
+    }
+    captives.push({ id: maybe.id, templateId: maybe.templateId, rank, capturedAtHour: maybe.capturedAtHour });
+  }
+  return captives;
+}
+
+/** Reconstruct the alien HQ record. Returns undefined when absent or malformed. */
+function normalizeAlienHq(value: unknown): AlienHq | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const maybe = value as Partial<AlienHq>;
+  const loc = maybe.location;
+  if (
+    !loc ||
+    typeof loc.lat !== "number" ||
+    typeof loc.lon !== "number" ||
+    typeof loc.region !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    location: { lat: loc.lat, lon: loc.lon, region: loc.region },
+    revealed: maybe.revealed === true,
+  };
 }
 
 function normalizeResources(value: unknown): CampaignResources {
@@ -2641,6 +2824,15 @@ function normalizeMarket(value: unknown): EquipmentMarket {
     if (stocked.includes(key)) continue;
     if (typeof value === "number" && Number.isFinite(value)) {
       stock[key] = Math.max(0, Math.floor(value));
+    }
+  }
+  // Mirror the stock-preservation loop for restock timers: research-gated gear
+  // (e.g. cannon) is excluded from STOCKED_WEAPON_IDS, so without this its
+  // in-flight restock timer would reset to 0 on every save/load cycle.
+  for (const [key, value] of Object.entries(rawTimers)) {
+    if (stocked.includes(key)) continue;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      restockTimerHours[key] = Math.max(0, Math.floor(value));
     }
   }
   return { stock, restockTimerHours };
@@ -2969,12 +3161,28 @@ function hasPowerForFacility(campaign: CampaignState, facility: BaseFacility): b
   return summary.powerUsed + facility.powerUse <= summary.powerCapacity + facility.powerOutput;
 }
 
-export function saveCampaign(campaign: CampaignState): void {
-  if (typeof localStorage === "undefined") return;
-  localStorage.setItem(CAMPAIGN_STORAGE_KEY, JSON.stringify(campaign));
+export function saveCampaign(campaign: CampaignState): boolean {
+  if (typeof localStorage === "undefined") return false;
+  try {
+    localStorage.setItem(CAMPAIGN_STORAGE_KEY, JSON.stringify(campaign));
+    return true;
+  } catch (err) {
+    // QuotaExceededError (long campaign exceeds the ~5MB cap) or SecurityError
+    // (private/incognito in some browsers) must not throw out of every screen
+    // transition — flushSave()/debouncedSave() call this synchronously. Catch,
+    // warn, and report failure so the caller can surface a non-blocking notice.
+    console.warn("saveCampaign: failed to persist campaign", err);
+    return false;
+  }
 }
 
-export function clearCampaign(): void {
-  if (typeof localStorage === "undefined") return;
-  localStorage.removeItem(CAMPAIGN_STORAGE_KEY);
+export function clearCampaign(): boolean {
+  if (typeof localStorage === "undefined") return false;
+  try {
+    localStorage.removeItem(CAMPAIGN_STORAGE_KEY);
+    return true;
+  } catch (err) {
+    console.warn("clearCampaign: failed to clear campaign", err);
+    return false;
+  }
 }

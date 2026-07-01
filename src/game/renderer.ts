@@ -123,6 +123,8 @@ const SCRATCH_COLOR = new Color();
 const BLACK = new Color(0, 0, 0);
 /** Reddened emissive tint blended over a hit figure for the damage flash. */
 const HIT_RED = new Color(1, 0.08, 0.08);
+/** World-up constant: shared by the camera pan/orbit hot paths instead of a per-frame `new Vector3(0,1,0)`. */
+const UP = new Vector3(0, 1, 0);
 
 // ---------------------------------------------------------------------------
 // Time-of-day lighting (presentation-only). Derived from state.hourOfDay so a
@@ -542,6 +544,14 @@ export class Renderer {
   private readonly bloomPass: UnrealBloomPass;
   private controls!: OrbitControls;
   private container: HTMLElement | null = null;
+  // WebGL context-loss recovery. Without a `webglcontextlost` listener that
+  // calls preventDefault(), a lost context (alt-tab / driver TDR / context cap)
+  // is permanent for the page session — every later render() no-ops or throws.
+  // While `contextLost` is set, render() is a no-op so we neither spin on a dead
+  // context nor spam errors; the controller is expected to re-mount the screen.
+  private contextLost = false;
+  private onContextLost: ((e: Event) => void) | null = null;
+  private onContextRestored: (() => void) | null = null;
 
   /** The shadow-casting "sun"; reframed onto the map in {@link buildGrid}. */
   private readonly sun: DirectionalLight;
@@ -615,6 +625,14 @@ export class Renderer {
   private readonly desiredTarget = new Vector3();
   private panActive = false;
 
+  // Pooled scratch vectors reused by the per-frame camera hot paths (panBy /
+  // orbitYaw / focus-pan) so sustained WASD/arrows/Q-E movement allocates zero
+  // Vector3s per frame instead of ~6. Matches the scratch pattern in geoscape.ts.
+  private readonly scratchFwd = new Vector3();
+  private readonly scratchRight = new Vector3();
+  private readonly scratchMove = new Vector3();
+  private readonly scratchOffset = new Vector3();
+
   // Screen shake: impulses add to a decaying energy envelope; each frame pushes
   // a randomised offset onto the camera position, then strips it back before the
   // next OrbitControls.update() so the orbit never drifts. No per-frame alloc.
@@ -672,6 +690,21 @@ export class Renderer {
     this.container = container;
     container.appendChild(this.renderer.domElement);
 
+    // Allow the WebGL context to be recovered after a loss (tab switch / GPU
+    // driver TDR / per-process context cap). preventDefault() is load-bearing:
+    // without it the loss is permanent. On restore we clear the flag; the real
+    // GPU-resource rebuild is handled by the controller re-mounting the screen.
+    const canvas = this.renderer.domElement;
+    this.onContextLost = (e: Event): void => {
+      e.preventDefault();
+      this.contextLost = true;
+    };
+    this.onContextRestored = (): void => {
+      this.contextLost = false;
+    };
+    canvas.addEventListener("webglcontextlost", this.onContextLost);
+    canvas.addEventListener("webglcontextrestored", this.onContextRestored);
+
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
@@ -695,6 +728,16 @@ export class Renderer {
   /** The canvas element the controller attaches pointer listeners to. */
   domElementForInput(): HTMLCanvasElement {
     return this.renderer.domElement;
+  }
+
+  /**
+   * True while the WebGL context is lost. The controller can poll this to show a
+   * "Graphics context lost — reloading…" overlay and re-mount the screen; the
+   * renderer itself only survives the loss (skips render, allows recovery) and
+   * does not own the overlay or its own mount lifecycle.
+   */
+  get isContextLost(): boolean {
+    return this.contextLost;
   }
 
   private addLights(): void {
@@ -780,6 +823,9 @@ export class Renderer {
 
   /** Draw a frame. Eases the focus pan and billboards HP bars first. */
   render(): void {
+    // Skip while the WebGL context is lost: rendering would no-op or throw, and
+    // we'd rather hold the last frame until the screen is re-mounted on restore.
+    if (this.contextLost) return;
     const now = performance.now() * 0.001;
     const dt = this.lastRenderSec === 0 ? 0 : Math.min(0.05, now - this.lastRenderSec);
     this.lastRenderSec = now;
@@ -791,7 +837,7 @@ export class Renderer {
     }
 
     if (this.panActive && this.controls) {
-      const delta = this.desiredTarget.clone().sub(this.controls.target);
+      const delta = this.scratchOffset.copy(this.desiredTarget).sub(this.controls.target);
       if (delta.lengthSq() < 0.0004) {
         this.panActive = false;
       } else {
@@ -860,13 +906,13 @@ export class Renderer {
    */
   panBy(right: number, forward: number): void {
     if (!this.controls) return;
-    const fwd = new Vector3();
+    const fwd = this.scratchFwd;
     this.camera.getWorldDirection(fwd);
     fwd.y = 0;
     if (fwd.lengthSq() < 1e-6) return;
     fwd.normalize();
-    const rightDir = new Vector3().crossVectors(fwd, new Vector3(0, 1, 0)).normalize();
-    const move = new Vector3().addScaledVector(rightDir, right).addScaledVector(fwd, forward);
+    const rightDir = this.scratchRight.crossVectors(fwd, UP).normalize();
+    const move = this.scratchMove.set(0, 0, 0).addScaledVector(rightDir, right).addScaledVector(fwd, forward);
     this.camera.position.add(move);
     this.controls.target.add(move);
     this.panActive = false; // cancel any in-flight focus ease
@@ -875,7 +921,7 @@ export class Renderer {
   /** Orbit the camera around its target by `angle` radians about world Y. */
   orbitYaw(angle: number): void {
     if (!this.controls) return;
-    const offset = this.camera.position.clone().sub(this.controls.target);
+    const offset = this.scratchOffset.copy(this.camera.position).sub(this.controls.target);
     const cos = Math.cos(angle);
     const sin = Math.sin(angle);
     const x = offset.x * cos - offset.z * sin;
@@ -1718,6 +1764,15 @@ export class Renderer {
     this.disposeGroupChildren(marker);
   }
 
+  /** Release a standalone helper mesh (selection ring / halo / hover marker). */
+  private disposeSceneMesh(mesh: Mesh): void {
+    this.scene.remove(mesh);
+    mesh.geometry.dispose();
+    const mat = mesh.material;
+    if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
+    else mat.dispose();
+  }
+
   // -------------------------------------------------------------------------
   // Raycasting
   // -------------------------------------------------------------------------
@@ -1949,6 +2004,21 @@ export class Renderer {
       this.disposeSceneMarker(this.coverIndicatorGroup);
       this.coverIndicatorGroup = null;
     }
+    // Persistent helper meshes from buildHelpers(): each owns its own
+    // RingGeometry + MeshBasicMaterial, so dispose them explicitly (they are
+    // not Group markers and so are not covered by disposeSceneMarker above).
+    if (this.selectionRing) {
+      this.disposeSceneMesh(this.selectionRing);
+      this.selectionRing = null;
+    }
+    if (this.selectionHalo) {
+      this.disposeSceneMesh(this.selectionHalo);
+      this.selectionHalo = null;
+    }
+    if (this.hoverMarker) {
+      this.disposeSceneMesh(this.hoverMarker);
+      this.hoverMarker = null;
+    }
     this.disposeGrid();
     // Smoke clouds: clear the per-cloud meshes and release the shared resources
     // owned here (the geometry + material are not part of the shared cache).
@@ -1968,6 +2038,24 @@ export class Renderer {
     // (above) are gone, then the composer's render targets.
     disposeMaterials();
     this.composer.dispose();
+
+    // Tear down the WebGL stack itself. This view is the one 3D surface that
+    // previously leaked these on every battle: OrbitControls' document-level
+    // pointer listeners (only controls.dispose() detaches them), the live
+    // WebGL context (browsers cap ~16 per process — forceContextLoss frees the
+    // slot so the next battle gets a fresh one), and the appended canvas node.
+    // Matches the lifecycle in geoscape.ts / planeCombatView.ts, plus an
+    // explicit context release because a new Renderer is built each mission.
+    const canvas = this.renderer.domElement;
+    if (this.onContextLost) canvas.removeEventListener("webglcontextlost", this.onContextLost);
+    if (this.onContextRestored) canvas.removeEventListener("webglcontextrestored", this.onContextRestored);
+    this.onContextLost = null;
+    this.onContextRestored = null;
+    this.controls?.dispose();
+    this.renderer.dispose();
+    this.renderer.forceContextLoss();
+    this.container?.removeChild(canvas);
+    this.container = null;
   }
 
   /** Release the floor InstancedMesh, the ground plane and every tile feature. */

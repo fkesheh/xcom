@@ -24,12 +24,15 @@ import {
   canStartResearch,
   canPurchaseWeapon,
   purchaseWeapon,
+  assignSoldierWeapon,
+  availableWeaponCount,
   recruitSoldier,
   canRecruitSoldier,
   livingSoldiers,
   activeSoldiers,
   deploymentSoldiers,
   deploymentWeaponIds,
+  soldierWeaponId,
   campaignSoldierStatBonus,
   highestRegionalPanic,
   defectedRegions,
@@ -392,6 +395,21 @@ function economyStep(campaign: CampaignState): CampaignState {
     next = purchaseWeapon(next, "plasma");
   } else if (next.armory.weapons.rifle < wantRifles && canPurchaseWeapon(next, "rifle").ok) {
     next = purchaseWeapon(next, "rifle");
+  }
+
+  // 4. Equip plasma. purchaseWeapon only adds to armory stock — it does NOT
+  //    assign the weapon to a soldier (the UI does that via onAssignWeapon).
+  //    Without this, every soldier stays on the hard-coded "rifle" loadout,
+  //    the plasma purchase is pure credit drain, and the win curve this
+  //    diagnostic produces is rifle-only. Assign available plasma to deployed
+  //    soldiers still on rifles so the upgrade reaches createSkirmish through
+  //    deploymentWeaponIds. Iterating deploymentSoldiers in their stable order
+  //    keeps the assignment deterministic for the byte-for-byte seed check.
+  for (const soldier of deploymentSoldiers(next)) {
+    if (availableWeaponCount(next, "plasma") <= 0) break;
+    if (soldierWeaponId(next, soldier.id) === "rifle") {
+      next = assignSoldierWeapon(next, soldier.id, "plasma");
+    }
   }
   return next;
 }

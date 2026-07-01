@@ -82,15 +82,17 @@ import {
 
 import { Sfx } from "./audio";
 import type { ProjectileKind } from "./effects";
-// The 3D view classes (Geoscape/Base/PlaneCombat) are imported only as types
-// here; their values are dynamically imported inside the screen-mount functions
-// below so three.js stays out of the initial bundle and loads lazily on first
-// mount. Renderer and Hud are not referenced as types, so they are fetched
-// purely via dynamic import() in startTactical.
+// The 3D view classes are imported as types only; their values are dynamically
+// imported inside the screen-mount functions below so three.js stays out of the
+// initial bundle and loads lazily on first mount. The Renderer and Hud types
+// annotate the mount locals declared outside a try-block in startTactical
+// (their values are still fetched via dynamic import()).
 import type { BaseView } from "./baseView";
 import type { GeoscapeView } from "./geoscape";
 import type { PlaneCombatView } from "./planeCombatView";
+import type { Renderer } from "./renderer";
 import type {
+  Hud,
   HudDebrief,
   HudDebriefCasualty,
   HudDebriefSurvivor,
@@ -178,6 +180,111 @@ function showScreenLoader(label: string): () => void {
   };
 }
 
+/**
+ * Recoverable full-viewport error overlay shown when a screen chunk fails to
+ * import or its constructor throws (e.g. WebGL context acquisition fails).
+ * Replaces the blank #app / locked loader with a message + recovery actions so
+ * the player is never stuck. `onRetry` re-runs the failed mount; the geoscape
+ * fallback is always offered as the safe return path.
+ */
+function showScreenError(label: string, onRetry: (() => void) | null): void {
+  const el = document.createElement("div");
+  el.className = "screen-error";
+  el.setAttribute("role", "alert");
+  const msg = document.createElement("div");
+  msg.textContent = label;
+  Object.assign(msg.style, { marginBottom: "20px" });
+  el.appendChild(msg);
+  const actions = document.createElement("div");
+  Object.assign(actions.style, { display: "flex", gap: "12px", flexWrap: "wrap", justifyContent: "center" });
+  if (onRetry) {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", () => { el.remove(); onRetry(); });
+    actions.appendChild(retry);
+  }
+  const back = document.createElement("button");
+  back.type = "button";
+  back.textContent = "Return to geoscape";
+  back.addEventListener("click", () => { el.remove(); void showGeoscape(); });
+  actions.appendChild(back);
+  el.appendChild(actions);
+  Object.assign(el.style, {
+    position: "absolute",
+    inset: "0",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "#05060a",
+    color: "#ff6b6b",
+    font: "600 13px/1.6 ui-monospace, SFMono-Regular, monospace",
+    letterSpacing: "0.15em",
+    textTransform: "uppercase",
+    zIndex: "9999",
+    textAlign: "center",
+    padding: "24px",
+  });
+  for (const btn of el.querySelectorAll("button")) {
+    Object.assign(btn.style, {
+      background: "transparent",
+      border: "1px solid #ff6b6b",
+      color: "#ffb4b4",
+      font: "inherit",
+      padding: "8px 16px",
+      cursor: "pointer",
+    });
+  }
+  appRoot.appendChild(el);
+}
+
+/**
+ * Minimal non-blocking error toast for the global error backstop. Pinned to the
+ * corner so it never covers gameplay; auto-dismisses after a few seconds and on
+ * click. Keeps an uncaught error from white-screening the game silently.
+ */
+function showErrorToast(message: string): void {
+  const el = document.createElement("div");
+  el.className = "error-toast";
+  el.setAttribute("role", "alert");
+  el.textContent = message;
+  Object.assign(el.style, {
+    position: "fixed",
+    bottom: "16px",
+    left: "16px",
+    zIndex: "10000",
+    background: "#3a0d12",
+    color: "#ffb4b4",
+    border: "1px solid #ff6b6b",
+    font: "500 12px/1.5 ui-monospace, SFMono-Regular, monospace",
+    padding: "10px 14px",
+    borderRadius: "4px",
+    maxWidth: "min(420px, 80vw)",
+    cursor: "pointer",
+  });
+  const dismiss = () => el.remove();
+  el.addEventListener("click", dismiss, { once: true });
+  document.body.appendChild(el);
+  window.setTimeout(dismiss, 8000);
+}
+
+// Global error backstop: any uncaught throw or unhandled promise rejection that
+// escapes a screen mount (or surfaces later from a view) is logged and surfaced
+// as a non-blocking toast so the game never silently white-screens. The mount
+// functions below have their own targeted try/catch for the known failure modes
+// (failed dynamic import, WebGL context acquisition); this catches everything
+// else.
+window.addEventListener("error", (event: ErrorEvent) => {
+  console.error("[xcom] Uncaught error:", event.error ?? event.message);
+  showErrorToast(`Error: ${event.message || "unknown"}`);
+});
+window.addEventListener("unhandledrejection", (event: PromiseRejectionEvent) => {
+  const reason = event.reason;
+  console.error("[xcom] Unhandled promise rejection:", reason);
+  showErrorToast(`Error: ${reason instanceof Error ? reason.message : String(reason)}`);
+});
+
 let geoscape: GeoscapeView | null = null;
 let baseView: BaseView | null = null;
 /** Teardown for an active tactical view, invoked before mounting any other screen. */
@@ -249,6 +356,17 @@ function flushSave(): void {
   if (snapshot) saveCampaign(snapshot);
 }
 
+// Flush any pending debounced save when the page is torn down (tab close,
+// navigate away, or mobile background-discard within the 400ms debounce
+// window). pagehide fires reliably on both desktop tab-close and mobile
+// bfcache-discard; visibilitychange:hidden adds coverage for mobile tab-switch.
+// flushSave is synchronous and idempotent (no-op when nothing is pending), so
+// registering both is safe. Registered once at module load.
+window.addEventListener("pagehide", () => flushSave(), { capture: true });
+window.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flushSave();
+});
+
 /**
  * Shared GeoscapeView callback set. Every closure advances from the in-memory
  * `currentCampaign` (not localStorage, which goes stale while a debounced save is
@@ -318,8 +436,10 @@ function buildGeoscapeCallbacks(campaign: CampaignState | null) {
   };
 }
 
-/** Dispose any prior geoscape, build + mount a fresh one bound to `campaign`. */
-async function mountGeoscape(campaign: CampaignState | null): Promise<GeoscapeView> {
+/** Dispose any prior geoscape, build + mount a fresh one bound to `campaign`.
+ *  Returns null if the chunk import or constructor threw (a recoverable error
+ *  overlay is shown in that case; callers should bail). */
+async function mountGeoscape(campaign: CampaignState | null): Promise<GeoscapeView | null> {
   const hideLoader = showScreenLoader("Loading…");
   geoscape?.dispose();
   try {
@@ -328,6 +448,14 @@ async function mountGeoscape(campaign: CampaignState | null): Promise<GeoscapeVi
     geoscape = new GeoscapeCtor(buildGeoscapeCallbacks(campaign));
     geoscape.mount(appRoot);
     return geoscape;
+  } catch (err) {
+    // Dispose a half-constructed geoscape (constructor OK but mount threw) so
+    // it doesn't leak DOM/listeners; null the slot so a retry mounts fresh.
+    geoscape?.dispose();
+    geoscape = null;
+    console.error("[xcom] Failed to mount geoscape:", err);
+    showScreenError("Failed to load the geoscape.", () => { void mountGeoscape(campaign); });
+    return null;
   } finally {
     hideLoader();
   }
@@ -361,6 +489,13 @@ async function mountPlaneCombat(campaign: CampaignState): Promise<void> {
       },
     });
     planeCombat.mount(appRoot);
+  } catch (err) {
+    // Dispose a half-constructed dogfight screen so it doesn't leak, then offer
+    // recovery: retry the encounter, or abandon it and return to the globe.
+    planeCombat?.dispose();
+    planeCombat = null;
+    console.error("[xcom] Failed to mount interception screen:", err);
+    showScreenError("Failed to load the interception screen.", () => { void mountPlaneCombat(campaign); });
   } finally {
     hideLoader();
   }
@@ -377,8 +512,8 @@ async function showGeoscape(): Promise<void> {
   baseView = null;
   planeCombat?.dispose();
   planeCombat = null;
-  await mountGeoscape(currentCampaign);
-  sfx.startAmbience("geoscape");
+  const view = await mountGeoscape(currentCampaign);
+  if (view) sfx.startAmbience("geoscape");
 }
 
 async function showBase(campaign: CampaignState): Promise<void> {
@@ -395,6 +530,7 @@ async function showBase(campaign: CampaignState): Promise<void> {
   planeCombat?.dispose();
   planeCombat = null;
   const hideLoader = showScreenLoader("Loading…");
+  try {
   const { BaseView: BaseViewCtor } = await import("./baseView");
   baseView = new BaseViewCtor({
     campaign,
@@ -422,6 +558,7 @@ async function showBase(campaign: CampaignState): Promise<void> {
       baseView?.dispose();
       baseView = null;
       const view = await mountGeoscape(current);
+      if (!view) return; // mount failed — recoverable error overlay shown
       view.playDeploymentFlight(current, () => {
         void startTactical(currentCampaign ?? current);
       });
@@ -498,7 +635,19 @@ async function showBase(campaign: CampaignState): Promise<void> {
     },
   });
   baseView.mount(appRoot);
-  hideLoader();
+  } catch (err) {
+    // Dispose a half-constructed base view (constructor OK but mount threw) so
+    // it doesn't leak, then surface a recoverable overlay. Without this catch a
+    // failed import/construct leaves hideLoader unreached via the catch path —
+    // the finally still clears the loader, and this offers retry/recovery.
+    baseView?.dispose();
+    baseView = null;
+    console.error("[xcom] Failed to mount base screen:", err);
+    showScreenError("Failed to load the base screen.", () => { void showBase(campaign); });
+    return;
+  } finally {
+    hideLoader();
+  }
   sfx.startAmbience("base");
 }
 
@@ -556,20 +705,10 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
     ...missionObjective,
   });
 
-  const hideLoader = showScreenLoader("Deploying…");
-  // three.js, the tactical renderer, and the HUD load lazily here on first
-  // battlescape mount. Fetch both chunks in parallel while the loader shows.
-  const [{ Renderer: RendererCtor }, { Hud: HudCtor }] = await Promise.all([
-    import("./renderer"),
-    import("./hud"),
-  ]);
-  const renderer = new RendererCtor();
-  renderer.mount(appRoot);
-
-  // Switch the shared ambience bed to the tactical wind/rumble. The same `sfx`
-  // instance backs all tactical SFX below, so mute carries over from the globe.
-  sfx.startAmbience("tactical");
-
+  // Tactical-scoped state. Declared before the mount try-block so it stays in
+  // scope for the entire loop below regardless of whether the dynamic import or
+  // view construction succeeds (the try only guards the failure-prone chunk
+  // import + renderer/HUD construction + mount).
   let selectedId: number | null = null;
   let currentMode: ShotKind = "snap";
   let currentHover: HudHover | null = null;
@@ -593,7 +732,30 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
   const tacticalAbort = new AbortController();
   const tacticalSignal = tacticalAbort.signal;
 
-  const hud = new HudCtor({
+  // Declared outside the try so the catch can dispose a half-constructed view
+  // and the rest of the function can use them. The catch returns on failure, so
+  // both are assigned before first use below. `!` asserts definite assignment to
+  // the compiler; `?.` in the catch still guards the runtime case where the
+  // import/constructor threw before assignment.
+  let renderer!: Renderer;
+  let hud!: Hud;
+
+  const hideLoader = showScreenLoader("Deploying…");
+  try {
+  // three.js, the tactical renderer, and the HUD load lazily here on first
+  // battlescape mount. Fetch both chunks in parallel while the loader shows.
+  const [{ Renderer: RendererCtor }, { Hud: HudCtor }] = await Promise.all([
+    import("./renderer"),
+    import("./hud"),
+  ]);
+  renderer = new RendererCtor();
+  renderer.mount(appRoot);
+
+  // Switch the shared ambience bed to the tactical wind/rumble. The same `sfx`
+  // instance backs all tactical SFX below, so mute carries over from the globe.
+  sfx.startAmbience("tactical");
+
+  hud = new HudCtor({
     onEndTurn: () => void dispatch({ type: "endTurn" }),
     onSelectMode: (kind) => setMode(kind),
     onSetReserve: (mode) => setReserve(mode),
@@ -620,7 +782,22 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
     onNewCampaign: () => startNewCampaign(),
   });
   hud.mount(appRoot);
-  hideLoader();
+  } catch (err) {
+    // Dispose any half-constructed view (renderer up but HUD failed, or vice
+    // versa) so GPU resources / listeners do not leak. `?.` guards the runtime
+    // case where the import/constructor threw before assignment (the `!` type
+    // assertion only satisfies the compiler); the inner try/catch guards a
+    // dispose() that itself throws on a partially-built instance. Then surface a
+    // recoverable overlay (retry the same battle or return to the geoscape)
+    // instead of stranding the player on a blank/locked "Deploying…" screen.
+    try { hud?.dispose(); } catch { /* half-constructed — ignore */ }
+    try { renderer?.dispose(); } catch { /* half-constructed — ignore */ }
+    console.error("[xcom] Failed to mount tactical screen:", err);
+    showScreenError("Failed to deploy the strike team.", () => { void startTactical(campaign, operation); });
+    return;
+  } finally {
+    hideLoader();
+  }
 
   // ---------------------------------------------------------------------------
   // Tactical teardown (cancels rAF, aborts all listeners, disposes GPU + HUD)
@@ -1470,30 +1647,38 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
     renderer.clearPreview();
     refreshHud();
 
-    const events = applyCommand(state, cmd);
-    await animate(events);
+    try {
+      const events = applyCommand(state, cmd);
+      await animate(events);
 
-    // Drop a stale selection (unit died or it is no longer the player's).
-    const sel = selectedId !== null ? unitById(state, selectedId) : undefined;
-    if (!sel || !sel.alive || sel.faction !== "player") {
-      selectedId = null;
-      renderer.setSelected(null);
+      // Drop a stale selection (unit died or it is no longer the player's).
+      const sel = selectedId !== null ? unitById(state, selectedId) : undefined;
+      if (!sel || !sel.alive || sel.faction !== "player") {
+        selectedId = null;
+        renderer.setSelected(null);
+      }
+
+      renderer.syncFromState(state);
+      if (selectedId !== null) renderer.setSelected(selectedId);
+      // Re-show cover for the (possibly moved) selection; force since the unit's
+      // tile may have changed even though its id has not.
+      refreshCoverFor(selectedUnit(), true);
+
+      // Auto-select a fresh unit at the start of the player's turn if none is held.
+      if (selectedId === null && state.status === "playing" && state.activeFaction === "player") {
+        const next = livingUnits(state, "player")[0];
+        if (next) select(next.id);
+      }
+    } catch (err) {
+      // The sim reducer should be the source of truth and not throw, but a
+      // reducer/animation fault must not become an unrecoverable input lock —
+      // release `busy` so the player can keep playing (turn preserved).
+      console.error("dispatch failed", err);
+      hud.notify("Action failed — turn preserved", "danger");
+    } finally {
+      busy = false;
+      refreshHud();
     }
-
-    renderer.syncFromState(state);
-    if (selectedId !== null) renderer.setSelected(selectedId);
-    // Re-show cover for the (possibly moved) selection; force since the unit's
-    // tile may have changed even though its id has not.
-    refreshCoverFor(selectedUnit(), true);
-
-    // Auto-select a fresh unit at the start of the player's turn if none is held.
-    if (selectedId === null && state.status === "playing" && state.activeFaction === "player") {
-      const next = livingUnits(state, "player")[0];
-      if (next) select(next.id);
-    }
-
-    busy = false;
-    refreshHud();
   }
 
   // ---------------------------------------------------------------------------
@@ -1852,14 +2037,27 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
   }
 
   let lastFrameMs = performance.now();
+  // Re-arm requestAnimationFrame BEFORE renderer.render() so a single render
+  // throw (context loss, transient bad uniform/effect) only costs one frame
+  // instead of permanently terminating the loop — matches geoscape/planeCombat.
+  // Swallow render errors after the first to avoid console spam during a
+  // persistent fault (e.g. until the context-lost handler re-mounts).
+  let renderErrorLogged = false;
   function frame(): void {
     if (!tacticalActive) return;
+    frameId = requestAnimationFrame(frame);
     const now = performance.now();
     const dt = Math.min(0.05, (now - lastFrameMs) / 1000);
     lastFrameMs = now;
     applyCameraKeys(dt);
-    renderer.render();
-    frameId = requestAnimationFrame(frame);
+    try {
+      renderer.render();
+    } catch (err) {
+      if (!renderErrorLogged) {
+        renderErrorLogged = true;
+        console.error("tactical render failed", err);
+      }
+    }
   }
   frameId = requestAnimationFrame(frame);
 }

@@ -122,6 +122,16 @@ export const ITEMS: Record<string, Item> = {
     damage: 50,
     throwRange: 8,
   },
+  stunRod: {
+    id: "stunRod",
+    name: "Stun Rod",
+    kind: "stunRod",
+    // A cheap, reusable melee tool: strike an adjacent hostile to build STUN (not
+    // hp). Enough strikes drop the target unconscious for capture at victory.
+    tuPercent: 30,
+    stunPower: 40,
+    reach: 1,
+  },
 };
 
 /** Spawnable unit templates. Keyed by stable id (also stored on the template). */
@@ -158,6 +168,7 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
     weaponId: "plasma",
     sightRange: 18,
     visionHalfAngleDeg: 50,
+    rank: "soldier",
   },
   sentinel: {
     id: "sentinel",
@@ -175,6 +186,7 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
     items: ["grenade"],
     sightRange: 18,
     visionHalfAngleDeg: 45,
+    rank: "navigator",
   },
   heavy: {
     id: "heavy",
@@ -193,6 +205,7 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
     weaponId: "cannon",
     sightRange: 16,
     visionHalfAngleDeg: 45,
+    rank: "leader",
   },
   stalker: {
     id: "stalker",
@@ -211,6 +224,7 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
     weaponId: "sniper",
     sightRange: 22,
     visionHalfAngleDeg: 40,
+    rank: "soldier",
   },
   commander: {
     id: "commander",
@@ -234,6 +248,7 @@ export const TEMPLATES: Record<string, UnitTemplate> = {
     items: ["grenade"],
     sightRange: 20,
     visionHalfAngleDeg: 45,
+    rank: "commander",
   },
   civilian: {
     id: "civilian",

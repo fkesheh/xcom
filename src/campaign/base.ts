@@ -10,7 +10,8 @@ export type FacilityKind =
   | "workshop"
   | "stores"
   | "power"
-  | "radar";
+  | "radar"
+  | "containment";
 
 export interface BaseFacility {
   id: string;
@@ -62,6 +63,12 @@ export const STARTER_BASE_FACILITY_IDS = [
 ] as const;
 
 export type BaseFacilityId = string;
+
+/** Facility id of the Alien Containment facility (required to keep live captives). */
+export const CONTAINMENT_FACILITY_ID = "containment";
+
+/** Live alien captives a single built containment facility can hold. */
+export const CONTAINMENT_CAPACITY = 8;
 
 export const BASE_FACILITIES: readonly BaseFacility[] = [
   {
@@ -294,6 +301,27 @@ export const BASE_FACILITIES: readonly BaseFacility[] = [
     constructionHours: 18,
     description: "Compact generator room reserved for late-base expansion.",
     effect: "Adds 24 power capacity for future construction.",
+  },
+  {
+    id: CONTAINMENT_FACILITY_ID,
+    label: "Alien Containment",
+    kind: "containment",
+    x: 5,
+    y: 4,
+    w: 1,
+    h: 1,
+    powerUse: 6,
+    powerOutput: 0,
+    staff: 8,
+    cost: {
+      credits: 220,
+      alloys: 8,
+      elerium: 2,
+      alienData: 2,
+    },
+    constructionHours: 30,
+    description: "Sealed cryo-holding cells and neutralization field for live specimens.",
+    effect: "Lets the base hold live alien captives for interrogation; without it captures are lost at debrief.",
   },
 ];
 

@@ -14,7 +14,18 @@ export type ResearchId =
   | "improvedMedikit"
   | "poweredArmor"
   | "eleriumPowerSource"
-  | "mindShield";
+  | "mindShield"
+  | "alienInterrogation"
+  | "leaderInterrogation"
+  | "commanderInterrogation";
+
+/**
+ * Rank of a captured alien. Mirrors the sim's EnemyRank union (kept decoupled so
+ * the campaign layer does not import the sim); the game layer bridges a captured
+ * unit's rank to this value. Gates interrogation research: leaderInterrogation
+ * needs a "leader"+ captive, commanderInterrogation a "commander".
+ */
+export type CaptiveRank = "soldier" | "navigator" | "leader" | "commander";
 export type CampaignStatus = "active" | "won" | "lost";
 export type SoldierStatus = "active" | "wounded" | "kia";
 export type SoldierRank = "rookie" | "squaddie" | "sergeant" | "captain";
@@ -29,7 +40,7 @@ export type ManufacturingProjectId =
   | "medkit"
   | "armor";
 export type DifficultyLevel = "rookie" | "veteran" | "commander";
-export type MissionType = "crashSite" | "terror" | "landedUfo" | "baseDefense";
+export type MissionType = "crashSite" | "terror" | "landedUfo" | "baseDefense" | "alienBaseAssault";
 /** Classification of a detected UFO, driving its strength / speed / lifetime profile. */
 export type UfoType = "scout" | "harvester" | "terror" | "battleship";
 export type CouncilRegion =
@@ -229,7 +240,7 @@ export interface SoldierStatBonus {
   firingAccuracy: number;
 }
 
-export type OperationTheme = "farmland" | "urban" | "desert" | "arctic" | "jungle" | "forest";
+export type OperationTheme = "farmland" | "urban" | "desert" | "arctic" | "jungle" | "forest" | "alienBase";
 
 /** Per-mission-type context (civilians for terror, facility for base defense). */
 export interface MissionContext {
@@ -286,6 +297,33 @@ export interface ProjectReport {
   completedAtHour: number;
 }
 
+/**
+ * A live alien captive held at a base. Produced at debrief when an unconscious
+ * enemy is recovered AND a base has a built Alien Containment facility (otherwise
+ * the captive is lost). Consumed by interrogation research projects.
+ */
+export interface CampaignCaptive {
+  /** Stable per-captive id (e.g. `captive-<n>`). */
+  id: string;
+  /** Sim unit-template id of the captured species (e.g. "sentinel", "commander"). */
+  templateId: string;
+  rank: CaptiveRank;
+  /** Campaign clock `elapsedHours` at which the captive was taken. */
+  capturedAtHour: number;
+}
+
+/**
+ * The alien headquarters, seeded on land at campaign start. Hidden until an
+ * interrogation (or the 5-operations fallback milestone) reveals it, after which
+ * a transport can launch the alienBaseAssault final mission at its location.
+ */
+export interface AlienHq {
+  /** Reuses the shared geo coordinate type used for bases/UFOs. */
+  location: BaseLocation;
+  /** Whether the HQ location has been revealed to the player. */
+  revealed: boolean;
+}
+
 export interface CampaignState {
   version: 1;
   id: string;
@@ -332,4 +370,11 @@ export interface CampaignState {
   missionsAttempted: number;
   lastMission?: MissionReport;
   projectReports: ProjectReport[];
+  /**
+   * Live alien captives held across all bases. Only retained if some base has a
+   * built Alien Containment facility; interrogation research consumes them.
+   */
+  captives?: CampaignCaptive[];
+  /** The alien HQ (seeded on land at campaign start; revealed via interrogation or the fallback milestone). */
+  alienHq?: AlienHq;
 }

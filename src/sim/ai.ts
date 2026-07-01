@@ -158,7 +158,7 @@ function reactionDangerAt(
     if (!snap) continue;
     if (p.ammo < snap.shots) continue;
     if (p.tu < tuCostForMode(p, snap)) continue;
-    if (!canSee(state.grid, p, pos)) continue;
+    if (!canSee(state.grid, p, pos, state.smokeClouds)) continue;
     if (!(reactionScoreOf(p, p.tu) > moverScore)) continue;
     // Mover's defense at `pos`: directional cover plus the kneel-target profile
     // bonus, capped at 0.8 -- exactly what resolveShot applies via
