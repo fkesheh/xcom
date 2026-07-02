@@ -23,7 +23,8 @@ import type {
 import { coverDefenseFor } from "../sim/combat";
 import { visibleEnemyIds } from "../sim/index";
 import type { SoldierRank, SoldierStatGrowth } from "../campaign/types";
-import { UI_TOKENS, UI_BASE, UI_COMPONENTS } from "./uiTheme";
+import { UI_TOKENS, UI_BASE, UI_COMPONENTS, UI_PRIMITIVES } from "./uiTheme";
+import { formatCredits, formatDuration, formatPercent, ratioToPercent } from "./uiFormat";
 
 export interface HudHover {
   kind: "target" | "move" | "blocked";
@@ -166,13 +167,19 @@ export interface HudCallbacks {
 export type ToastTone = "info" | "success" | "danger";
 
 const MODES: readonly ShotKind[] = ["snap", "aimed", "auto"];
+/** Glyph flagging each fire mode on the action-button face (icon + TU cost, Style Bible item 5). */
+const MODE_ICON: Readonly<Record<ShotKind, string>> = {
+  snap: "»",
+  aimed: "◎",
+  auto: "☰",
+};
 const RESERVES: readonly ReserveMode[] = ["none", "snap", "aimed", "auto"];
 const STYLE_ID = "blacksite-hud-style";
 const LOG_TAIL = 7;
 /** Morale at/above this value reads as "Steady"; below PANIC_THRESHOLD reads as "PANIC". */
 const MORALE_STEADY_FLOOR = 67;
 
-const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
+const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMITIVES + "\n" + `
 :root {
   --hud-cyan: var(--ui-cyan);
   --hud-cyan-soft: rgba(103,232,249,.16);
@@ -267,7 +274,7 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
 #hud .mission h1 { margin: 3px 0 0; font-size: 17px; line-height: 1; letter-spacing: .08em; text-transform: uppercase; }
 #hud .turn { color: var(--hud-muted); text-align: right; font: 600 13px/1.35 ui-monospace, monospace; }
 #hud .turn b { display: block; color: var(--hud-cyan); font-size: 13px; text-transform: uppercase; }
-#hud .mission-meta { display: flex; gap: 6px; margin-top: 9px; }
+#hud .mission-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
 #hud .chip {
   padding: 4px 8px;
   border: 1px solid var(--ui-border);
@@ -353,7 +360,7 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
 #hud .meter-head { display: flex; justify-content: space-between; margin-top: 8px; color: var(--hud-muted); font: 700 12px/1 ui-monospace, monospace; letter-spacing: .1em; text-transform: uppercase; }
 #hud .meter-head b { color: var(--hud-text); font-weight: 700; letter-spacing: 0; }
 #hud .meter-right { display: inline-flex; align-items: baseline; gap: 8px; }
-#hud .bar { position: relative; height: 7px; margin-top: 6px; border-radius: 7px; background: rgba(255,255,255,.07); overflow: hidden; }
+#hud .bar { position: relative; height: 5px; margin-top: 7px; border-radius: 999px; background: rgba(255,255,255,.08); overflow: hidden; }
 #hud .bar i { display: block; height: 100%; border-radius: inherit; transition: width 180ms ease; }
 /* Reaction-reserve segment: amber hatched overlay sitting flush against the spendable TU. */
 #hud .tu-reserve {
@@ -393,9 +400,26 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
 #hud .context-cost { color: var(--hud-green); font: 800 15px/1 ui-monospace, monospace; }
 #hud .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-top: 11px; }
 #hud .modes button { min-height: 57px; padding: 7px 6px; }
-#hud .modes .mode-name { display: block; text-transform: uppercase; }
-#hud .modes .mode-meta { display: flex; justify-content: center; gap: 7px; margin-top: 5px; color: var(--ui-muted); font-size: 12px; }
-#hud .modes .chance { color: var(--hud-amber); }
+#hud .modes .mode-name { display: flex; align-items: center; justify-content: center; gap: 5px; text-transform: uppercase; }
+#hud .modes .mode-icon { color: var(--hud-cyan); font-size: 14px; line-height: 1; }
+#hud .modes button:disabled .mode-icon { color: var(--hud-muted); }
+#hud .modes .mode-meta { display: flex; align-items: center; justify-content: center; gap: 7px; margin-top: 6px; color: var(--ui-muted); font-size: 12px; }
+/* Hit-chance preview reads as a crosshair chip: ⌖ glyph + odds in a tight amber pill. */
+#hud .modes .chance {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  border-radius: var(--ui-radius-pill);
+  border: 1px solid rgba(251,176,46,.4);
+  background: rgba(251,176,46,.1);
+  color: var(--hud-amber);
+  font-weight: 800;
+  letter-spacing: .02em;
+}
+#hud .modes .chance .xhair { color: var(--hud-cyan); font-size: 12px; line-height: 1; }
+#hud .modes button:disabled .chance { border-color: var(--ui-border); background: rgba(255,255,255,.04); color: var(--hud-muted); }
+#hud .modes button:disabled .chance .xhair { color: var(--hud-muted); }
 #hud .reserve-row,
 #hud .reload-row,
 #hud .items-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
@@ -506,29 +530,17 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
 @keyframes endturn-pulse { 50% { box-shadow: 0 0 28px rgba(103,232,249,.35); } }
 @keyframes panic-pulse { 50% { opacity: .4; } }
 
-#hud .toast {
-  position: absolute;
-  top: 91px;
-  left: 50%;
-  z-index: 12;
-  min-width: 240px;
-  max-width: min(440px, calc(100vw - 28px));
-  padding: 11px 16px;
-  border: 1px solid rgba(103,232,249,.4);
-  border-radius: 7px;
-  color: var(--hud-text);
-  background: var(--ui-panel-solid);
-  box-shadow: 0 14px 40px rgba(0,0,0,.38);
+/* Combat toasts ride the shared .ui-toast component (top-center console-glass,
+   auto-dismiss, semantic left-border tones). The HUD adds a success tone on top
+   of the shared info/warning/danger set to preserve its green "objective met"
+   confirmations. Element + timer are owned by notify(); the look is shared. */
+#hud .ui-toast {
   text-align: center;
-  font: 750 13px/1.3 ui-monospace, monospace;
+  font-family: var(--ui-font-mono);
+  font-weight: 750;
   letter-spacing: .04em;
-  opacity: 0;
-  transform: translate(-50%, -8px);
-  transition: opacity 150ms ease, transform 150ms ease;
 }
-#hud .toast.show { opacity: 1; transform: translate(-50%, 0); }
-#hud .toast.success { color: var(--hud-green); border-color: rgba(74,222,128,.45); }
-#hud .toast.danger { color: #fecdd3; border-color: rgba(251,113,133,.5); }
+#hud .ui-toast[data-tone='success'] { border-left-color: var(--hud-green); }
 
 #hud .banner,
 #hud .briefing,
@@ -555,12 +567,12 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   width: min(720px, 100%);
   overflow: hidden;
   padding: clamp(24px, 5vw, 46px);
-  border: 1px solid rgba(103,232,249,.28);
+  border: 1px solid var(--ui-border-console);
   border-radius: 14px;
   background:
     linear-gradient(135deg, rgba(19,42,55,.96), rgba(5,11,17,.98) 62%),
     rgba(5,11,17,.98);
-  box-shadow: 0 30px 100px rgba(0,0,0,.55);
+  box-shadow: var(--ui-glow-inner), 0 30px 100px rgba(0,0,0,.55);
 }
 #hud .dossier-card { width: min(560px, 100%); max-height: calc(100vh - 44px); overflow: auto; }
 #hud .briefing-card::before,
@@ -583,10 +595,11 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   margin: 14px 0 4px;
 }
 #hud .debrief-stat {
-  padding: 10px;
-  border: 1px solid rgba(255,255,255,.08);
-  border-radius: 8px;
-  background: rgba(0,0,0,.18);
+  padding: 11px 12px;
+  border: 1px solid var(--ui-border-console);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-panel-glass);
+  box-shadow: var(--ui-glow-inner);
 }
 #hud .debrief-stat span {
   display: block;
@@ -628,9 +641,11 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
 
 /* Campaign win/lose strip — makes the terminal banner distinct from a regular debrief. */
 #hud .debrief-campaign {
-  padding: 11px 13px;
-  border-radius: 8px;
-  border: 1px solid rgba(255,255,255,.1);
+  padding: 12px 14px;
+  border-radius: var(--ui-radius-sm);
+  border: 1px solid var(--ui-border-console);
+  background: var(--ui-panel-glass);
+  box-shadow: var(--ui-glow-inner);
 }
 #hud .debrief-campaign.won { border-color: rgba(74,222,128,.45); background: rgba(74,222,128,.07); }
 #hud .debrief-campaign.lost { border-color: rgba(251,113,133,.45); background: rgba(251,113,133,.07); }
@@ -645,9 +660,10 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   align-items: center;
   gap: 9px;
   padding: 9px 10px;
-  border: 1px solid rgba(255,255,255,.08);
-  border-radius: 8px;
-  background: rgba(0,0,0,.22);
+  border: 1px solid var(--ui-border-console);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-panel-raised);
+  box-shadow: var(--ui-glow-inner);
 }
 #hud .loot-chip.zero { opacity: .38; }
 #hud .loot-glyph {
@@ -656,7 +672,7 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   height: 28px;
   display: grid;
   place-items: center;
-  border-radius: 6px;
+  border-radius: var(--ui-radius-sm);
   font: 800 15px/1 ui-monospace, monospace;
 }
 #hud .loot-chip.credits .loot-glyph { color: var(--hud-amber); background: rgba(251,191,36,.14); }
@@ -692,10 +708,11 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
 /* Roster lists (KIA + survivors). */
 #hud .debrief-roster { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
 #hud .debrief-roster li {
-  padding: 9px 11px;
-  border: 1px solid rgba(255,255,255,.07);
-  border-radius: 8px;
-  background: rgba(0,0,0,.18);
+  padding: 10px 12px;
+  border: 1px solid var(--ui-border-console);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-panel-glass);
+  box-shadow: var(--ui-glow-inner);
 }
 #hud .debrief-roster li.kia { border-color: rgba(251,113,133,.28); background: rgba(251,113,133,.05); }
 #hud .debrief-soldier-line { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
@@ -716,9 +733,9 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   letter-spacing: .03em;
 }
 #hud .debrief-empty {
-  padding: 9px 11px;
-  border: 1px dashed rgba(255,255,255,.1);
-  border-radius: 8px;
+  padding: 10px 12px;
+  border: 1px dashed var(--ui-border-console);
+  border-radius: var(--ui-radius-sm);
   color: var(--hud-muted);
   font: 600 13px/1.3 ui-monospace, monospace;
 }
@@ -808,8 +825,7 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   #hud .roster .panic-tag { animation: none !important; }
   #hud button,
   #hud .bar i,
-  #hud .tu-reserve,
-  #hud .toast { transition: none !important; }
+  #hud .tu-reserve { transition: none !important; }
 }
 `;
 
@@ -941,7 +957,9 @@ export class Hud {
   private readonly endTurn: HTMLButtonElement;
   private readonly muteButton: HTMLButtonElement;
   private readonly abortButton: HTMLButtonElement;
-  private readonly toast: HTMLDivElement;
+  /** The live toast node (null between notifications). Fresh element per notify so
+   *  the shared .ui-toast enter/exit animation replays; removed by its own timer. */
+  private toastEl: HTMLDivElement | null = null;
   private readonly banner: HTMLDivElement;
   private readonly bannerEye: HTMLDivElement;
   private readonly bannerTitle: HTMLHeadingElement;
@@ -1227,8 +1245,6 @@ export class Hud {
     this.endTurn.addEventListener("click", () => this.cb.onEndTurn());
     this.root.appendChild(this.endTurn);
 
-    this.toast = el("div", "toast");
-    this.root.appendChild(this.toast);
 
     this.banner = el("div", "banner");
     const bannerCard = el("div", "banner-card");
@@ -1346,13 +1362,23 @@ export class Hud {
 
   notify(message: string, tone: ToastTone = "info"): void {
     if (this.toastTimer !== null) window.clearTimeout(this.toastTimer);
-    this.toast.textContent = message;
-    this.toast.className = `toast ${tone}`;
-    requestAnimationFrame(() => this.toast.classList.add("show"));
+    // A fresh element per call replays the shared .ui-toast enter/exit animation
+    // (the CSS is not `.show`-gated, so reusing one node would fire once and stick).
+    if (this.toastEl) this.toastEl.remove();
+    const toast = el("div", "ui-toast");
+    toast.setAttribute("role", "status");
+    toast.dataset.tone = tone; // info | success | danger — drives the left-border accent
+    toast.textContent = message;
+    this.toastEl = toast;
+    this.root.appendChild(toast);
+    // CSS drives the fade-out (~3.6s). This timer just reaps the node afterwards.
     this.toastTimer = window.setTimeout(() => {
-      this.toast.classList.remove("show");
+      if (this.toastEl === toast) {
+        toast.remove();
+        this.toastEl = null;
+      }
       this.toastTimer = null;
-    }, 2100);
+    }, 4000);
   }
 
   private requestAbort(): void {
@@ -1748,20 +1774,28 @@ export class Hud {
       const preview = hover?.previews?.[kind];
       const chance =
         preview && preview.possible
-          ? `${Math.round(preview.hitChance * 100)}%`
+          ? ratioToPercent(preview.hitChance)
           : preview
             ? "BLOCKED"
             : "--";
 
+      // Button face: fire-mode icon + name (Style Bible item 5, icons on the face).
+      const icon = el("span", "mode-icon");
+      icon.textContent = MODE_ICON[kind];
       const name = el("span", "mode-name");
-      name.textContent = kind;
+      name.append(icon, document.createTextNode(kind));
       const meta = el("span", "mode-meta");
       const cost = el("span");
       cost.textContent = costValue === null ? "N/A" : `${costValue} TU`;
       const ammo = el("span");
       ammo.textContent = ammoValue;
+      // Hit-chance reads as a crosshair chip: ⌖ glyph paired with the odds.
       const odds = el("span", "chance");
-      odds.textContent = chance;
+      const xhair = el("span", "xhair");
+      xhair.textContent = "⌖";
+      const oddsValue = el("span");
+      oddsValue.textContent = chance;
+      odds.append(xhair, oddsValue);
       meta.append(cost, ammo, odds);
       button.replaceChildren(name, meta);
       button.disabled =
@@ -2207,8 +2241,8 @@ export class Hud {
     const rating = this.missionRating(score, hasMissionScore);
     grid.append(
       this.debriefScoreStat(score, rating, hasMissionScore),
-      this.debriefStat("Threat", `${debrief.threat}%`),
-      this.debriefStat("Funding", `${debrief.funding}`),
+      this.debriefStat("Threat", formatPercent(debrief.threat)),
+      this.debriefStat("Funding", formatCredits(debrief.funding)),
     );
     return grid;
   }
@@ -2339,7 +2373,7 @@ export class Hud {
     if (soldier.wounded) {
       const tag = el("div", "debrief-tag wounded");
       const hours = soldier.woundRecoveryHours ?? 0;
-      tag.textContent = hours > 0 ? `Wounded · ${this.formatDuration(hours)} recovery` : "Wounded";
+      tag.textContent = hours > 0 ? `Wounded · ${formatDuration(hours)} recovery` : "Wounded";
       li.appendChild(tag);
     }
     return li;
@@ -2380,15 +2414,6 @@ export class Hud {
     if (growth.health) parts.push(`+${growth.health} Health`);
     if (growth.timeUnits) parts.push(`+${growth.timeUnits} Time Units`);
     return parts;
-  }
-
-  private formatDuration(hours: number): string {
-    const h = Math.max(0, Math.round(hours));
-    const days = Math.floor(h / 24);
-    const rem = h % 24;
-    if (days > 0 && rem > 0) return `${days}d ${rem}h`;
-    if (days > 0) return `${days}d`;
-    return `${h}h`;
   }
 
   private makeStat(parent: HTMLElement, label: string): HTMLElement {

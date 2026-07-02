@@ -106,7 +106,13 @@ import {
 import { buildFacilityModel } from "./baseFacilities";
 import { buildFacilityInterior } from "./baseFacilityInteriors";
 import { CrewSystem } from "./basePeople";
-import { UI_TOKENS, UI_BASE, UI_COMPONENTS } from "./uiTheme";
+import { UI_TOKENS, UI_BASE, UI_COMPONENTS, UI_PRIMITIVES } from "./uiTheme";
+import {
+  formatCredits,
+  formatSignedCredits,
+  formatHours,
+  formatPercent,
+} from "./uiFormat";
 
 interface BaseViewOptions {
   campaign: CampaignState;
@@ -226,7 +232,7 @@ const CREW_LOOP_CELLS_RIGHT: ReadonlyArray<readonly [number, number]> = [
   [7, 3],
 ];
 
-const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
+const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMITIVES + "\n" + `
 #base-view {
   position: fixed;
   inset: 0;
@@ -261,12 +267,14 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--ui-sp-4);
   height: 52px;
-  padding: 0 16px;
+  padding: 0 var(--ui-sp-4);
   box-sizing: border-box;
-  border-bottom: 1px solid rgba(103,232,249,.22);
-  background: linear-gradient(180deg, rgba(6,14,22,.9), rgba(6,14,22,.62));
+  border-bottom: 1px solid var(--ui-border-console);
+  background: var(--ui-panel-glass);
+  box-shadow: var(--ui-glow-inner), var(--ui-shadow-sm);
+  -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
 }
 #base-view .topbar-brand {
@@ -297,7 +305,8 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
-  gap: 7px;
+  gap: var(--ui-sp-2);
+  min-width: 0;
 }
 #base-view .topbar-right { display: flex; align-items: center; gap: 10px; }
 #base-view .topbar-tools { display: flex; gap: 8px; }
@@ -313,24 +322,15 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   cursor: pointer;
 }
 #base-view .help-btn:hover { border-color: rgba(103,232,249,.9); background: rgba(14,52,67,.9); }
-#base-view .top-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  border: 1px solid rgba(103,232,249,.24);
-  border-radius: 999px;
-  color: var(--ui-text);
-  background: rgba(8,28,40,.55);
-  font: 700 var(--ui-text-xs)/1 ui-monospace, monospace;
-  letter-spacing: .03em;
-  white-space: nowrap;
-}
-#base-view .top-chip .chip-icon { color: var(--ui-cyan); font-size: var(--ui-text-sm); }
-#base-view .top-chip.warn { border-color: rgba(251,191,36,.5); }
-#base-view .top-chip.warn .chip-icon { color: var(--ui-amber); }
-#base-view .top-chip.danger { border-color: rgba(251,113,133,.5); color: #fecaca; }
-#base-view .top-chip.danger .chip-icon { color: var(--ui-red); }
+/* Base topbar stat chips share the .ui-chip primitive so they read as one system
+   with the geoscape stat strip. The label is hidden on the narrowest chips to keep
+   the strip compact; icon + value always show. */
+#base-view .topbar-chips .ui-chip { flex: 0 0 auto; }
+/* The base sidebar is a console-glass .ui-panel: a flex column that NEVER scrolls
+   as a whole. Its fixed header (operation card) stays pinned while only the body
+   scrolls — this is the fix for the "ridiculously bad" clipping panel. .base-sidebar
+   contributes ONLY positioning/size; the surface (bg/border/radius/flex) comes from
+   .ui-panel so it can't reintroduce the whole-panel overflow. */
 #base-view .base-sidebar {
   position: absolute;
   top: 64px;
@@ -338,22 +338,28 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   bottom: 12px;
   width: min(380px, calc(100vw - 24px));
   z-index: 4;
-  display: flex;
-  flex-direction: column;
-  gap: var(--ui-sp-4);
-  padding: var(--ui-sp-4);
-  overflow: auto;
-  border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-lg);
-  background: var(--ui-panel);
-  box-shadow: var(--ui-shadow);
-  backdrop-filter: blur(10px);
+  box-shadow: var(--ui-glow-inner), var(--ui-shadow);
 }
+/* Fixed header region: holds the operation card, never scrolls with the body.
+   A max-height + internal scroll is a safety net for extreme short viewports so a
+   very tall header can never clip or eat the whole panel. */
+#base-view .sidebar-header {
+  flex: 0 0 auto;
+  max-height: 52%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--ui-sp-4);
+  border-bottom: 1px solid var(--ui-border-console);
+}
+/* Scrollable body: the single scroll surface for objective strip + facility room.
+   Inherits flex:1 / min-height:0 / overflow-y:auto / themed thin scrollbar from
+   .ui-panel-body in UI_PRIMITIVES. */
+#base-view .sidebar-body { gap: var(--ui-sp-3); }
 #base-view .operation-card {
   position: relative;
   padding: var(--ui-sp-4);
   border: 1px solid var(--ui-border-strong);
-  border-radius: var(--ui-radius-lg);
+  border-radius: var(--ui-radius-sm);
   background: var(--ui-panel-raised);
   box-shadow: var(--ui-shadow-glow);
 }
@@ -516,12 +522,15 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   letter-spacing: 0;
   text-transform: none;
 }
+/* The facility room grows with its content and lets the sidebar body (the single
+   scroll surface) do the scrolling — no nested/competing scrollbars, so nothing
+   clips mid-card. */
 #base-view .facility-room {
-  flex: 1;
-  min-height: 0;
+  flex: 0 0 auto;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: var(--ui-sp-3);
 }
 #base-view .room-header {
   display: flex;
@@ -556,10 +565,9 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   text-transform: uppercase;
 }
 #base-view .room-body {
-  flex: 1;
-  min-height: 0;
+  flex: 0 0 auto;
+  min-width: 0;
   padding: 1px;
-  overflow: auto;
 }
 #base-view .hub-overview {
   display: flex;
@@ -571,13 +579,18 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   grid-template-columns: 1fr 1fr;
   gap: 8px;
 }
+/* Facility cards: FIXED height (icon + name + one-line status) so the grid never
+   truncates a card mid-content at the panel bottom. Overflow is clipped and the
+   status blurb is a single ellipsised line. */
 #base-view .room-card {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: var(--ui-sp-1);
-  min-height: 70px;
+  height: 88px;
+  min-width: 0;
   padding: var(--ui-sp-3);
+  overflow: hidden;
   text-align: left;
   text-transform: none;
   letter-spacing: 0;
@@ -598,8 +611,12 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   text-transform: uppercase;
 }
 #base-view .room-card .room-blurb {
+  align-self: stretch;
   color: var(--ui-muted);
   font: 400 var(--ui-text-sm)/1.4 Inter, sans-serif;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 #base-view .panel-head {
   display: flex;
@@ -1207,33 +1224,10 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   text-transform: uppercase;
 }
 #base-view .base-tooltip span { color: var(--ui-muted); }
-#base-view .notice-toast {
-  position: absolute;
-  top: 62px;
-  left: 50%;
-  z-index: 8;
-  max-width: min(440px, calc(100vw - 36px));
-  padding: 10px 16px;
-  border: 1px solid rgba(251,191,36,.5);
-  border-radius: 999px;
-  color: #fef3c7;
-  background: rgba(35,24,4,.92);
-  box-shadow: 0 18px 50px rgba(0,0,0,.5);
-  text-align: center;
-  transform: translate(-50%, -16px);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity .2s ease, transform .2s ease;
-  font: 800 var(--ui-text-xs)/1.3 ui-monospace, monospace;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-}
-#base-view .notice-toast.visible { opacity: 1; transform: translate(-50%, 0); }
-#base-view .notice-toast[data-kind="warning"] {
-  border-color: rgba(251,113,133,.55);
-  color: #fecaca;
-  background: rgba(45,11,18,.92);
-}
+/* Transient toast uses the shared .ui-toast primitive (top-center console-glass
+   card, [data-tone] accent). It is hidden (display:none) until showNotice() reveals
+   it and drives its own JS dismiss timer. */
+#base-view .ui-toast { pointer-events: none; }
 #base-view .base-overlay {
   position: absolute;
   inset: 0;
@@ -1296,8 +1290,7 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
     max-height: 62vh;
     border-radius: 12px 12px 0 0;
   }
-  #base-view .topbar-chips { gap: 5px; }
-  #base-view .top-chip { padding: 5px 8px; }
+  #base-view .topbar-chips { gap: var(--ui-sp-1); }
   #base-view .base-footer { bottom: auto; top: 56px; }
 }
 #base-view .craft-list {
@@ -1403,7 +1396,7 @@ function formatCost(resources: {
   alienData: number;
 }): string {
   const parts = [
-    resources.credits > 0 ? `${resources.credits}c` : "",
+    resources.credits > 0 ? formatCredits(resources.credits) : "",
     resources.alloys > 0 ? `${resources.alloys}a` : "",
     resources.elerium > 0 ? `${resources.elerium}e` : "",
     resources.alienData > 0 ? `${resources.alienData}d` : "",
@@ -1826,14 +1819,20 @@ export class BaseView {
   /** Lightweight transient notice (toast). Pairs its message text with the kind label so
    *  the warning color is never the sole signal. */
   private showNotice(message: string, kind: "info" | "warning" = "info"): void {
-    if (!this.noticeEl) return;
-    const prefix = kind === "warning" ? "! " : "";
-    this.noticeEl.textContent = `${prefix}${message}`;
-    this.noticeEl.dataset.kind = kind;
-    this.noticeEl.classList.add("visible");
+    const notice = this.noticeEl;
+    if (!notice) return;
+    notice.textContent = message;
+    notice.dataset.tone = kind === "warning" ? "warning" : "info";
+    notice.style.display = "inline-flex";
+    // Re-trigger the enter animation on each show. We drive dismissal from JS
+    // (below), not the shared out-animation, so the message stays readable even
+    // under prefers-reduced-motion (where the animation collapses to ~0ms).
+    notice.style.animation = "none";
+    void notice.offsetWidth;
+    notice.style.animation = "ui-toast-in var(--ui-mid) var(--ui-ease)";
     if (this.noticeTimer !== null) clearTimeout(this.noticeTimer);
     this.noticeTimer = setTimeout(() => {
-      if (this.noticeEl) this.noticeEl.classList.remove("visible");
+      if (this.noticeEl) this.noticeEl.style.display = "none";
       this.noticeTimer = null;
     }, 3200);
   }
@@ -1844,7 +1843,7 @@ export class BaseView {
     const headLabel = el("span");
     headLabel.textContent = "Armory / Market";
     const credits = el("span", "market-credits");
-    credits.textContent = `${this.opts.campaign.resources.credits}c available`;
+    credits.textContent = `${formatCredits(this.opts.campaign.resources.credits)} available`;
     head.append(headLabel, credits);
     const intro = el("p");
     intro.textContent =
@@ -1860,7 +1859,7 @@ export class BaseView {
       const name = el("span");
       name.textContent = WEAPONS[weaponId]?.name ?? weaponId;
       const price = el("span", "market-price");
-      price.textContent = `${MARKET_CONFIG[weaponId].price}c`;
+      price.textContent = formatCredits(MARKET_CONFIG[weaponId].price);
       const stock = el("span", "market-stock");
       const stockCount = campaign.market?.stock[weaponId] ?? 0;
       stock.textContent = `${stockCount} in stock`;
@@ -2495,18 +2494,23 @@ export class BaseView {
     topRight.append(chips, tools);
     topbar.append(brand, topRight);
 
-    const sidebar = el("aside", "base-sidebar");
-    const primaryHost = el("div");
+    // Console-glass panel: fixed header (operation card) + scrollable body
+    // (objective strip + facility room). The panel itself never scrolls as a whole,
+    // so no section can clip or overlap another (brief item 9).
+    const sidebar = el("aside", "base-sidebar ui-panel");
+    const primaryHost = el("div", "sidebar-header");
+    const body = el("div", "sidebar-body ui-panel-body");
     const objectiveHost = el("div");
     const roomHost = el("div", "facility-room");
-    sidebar.append(primaryHost, objectiveHost, roomHost);
+    body.append(objectiveHost, roomHost);
+    sidebar.append(primaryHost, body);
 
     const footer = el("div", "base-footer");
-    const earth = el("button");
+    const earth = el("button", "ui-btn");
     earth.textContent = "Earth";
     earth.setAttribute("aria-label", "Return to Earth Command (geoscape)");
     earth.addEventListener("click", () => this.opts.onOpenGeoscape());
-    const reset = el("button");
+    const reset = el("button", "ui-btn ui-btn--danger");
     reset.textContent = "New campaign";
     reset.setAttribute("aria-label", "Abandon this campaign and start a new one");
     reset.addEventListener("click", () => this.opts.onResetCampaign());
@@ -2514,7 +2518,9 @@ export class BaseView {
 
     const tooltip = el("div", "base-tooltip");
     tooltip.setAttribute("role", "tooltip");
-    const notice = el("div", "notice-toast");
+    const notice = el("div", "ui-toast");
+    notice.dataset.tone = "info";
+    notice.style.display = "none";
     notice.setAttribute("role", "status");
     notice.setAttribute("aria-live", "polite");
 
@@ -2614,30 +2620,34 @@ export class BaseView {
       .filter((facility) => facility.kind === "workshop")
       .reduce((sum, facility) => sum + facility.staff, 0);
     const threat = campaign.strategic.threat;
-    const threatCls = threat >= 70 ? "danger" : threat >= 40 ? "warn" : "";
+    const threatTone = threat >= 70 ? "danger" : threat >= 40 ? "warn" : undefined;
     this.topbarChips.replaceChildren(
-      this.topChip("$", "Credits", `${campaign.resources.credits}`, undefined, "currency — buys weapons, recruits, and construction"),
+      this.topChip("$", "Credits", formatCredits(campaign.resources.credits), "accent", "currency — buys weapons, recruits, and construction"),
       this.topChip("⬢", "Alloys", `${campaign.resources.alloys}`, undefined, "alien alloys — manufacture advanced gear"),
       this.topChip("✦", "Elerium", `${campaign.resources.elerium}`, undefined, "elerium-115 — powers advanced research and manufacturing"),
       this.topChip("◈", "Alien Data", `${campaign.resources.alienData}`, undefined, "recovered data — unlocks and accelerates research"),
-      this.topChip("⚗", "Scientists", `${scientists}`, undefined, "staffed lab researchers — more = faster research"),
-      this.topChip("⚙", "Engineers", `${engineers}`, undefined, "staffed workshop engineers — more = faster manufacturing"),
-      this.topChip("▲", "Threat", `${threat}%`, threatCls, "global X-COM threat — high threat raises council panic"),
+      this.topChip("⚗", "Scientists", `${scientists}`, "info", "staffed lab researchers — more = faster research"),
+      this.topChip("⚙", "Engineers", `${engineers}`, "info", "staffed workshop engineers — more = faster manufacturing"),
+      this.topChip("▲", "Threat", formatPercent(threat), threatTone, "global X-COM threat — high threat raises council panic"),
       this.topChip("◆", "Difficulty", difficultyConfig(campaign).label, undefined, "campaign difficulty — affects enemy counts and starting threat"),
       this.topChip("⌖", "Bases", `${allBases(campaign).length}/${MAX_EXTRA_BASES + 1}`, undefined, "Primary base + built radar bases (max 3 extra)"),
     );
   }
 
-  /** Compact top-bar chip: icon + value with a hover tooltip carrying the full
-   *  label, so the threat color class is never the sole signal. */
-  private topChip(icon: string, label: string, value: string, cls?: string, hint?: string): HTMLSpanElement {
-    const node = el("span", `top-chip${cls ? ` ${cls}` : ""}`);
+  /** Compact top-bar stat chip built on the shared .ui-chip primitive (icon + label
+   *  + value) so the base strip reads as one system with the geoscape stat strip.
+   *  `tone` maps to a .ui-chip semantic modifier; the hover title carries the full
+   *  label so a color is never the sole signal. */
+  private topChip(icon: string, label: string, value: string, tone?: string, hint?: string): HTMLSpanElement {
+    const node = el("span", `ui-chip${tone ? ` ui-chip--${tone}` : ""}`);
     node.title = hint ? `${label} — ${hint} (${value})` : `${label}: ${value}`;
-    const iconEl = el("span", "chip-icon");
+    const iconEl = el("span", "ui-chip__icon");
     iconEl.textContent = icon;
-    const valEl = el("span", "chip-val");
+    const labelEl = el("span", "ui-chip__label");
+    labelEl.textContent = label;
+    const valEl = el("span", "ui-chip__value");
     valEl.textContent = value;
-    node.append(iconEl, valEl);
+    node.append(iconEl, labelEl, valEl);
     return node;
   }
 
@@ -2664,11 +2674,11 @@ export class BaseView {
       chipEl.append(chipIcon, document.createTextNode(meta.label));
       const region = el("div", "op-region");
       region.textContent =
-        `${operation.region} · ${operation.enemyCount} contacts · ${operation.durationHours}h field time`;
+        `${operation.region} · ${operation.enemyCount} contacts · ${formatHours(operation.durationHours)} field time`;
       const chips = el("div", "op-chips");
       const reward = operation.reward;
       chips.append(
-        span(`+${reward.credits}c`),
+        span(formatSignedCredits(reward.credits)),
         span(`+${reward.alloys}a`),
         span(`+${reward.elerium}e`),
         span(`+${reward.alienData}d`),
@@ -2701,7 +2711,7 @@ export class BaseView {
     title.textContent = "Scan for UFO contacts";
     const copy = el("div", "op-region");
     copy.textContent = "Advance time on the Geoscape to detect a UFO track.";
-    const openGeo = el("button", "primary");
+    const openGeo = el("button", "ui-cta");
     openGeo.textContent = "Open Geoscape";
     openGeo.addEventListener("click", () => this.opts.onOpenGeoscape());
     card.append(eyebrow, title, copy, openGeo);
@@ -2732,10 +2742,10 @@ export class BaseView {
       copy.textContent = `${contact.id} is tracked over ${contact.region}. Intercept to bring it down.`;
     }
     const actions = el("div", "banner-actions");
-    const openGeo = el("button", "primary");
+    const openGeo = el("button", "ui-btn");
     openGeo.textContent = "Open Geoscape";
     openGeo.addEventListener("click", () => this.opts.onOpenGeoscape());
-    const intercept = el("button", "ui-cta");
+    const intercept = el("button", "ui-btn");
     intercept.textContent = "Intercept first";
     intercept.disabled = true;
     actions.append(openGeo, intercept);
@@ -2928,13 +2938,13 @@ export class BaseView {
     const integrity = Math.max(0, 100 - craft.damage);
     if (craft.kind === "transport") {
       copy.textContent = repairing
-        ? `In maintenance — ${repairedAt! - campaign.clock.elapsedHours}h until ready.`
+        ? `In maintenance — ${formatHours(repairedAt! - campaign.clock.elapsedHours)} until ready.`
         : `Ready for deployment — ${craft.sorties} sorties flown.`;
     } else if (repairing) {
       copy.textContent =
-        `Integrity ${integrity}% — repairs underway (${repairedAt! - campaign.clock.elapsedHours}h remaining).`;
+        `Integrity ${formatPercent(integrity)} — repairs underway (${formatHours(repairedAt! - campaign.clock.elapsedHours)} remaining).`;
     } else {
-      copy.textContent = `Integrity ${integrity}% — ${craft.sorties} sorties flown. Ready to intercept.`;
+      copy.textContent = `Integrity ${formatPercent(integrity)} — ${craft.sorties} sorties flown. Ready to intercept.`;
     }
     body.append(heading, copy);
     row.append(icon, body);
@@ -3187,7 +3197,7 @@ export class BaseView {
         (soldier.woundedUntilHour ?? campaign.clock.elapsedHours) - campaign.clock.elapsedHours,
       );
       icon.textContent = "✚";
-      chipEl.append(icon, document.createTextNode(`Rec ${remaining}h`));
+      chipEl.append(icon, document.createTextNode(`Rec ${formatHours(remaining)}`));
     } else if (soldier.status === "kia") {
       icon.textContent = "✖";
       chipEl.append(icon, document.createTextNode("KIA"));
@@ -3305,7 +3315,7 @@ export class BaseView {
     heading.append(kind, name);
     const copy = el("p", "card-copy");
     const hoursAgo = Math.max(0, campaign.clock.elapsedHours - captive.capturedAtHour);
-    copy.textContent = `Captured ${hoursAgo}h ago.`;
+    copy.textContent = `Captured ${formatHours(hoursAgo)} ago.`;
     body.append(heading, copy);
     row.append(icon, body);
     return row;
@@ -3467,7 +3477,7 @@ export class BaseView {
       fill.style.width = `${Math.round(fraction * 100)}%`;
       bar.appendChild(fill);
       const meta = el("div", "tech-node-meta");
-      meta.textContent = `${remaining}h remaining — scientists are working`;
+      meta.textContent = `${formatHours(remaining)} remaining — scientists are working`;
       node.append(bar, meta);
       return node;
     }
@@ -3493,7 +3503,7 @@ export class BaseView {
     const meta = el("div", "tech-node-meta");
     meta.append(
       span(formatCost(cost), "card-cost"),
-      span(`${researchDuration(campaign, project.id)}h`),
+      span(formatHours(researchDuration(campaign, project.id))),
     );
     node.appendChild(meta);
 
@@ -3563,7 +3573,7 @@ export class BaseView {
       fill.style.width = `${Math.round(fraction * 100)}%`;
       bar.appendChild(fill);
       const copy = el("p", "card-copy");
-      copy.textContent = `${remaining}h remaining — workshop is fabricating.`;
+      copy.textContent = `${formatHours(remaining)} remaining — workshop is fabricating.`;
       card.append(strong, bar, copy);
       wrap.appendChild(card);
     }
@@ -3596,7 +3606,7 @@ export class BaseView {
       ? "Workshop is committed to another order."
       : locked
         ? `Requires ${project.requiresResearch}. ${project.description}`
-        : `${project.description} Cost ${formatCost(cost)}, ${manufacturingDuration(campaign, project.id)}h.`;
+        : `${project.description} Cost ${formatCost(cost)}, ${formatHours(manufacturingDuration(campaign, project.id))}.`;
     const row = el("div", "card-row");
     const costLabel = el("span", "card-cost");
     costLabel.textContent = formatCost(cost);
@@ -3628,7 +3638,7 @@ export class BaseView {
       const head = el("div", "bc-head");
       head.append(
         document.createTextNode(constructionFacility.label),
-        Object.assign(el("em"), { textContent: `${remaining}h` }),
+        Object.assign(el("em"), { textContent: formatHours(remaining) }),
       );
       const detail = el("p");
       detail.textContent =
@@ -3658,7 +3668,7 @@ export class BaseView {
         detail.textContent =
           `${facility.effect} ` +
           `Power ${facility.powerUse > 0 ? `+${facility.powerUse} use` : `+${facility.powerOutput} cap`}. ` +
-          `Build ${facilityConstructionDuration(campaign, facility.id)}h.`;
+          `Build ${formatHours(facilityConstructionDuration(campaign, facility.id))}.`;
         const button = el("button");
         button.textContent = canBuild ? "Build" : activeConstruction ? "Queue full" : "Need resources";
         button.disabled = !canBuild;

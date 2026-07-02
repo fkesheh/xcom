@@ -75,6 +75,14 @@ export const UI_TOKENS = `
   --ui-border-strong: rgba(103, 232, 249, 0.55);
   --ui-border-bright: rgba(103, 232, 249, 0.92);
 
+  /* --- Track 2 console-glass surface (Style Bible Layer 1). Packages reference
+     these instead of hardcoding the brief's hex so the material is tuned in ONE
+     place. --ui-panel-glass is the exact "console panel glass" fill from the brief;
+     --ui-border-console is the 1px #1d3a4a-family panel edge. --- */
+  --ui-panel-glass: rgba(10, 20, 32, 0.82);
+  --ui-border-console: #1d3a4a;
+  --ui-glow-inner: inset 0 0 0 1px rgba(56, 232, 210, 0.06), inset 0 1px 0 rgba(127, 184, 216, 0.08);
+
   /* --- Spacing scale --- */
   --ui-sp-1: 4px;
   --ui-sp-2: 8px;
@@ -121,7 +129,7 @@ export const UI_TOKENS = `
  */
 export const UI_BASE = `
 /* --- Screen roots inherit readable defaults (the old floor was an 8px OS default). --- */
-#hud, #base-view, #geoscape {
+#hud, #base-view, #geoscape, #plane-combat {
   color: var(--ui-text);
   font-family: var(--ui-font-ui);
   font-size: var(--ui-text-base);
@@ -134,10 +142,11 @@ export const UI_BASE = `
    rows/toggles the screens mark as clickable (facility list rows, globe, deploy
    toggles, option rows, tech-tree nodes). Add [data-clickable] to any 3D-driven
    control surface you want to feel pressable. --- */
-#hud button, #base-view button, #geoscape button,
+#hud button, #base-view button, #geoscape button, #plane-combat button,
 [data-clickable], .facility-row, .room-card, .geo-diff-option, .deploy-toggle,
 .soldier-row, .item-btn, .tech-node { cursor: pointer; }
-#hud button[disabled], #base-view button[disabled], #geoscape button[disabled] {
+#hud button[disabled], #base-view button[disabled], #geoscape button[disabled],
+#plane-combat button[disabled] {
   cursor: not-allowed;
 }
 
@@ -146,9 +155,11 @@ export const UI_BASE = `
 #hud button:focus-visible,
 #base-view button:focus-visible,
 #geoscape button:focus-visible,
+#plane-combat button:focus-visible,
 #hud [tabindex]:focus-visible,
 #base-view [tabindex]:focus-visible,
 #geoscape [tabindex]:focus-visible,
+#plane-combat [tabindex]:focus-visible,
 .geo-diff-option:focus-visible, .deploy-toggle:focus-visible, .room-card:focus-visible {
   outline: 2px solid var(--ui-cyan);
   outline-offset: 2px;
@@ -158,24 +169,28 @@ export const UI_BASE = `
 /* --- A themed scrollbar that matches the dark surfaces instead of the OS default. --- */
 #hud ::-webkit-scrollbar,
 #base-view ::-webkit-scrollbar,
-#geoscape ::-webkit-scrollbar { width: 10px; height: 10px; }
+#geoscape ::-webkit-scrollbar,
+#plane-combat ::-webkit-scrollbar { width: 10px; height: 10px; }
 #hud ::-webkit-scrollbar-thumb,
 #base-view ::-webkit-scrollbar-thumb,
-#geoscape ::-webkit-scrollbar-thumb {
+#geoscape ::-webkit-scrollbar-thumb,
+#plane-combat ::-webkit-scrollbar-thumb {
   background: rgba(132, 165, 188, 0.38);
   border-radius: var(--ui-radius-pill);
 }
 #hud ::-webkit-scrollbar-thumb:hover,
 #base-view ::-webkit-scrollbar-thumb:hover,
-#geoscape ::-webkit-scrollbar-thumb:hover { background: rgba(103, 232, 249, 0.5); }
+#geoscape ::-webkit-scrollbar-thumb:hover,
+#plane-combat ::-webkit-scrollbar-thumb:hover { background: rgba(103, 232, 249, 0.5); }
 #hud ::-webkit-scrollbar-track,
 #base-view ::-webkit-scrollbar-track,
-#geoscape ::-webkit-scrollbar-track { background: transparent; }
-#hud, #base-view, #geoscape { scrollbar-width: thin; scrollbar-color: rgba(132,165,188,0.4) transparent; }
+#geoscape ::-webkit-scrollbar-track,
+#plane-combat ::-webkit-scrollbar-track { background: transparent; }
+#hud, #base-view, #geoscape, #plane-combat { scrollbar-width: thin; scrollbar-color: rgba(132,165,188,0.4) transparent; }
 
 /* --- Respect reduced motion across all screens. --- */
 @media (prefers-reduced-motion: reduce) {
-  #hud *, #base-view *, #geoscape * {
+  #hud *, #base-view *, #geoscape *, #plane-combat * {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
@@ -185,7 +200,7 @@ export const UI_BASE = `
 
 /* --- Honor "increase contrast": brighten secondary text + thicken borders. --- */
 @media (prefers-contrast: more) {
-  #hud, #base-view, #geoscape {
+  #hud, #base-view, #geoscape, #plane-combat {
     --ui-muted: #c8d8e6;
     --ui-dim: #a4b6c5;
     --ui-border: rgba(190, 210, 228, 0.6);
@@ -202,7 +217,7 @@ export const UI_BASE = `
 export const UI_COMPONENTS = `
 /* .ui-cta — the ONE primary action on a screen (launch mission, intercept, deploy,
    end turn). Big, bright, unmissable: the answer to "what do I do next?". */
-#hud .ui-cta, #base-view .ui-cta, #geoscape .ui-cta {
+#hud .ui-cta, #base-view .ui-cta, #geoscape .ui-cta, #plane-combat .ui-cta {
   min-height: 46px;
   padding: 0 22px;
   font-family: var(--ui-font-mono);
@@ -219,17 +234,20 @@ export const UI_COMPONENTS = `
 }
 #hud .ui-cta:hover:not(:disabled),
 #base-view .ui-cta:hover:not(:disabled),
-#geoscape .ui-cta:hover:not(:disabled) { filter: brightness(1.12); transform: translateY(-1px); }
+#geoscape .ui-cta:hover:not(:disabled),
+#plane-combat .ui-cta:hover:not(:disabled) { filter: brightness(1.12); transform: translateY(-1px); }
 #hud .ui-cta:active:not(:disabled),
 #base-view .ui-cta:active:not(:disabled),
-#geoscape .ui-cta:active:not(:disabled) { transform: translateY(1px); }
-#hud .ui-cta:disabled, #base-view .ui-cta:disabled, #geoscape .ui-cta:disabled {
+#geoscape .ui-cta:active:not(:disabled),
+#plane-combat .ui-cta:active:not(:disabled) { transform: translateY(1px); }
+#hud .ui-cta:disabled, #base-view .ui-cta:disabled, #geoscape .ui-cta:disabled,
+#plane-combat .ui-cta:disabled {
   filter: grayscale(0.85); opacity: 0.5; box-shadow: none;
 }
 
 /* .ui-eyebrow — the small uppercase label that sits above a title. Replaces the
    ad-hoc 8–9px labels that were unreadable. */
-#hud .ui-eyebrow, #base-view .ui-eyebrow, #geoscape .ui-eyebrow {
+#hud .ui-eyebrow, #base-view .ui-eyebrow, #geoscape .ui-eyebrow, #plane-combat .ui-eyebrow {
   font-family: var(--ui-font-mono);
   font-size: var(--ui-text-xs);
   font-weight: 700;
@@ -239,10 +257,240 @@ export const UI_COMPONENTS = `
 }
 
 /* .ui-section-title — a panel heading, consistent weight + tracking. */
-#hud .ui-section-title, #base-view .ui-section-title, #geoscape .ui-section-title {
+#hud .ui-section-title, #base-view .ui-section-title, #geoscape .ui-section-title,
+#plane-combat .ui-section-title {
   font-size: var(--ui-text-lg);
   font-weight: 700;
   letter-spacing: 0.02em;
   color: var(--ui-text-strong);
+}
+`;
+
+/**
+ * Track 2 reusable primitives (console-glass panel, stat chip, button tiers, toast).
+ * Screens append this the same way they append {@link UI_COMPONENTS}:
+ *
+ *   import { UI_TOKENS, UI_BASE, UI_COMPONENTS, UI_PRIMITIVES } from "./uiTheme";
+ *   const CSS = `${UI_TOKENS}\n${UI_BASE}\n${UI_COMPONENTS}\n${UI_PRIMITIVES}`;
+ *
+ * Every value traces to a token above — packages never hardcode the brief's hex.
+ * All selectors are scoped to the four screen roots so nothing leaks. These are
+ * CSS-only: screens add the class names and own their element creation + lifecycle
+ * (toast timers, panel content). No JS is exported here on purpose.
+ */
+export const UI_PRIMITIVES = `
+/* ============================================================================
+   .ui-panel — the console-glass material every rebuilt panel sits on.
+   rgba(10,20,32,0.82) surface · 1px #1d3a4a border · 6px radius · subtle inner
+   glow · cheap optional backdrop blur. Pair .ui-panel-header (fixed) with
+   .ui-panel-body (scrollable, themed thin scrollbar via UI_BASE) to build the
+   fixed-header / scroll-body column the base sidebar rebuilds on.
+   ========================================================================== */
+#hud .ui-panel, #base-view .ui-panel, #geoscape .ui-panel, #plane-combat .ui-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--ui-panel-glass);
+  border: 1px solid var(--ui-border-console);
+  border-radius: var(--ui-radius-sm);
+  box-shadow: var(--ui-glow-inner), var(--ui-shadow-sm);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  color: var(--ui-text);
+}
+#hud .ui-panel-header, #base-view .ui-panel-header,
+#geoscape .ui-panel-header, #plane-combat .ui-panel-header {
+  flex: 0 0 auto;
+  padding: var(--ui-sp-4);
+  border-bottom: 1px solid var(--ui-border-console);
+}
+/* Scrollable region: overflow-y auto with the themed thin scrollbar already
+   defined in UI_BASE. min-height:0 lets it actually shrink inside a flex column
+   so content scrolls instead of clipping (the base-sidebar bug). */
+#hud .ui-panel-body, #base-view .ui-panel-body,
+#geoscape .ui-panel-body, #plane-combat .ui-panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--ui-sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-sp-4);
+}
+
+/* ============================================================================
+   .ui-chip — compact stat chip (icon + label + value). Semantic modifiers tint
+   only the accent (border/icon/value); text stays readable. Used by the geoscape
+   stat strip and the base topbar so both read as one system.
+   ========================================================================== */
+#hud .ui-chip, #base-view .ui-chip, #geoscape .ui-chip, #plane-combat .ui-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ui-sp-2);
+  min-height: 26px;
+  padding: var(--ui-sp-1) var(--ui-sp-3);
+  background: var(--ui-panel-raised);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-sm);
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--ui-text);
+}
+#hud .ui-chip__icon, #base-view .ui-chip__icon, #geoscape .ui-chip__icon, #plane-combat .ui-chip__icon {
+  display: inline-flex;
+  color: var(--ui-muted);
+}
+#hud .ui-chip__label, #base-view .ui-chip__label, #geoscape .ui-chip__label, #plane-combat .ui-chip__label {
+  color: var(--ui-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: var(--ui-text-xs);
+}
+#hud .ui-chip__value, #base-view .ui-chip__value, #geoscape .ui-chip__value, #plane-combat .ui-chip__value {
+  color: var(--ui-text-strong);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+/* Semantic modifiers — one accent color per class (Style Bible rule 3). */
+#hud .ui-chip--info, #base-view .ui-chip--info, #geoscape .ui-chip--info, #plane-combat .ui-chip--info {
+  border-color: rgba(127, 184, 216, 0.5);
+}
+#hud .ui-chip--info .ui-chip__icon, #base-view .ui-chip--info .ui-chip__icon,
+#geoscape .ui-chip--info .ui-chip__icon, #plane-combat .ui-chip--info .ui-chip__icon,
+#hud .ui-chip--info .ui-chip__value, #base-view .ui-chip--info .ui-chip__value,
+#geoscape .ui-chip--info .ui-chip__value, #plane-combat .ui-chip--info .ui-chip__value {
+  color: var(--ui-cyan);
+}
+#hud .ui-chip--accent, #base-view .ui-chip--accent, #geoscape .ui-chip--accent, #plane-combat .ui-chip--accent {
+  border-color: rgba(56, 225, 214, 0.55);
+}
+#hud .ui-chip--accent .ui-chip__icon, #base-view .ui-chip--accent .ui-chip__icon,
+#geoscape .ui-chip--accent .ui-chip__icon, #plane-combat .ui-chip--accent .ui-chip__icon,
+#hud .ui-chip--accent .ui-chip__value, #base-view .ui-chip--accent .ui-chip__value,
+#geoscape .ui-chip--accent .ui-chip__value, #plane-combat .ui-chip--accent .ui-chip__value {
+  color: var(--ui-teal);
+}
+#hud .ui-chip--warn, #base-view .ui-chip--warn, #geoscape .ui-chip--warn, #plane-combat .ui-chip--warn {
+  border-color: rgba(251, 191, 36, 0.55); /* = --ui-amber #fbbf24 */
+}
+#hud .ui-chip--warn .ui-chip__icon, #base-view .ui-chip--warn .ui-chip__icon,
+#geoscape .ui-chip--warn .ui-chip__icon, #plane-combat .ui-chip--warn .ui-chip__icon,
+#hud .ui-chip--warn .ui-chip__value, #base-view .ui-chip--warn .ui-chip__value,
+#geoscape .ui-chip--warn .ui-chip__value, #plane-combat .ui-chip--warn .ui-chip__value {
+  color: var(--ui-amber);
+}
+#hud .ui-chip--danger, #base-view .ui-chip--danger, #geoscape .ui-chip--danger, #plane-combat .ui-chip--danger {
+  border-color: rgba(251, 113, 133, 0.55);
+}
+#hud .ui-chip--danger .ui-chip__icon, #base-view .ui-chip--danger .ui-chip__icon,
+#geoscape .ui-chip--danger .ui-chip__icon, #plane-combat .ui-chip--danger .ui-chip__icon,
+#hud .ui-chip--danger .ui-chip__value, #base-view .ui-chip--danger .ui-chip__value,
+#geoscape .ui-chip--danger .ui-chip__value, #plane-combat .ui-chip--danger .ui-chip__value {
+  color: var(--ui-red);
+}
+
+/* ============================================================================
+   Button tiers (Style Bible item 4). .ui-cta stays the ONE primary (above).
+   .ui-btn = secondary outline, teal fill on hover.
+   .ui-btn--danger = amber/red outline. Disabled = 40% opacity + no hover.
+   Focus ring is inherited from UI_BASE :focus-visible rules.
+   ========================================================================== */
+#hud .ui-btn, #base-view .ui-btn, #geoscape .ui-btn, #plane-combat .ui-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ui-sp-2);
+  min-height: 34px;
+  padding: 0 var(--ui-sp-4);
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-sm);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--ui-cyan);
+  background: transparent;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--ui-radius-sm);
+  transition: color var(--ui-fast) var(--ui-ease),
+              background var(--ui-fast) var(--ui-ease),
+              border-color var(--ui-fast) var(--ui-ease);
+}
+#hud .ui-btn:hover:not(:disabled), #base-view .ui-btn:hover:not(:disabled),
+#geoscape .ui-btn:hover:not(:disabled), #plane-combat .ui-btn:hover:not(:disabled) {
+  color: var(--ui-bg-deep);
+  background: var(--ui-cyan);
+  border-color: var(--ui-border-bright);
+}
+#hud .ui-btn--danger, #base-view .ui-btn--danger, #geoscape .ui-btn--danger, #plane-combat .ui-btn--danger {
+  color: var(--ui-amber);
+  border-color: rgba(251, 191, 36, 0.6); /* = --ui-amber #fbbf24 */
+}
+#hud .ui-btn--danger:hover:not(:disabled), #base-view .ui-btn--danger:hover:not(:disabled),
+#geoscape .ui-btn--danger:hover:not(:disabled), #plane-combat .ui-btn--danger:hover:not(:disabled) {
+  color: var(--ui-bg-deep);
+  background: var(--ui-red);
+  border-color: var(--ui-red);
+}
+#hud .ui-btn:disabled, #base-view .ui-btn:disabled, #geoscape .ui-btn:disabled, #plane-combat .ui-btn:disabled,
+#hud .ui-btn--danger:disabled, #base-view .ui-btn--danger:disabled,
+#geoscape .ui-btn--danger:disabled, #plane-combat .ui-btn--danger:disabled {
+  opacity: 0.4;
+  color: var(--ui-muted);
+  background: transparent;
+  border-color: var(--ui-border);
+}
+
+/* ============================================================================
+   .ui-toast — single toast treatment (Style Bible item 6). Top-center, fixed,
+   auto-dismiss animation, semantic tones via [data-tone]. Screens keep their own
+   element + timer wiring; this is only the look. reducedMotion is covered by the
+   UI_BASE media query (it neutralizes the enter/exit animation duration).
+   ========================================================================== */
+#hud .ui-toast, #base-view .ui-toast, #geoscape .ui-toast, #plane-combat .ui-toast {
+  position: fixed;
+  top: var(--ui-sp-5);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--ui-z-toast);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ui-sp-3);
+  max-width: min(560px, 92vw);
+  padding: var(--ui-sp-3) var(--ui-sp-5);
+  background: var(--ui-panel-glass);
+  border: 1px solid var(--ui-border-console);
+  border-left: 3px solid var(--ui-cyan);
+  border-radius: var(--ui-radius-sm);
+  box-shadow: var(--ui-glow-inner), var(--ui-shadow);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  color: var(--ui-text);
+  font-family: var(--ui-font-ui);
+  font-size: var(--ui-text-base);
+  line-height: var(--ui-leading);
+  animation: ui-toast-in var(--ui-mid) var(--ui-ease),
+             ui-toast-out var(--ui-mid) var(--ui-ease) forwards 3.6s;
+}
+#hud .ui-toast[data-tone='info'], #base-view .ui-toast[data-tone='info'],
+#geoscape .ui-toast[data-tone='info'], #plane-combat .ui-toast[data-tone='info'] {
+  border-left-color: var(--ui-cyan);
+}
+#hud .ui-toast[data-tone='warning'], #base-view .ui-toast[data-tone='warning'],
+#geoscape .ui-toast[data-tone='warning'], #plane-combat .ui-toast[data-tone='warning'] {
+  border-left-color: var(--ui-amber);
+}
+#hud .ui-toast[data-tone='danger'], #base-view .ui-toast[data-tone='danger'],
+#geoscape .ui-toast[data-tone='danger'], #plane-combat .ui-toast[data-tone='danger'] {
+  border-left-color: var(--ui-red);
+}
+@keyframes ui-toast-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(-8px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+@keyframes ui-toast-out {
+  from { opacity: 1; transform: translateX(-50%) translateY(0); }
+  to   { opacity: 0; transform: translateX(-50%) translateY(-8px); }
 }
 `;

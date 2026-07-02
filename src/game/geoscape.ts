@@ -33,7 +33,8 @@ import {
   WebGLRenderer,
 } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { UI_TOKENS, UI_BASE, UI_COMPONENTS } from "./uiTheme";
+import { UI_TOKENS, UI_BASE, UI_COMPONENTS, UI_PRIMITIVES } from "./uiTheme";
+import { formatCredits, formatHours, formatPercent, formatSignedCredits, groupThousands } from "./uiFormat";
 
 import type {
   BaseLocation,
@@ -149,6 +150,15 @@ const FX_SHAKE_MS = 240;
 /** Camera shake magnitude (world units) at hit onset; decays over FX_SHAKE_MS. */
 const FX_SHAKE_MAGNITUDE = 0.03;
 
+/**
+ * Id of the UFO contact whose "new detection" slide+glow entrance has already been
+ * played. Module-scoped (NOT per-instance) because main.ts disposes and recreates the
+ * GeoscapeView on every screen switch: a per-instance flag would reset to "unseen" on
+ * each remount and replay the alert for a contact that has been tracked for hours. The
+ * animation fires only on the transition to a contact id we have not announced yet.
+ */
+let announcedContactId: string | null = null;
+
 /** Contrail particles per craft (ring buffer; no per-frame allocation). */
 const CONTRAIL_MAX = 36;
 /** Particles in the dogfight explosion burst (larger than the standard impact burst). */
@@ -213,7 +223,7 @@ interface EventSnapshot {
 let resumedTimeSpeed = 0;
 let lastEventSnapshot: EventSnapshot | null = null;
 
-const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
+const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMITIVES + "\n" + `
 #geoscape {
   position: fixed;
   inset: 0;
@@ -238,29 +248,56 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   position: absolute;
   inset: 0;
 }
+/* Console-glass material (Style Bible Layer 1): the panel-glass fill, 1px
+   #1d3a4a-family console border, 6px radius, and the shared subtle inner glow —
+   consumed from tokens so every screen reads as one system. */
 #geoscape .geo-panel {
   position: absolute;
   z-index: var(--ui-z-panel);
-  width: min(360px, calc(100vw - 28px));
+  width: min(340px, calc(100vw - 28px));
   padding: var(--ui-sp-4);
-  border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-lg);
-  background: var(--ui-panel-raised);
-  box-shadow: var(--ui-shadow), inset 0 1px rgba(255,255,255,.04);
-  backdrop-filter: blur(10px);
+  border: 1px solid var(--ui-border-console);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-panel-glass);
+  box-shadow: var(--ui-glow-inner), var(--ui-shadow);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
 }
 #geoscape .geo-panel::before {
   content: "";
   position: absolute;
   top: 0;
   left: 0;
-  width: 36%;
+  width: 32%;
   height: 2px;
-  background: linear-gradient(90deg, var(--ui-cyan), transparent);
+  border-radius: var(--ui-radius-sm) 0 0 0;
+  background: linear-gradient(90deg, var(--ui-teal), transparent);
 }
+/* Left column is a flex stack that never runs off-screen: a fixed intro + a
+   scrollable card body (themed scrollbar from UI_BASE) so tall states scroll
+   instead of overflowing behind the speed bar. */
 #geoscape .geo-left {
   top: max(18px, env(safe-area-inset-top));
   left: max(18px, env(safe-area-inset-left));
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-sp-3);
+  max-height: calc(100vh - 36px - 84px);
+  overflow: hidden;
+}
+#geoscape .geo-left-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-sp-2);
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 2px;
+}
+#geoscape .geo-left-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-sp-3);
 }
 #geoscape .geo-right {
   right: max(18px, env(safe-area-inset-right));
@@ -272,48 +309,32 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   letter-spacing: .2em;
   text-transform: uppercase;
 }
+/* Panel title on the locked type scale — sentence/title case, not an ALL-CAPS
+   wall (the eyebrow above carries the uppercase label). */
 #geoscape h1 {
-  margin: 7px 0 10px;
-  font-size: clamp(30px, 5vw, 56px);
-  line-height: .88;
-  letter-spacing: .035em;
-  text-transform: uppercase;
+  margin: 4px 0 2px;
+  font-size: var(--ui-text-2xl);
+  line-height: var(--ui-leading-tight);
+  letter-spacing: .01em;
 }
 #geoscape h2 {
-  margin: 7px 0 8px;
+  margin: 6px 0 8px;
   font-size: var(--ui-text-xl);
   line-height: 1;
-  letter-spacing: .06em;
+  letter-spacing: .04em;
   text-transform: uppercase;
 }
 #geoscape p {
   margin: 0;
   color: var(--ui-muted);
+  line-height: var(--ui-leading);
 }
+/* Compact stat strip: a single wrapping row of .ui-chip (clock/threat/funding/
+   cores/panic) — replaces the old 3-col grid of same-weight boxes. */
 #geoscape .geo-status {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  display: flex;
+  flex-wrap: wrap;
   gap: var(--ui-sp-2);
-  margin-top: var(--ui-sp-4);
-}
-#geoscape .geo-stat {
-  padding: var(--ui-sp-2);
-  border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-sm);
-  background: var(--ui-panel);
-}
-#geoscape .geo-stat span {
-  display: block;
-  color: var(--ui-muted);
-  font: 700 var(--ui-text-xs)/1 var(--ui-font-mono);
-  letter-spacing: .12em;
-  text-transform: uppercase;
-}
-#geoscape .geo-stat b {
-  display: block;
-  margin-top: 5px;
-  color: var(--ui-text);
-  font: 800 var(--ui-text-base)/1 var(--ui-font-mono);
 }
 #geoscape .geo-site {
   margin: var(--ui-sp-3) 0;
@@ -333,27 +354,28 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   color: var(--ui-muted);
   font: 600 var(--ui-text-xs)/var(--ui-leading) var(--ui-font-mono);
 }
+/* Live-contact card: red-bordered alert on the console-glass surface. Enters
+   with a 150ms slide+glow the moment a UFO is detected (see .geo-contact--enter),
+   which only fires on the absent->present transition, never every refresh. */
 #geoscape .geo-contact {
-  margin-top: var(--ui-sp-3);
   padding: var(--ui-sp-3);
   border: 1px solid var(--ui-red);
-  border-radius: var(--ui-radius);
-  background: var(--ui-panel);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-panel-glass);
+  box-shadow: var(--ui-glow-inner);
 }
 #geoscape .geo-contact.idle {
-  border-color: var(--ui-border);
-  background: var(--ui-panel);
+  border-color: var(--ui-border-console);
 }
 #geoscape .geo-contact.lost {
-  border-color: var(--ui-border);
-  background: var(--ui-panel);
+  border-color: var(--ui-border-console);
 }
 #geoscape .geo-contact.lost strong { color: var(--ui-muted); }
 #geoscape .geo-contact strong {
   display: block;
   color: var(--ui-red);
   font: 800 var(--ui-text-sm)/var(--ui-leading-tight) var(--ui-font-mono);
-  text-transform: uppercase;
+  letter-spacing: .04em;
 }
 #geoscape .geo-contact.idle strong {
   color: var(--ui-cyan);
@@ -362,9 +384,89 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   margin-top: 7px;
   color: var(--ui-text);
   font-size: var(--ui-text-base);
+  line-height: var(--ui-leading);
+}
+/* 150ms slide + glow entrance when a contact first appears. reducedMotion is
+   neutralized by the UI_BASE media query. */
+#geoscape .geo-contact--enter {
+  animation: geo-contact-in 150ms var(--ui-ease);
+}
+@keyframes geo-contact-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+    box-shadow: 0 0 0 rgba(251,113,133,0);
+  }
+  60% { box-shadow: 0 0 16px rgba(251,113,133,.55); }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    box-shadow: var(--ui-glow-inner);
+  }
+}
+/* Objective card is the visually primary element of the left column: a teal
+   accent rail + brighter title, so hierarchy reads by luminance, not more color. */
+#geoscape .geo-card-primary {
+  position: relative;
+  padding: var(--ui-sp-3);
+  padding-left: calc(var(--ui-sp-3) + 3px);
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--ui-radius-sm);
+  background: linear-gradient(180deg, rgba(56,225,214,.10), rgba(10,20,32,.5));
+  box-shadow: var(--ui-glow-inner);
+}
+#geoscape .geo-card-primary::before {
+  content: "";
+  position: absolute;
+  top: var(--ui-sp-2);
+  bottom: var(--ui-sp-2);
+  left: 0;
+  width: 3px;
+  border-radius: var(--ui-radius-pill);
+  background: var(--ui-teal);
+}
+#geoscape .geo-card-primary strong {
+  display: block;
+  color: var(--ui-text-strong);
+  font: 800 var(--ui-text-md)/var(--ui-leading-tight) var(--ui-font-mono);
+  letter-spacing: .03em;
+}
+#geoscape .geo-card-primary p {
+  margin-top: 6px;
+  color: var(--ui-muted);
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-leading);
+}
+/* Quiet secondary rows: everything else in the column collapses to a thin,
+   muted row separated by hairlines instead of another same-weight box. */
+#geoscape .geo-row {
+  padding: var(--ui-sp-2) 0;
+  border-top: 1px solid var(--ui-border-console);
+}
+#geoscape .geo-row:first-child { border-top: none; }
+#geoscape .geo-row strong {
+  display: block;
+  color: var(--ui-text);
+  font: 700 var(--ui-text-sm)/var(--ui-leading-tight) var(--ui-font-mono);
+  letter-spacing: .02em;
+}
+#geoscape .geo-row.alert strong { color: var(--ui-amber); }
+#geoscape .geo-row p {
+  margin-top: 3px;
+  color: var(--ui-muted);
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-leading);
+}
+/* Group wrapper for the quiet rows so hairlines read as a list, not stray lines. */
+#geoscape .geo-rows {
+  padding: var(--ui-sp-1) var(--ui-sp-3);
+  border: 1px solid var(--ui-border-console);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-panel);
 }
 #geoscape .geo-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 /* .geo-assault-cta — overrides .ui-cta's cyan gradient with a blood-red one for
@@ -723,23 +825,32 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   color: var(--ui-muted);
   font: 600 var(--ui-text-xs)/var(--ui-leading) var(--ui-font-mono);
 }
+/* Adopts the shared .ui-toast look (top-center, console glass, tone via left
+   border) while keeping the geoscape's own persistent element + JS visibility
+   toggle/timer, so events flash a toast without re-creating the node. */
 #geoscape .geo-toast {
   position: absolute;
   top: max(18px, env(safe-area-inset-top));
   left: 50%;
   z-index: var(--ui-z-toast);
-  transform: translate(-50%, -16px);
+  transform: translate(-50%, -12px);
   opacity: 0;
   pointer-events: none;
-  padding: var(--ui-sp-2) var(--ui-sp-4);
-  border-radius: var(--ui-radius-pill);
-  border: 1px solid var(--ui-border-strong);
-  background: var(--ui-panel);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ui-sp-3);
+  max-width: min(560px, 92vw);
+  padding: var(--ui-sp-3) var(--ui-sp-5);
+  border-radius: var(--ui-radius-sm);
+  border: 1px solid var(--ui-border-console);
+  border-left: 3px solid var(--ui-cyan);
+  background: var(--ui-panel-glass);
   color: var(--ui-text);
-  font: 800 var(--ui-text-sm)/var(--ui-leading) var(--ui-font-mono);
-  letter-spacing: .08em;
-  text-transform: uppercase;
-  box-shadow: var(--ui-shadow);
+  font: 700 var(--ui-text-base)/var(--ui-leading) var(--ui-font-ui);
+  letter-spacing: .01em;
+  box-shadow: var(--ui-glow-inner), var(--ui-shadow);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
   transition: opacity var(--ui-mid) var(--ui-ease), transform var(--ui-mid) var(--ui-ease);
 }
 #geoscape .geo-toast.visible {
@@ -747,12 +858,10 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   transform: translate(-50%, 0);
 }
 #geoscape .geo-toast[data-kind="won"] {
-  border-color: var(--ui-green);
-  color: var(--ui-green);
+  border-left-color: var(--ui-green);
 }
 #geoscape .geo-toast[data-kind="lost"] {
-  border-color: var(--ui-red);
-  color: var(--ui-red);
+  border-left-color: var(--ui-red);
 }
 #geoscape .geo-damage-layer {
   position: absolute;
@@ -935,20 +1044,17 @@ function fmtCoord(value: number, pos: string, neg: string): string {
   return `${Math.abs(value).toFixed(1)}°${dir}`;
 }
 
-function fmtNet(value: number): string {
-  return value >= 0 ? `+${value}` : `${value}`;
-}
-
 export function geoscapeTimeAction(campaign: CampaignState | null): GeoscapeTimeAction {
-  if (!campaign) return { label: `Scan ${GEOSCAPE_SCAN_HOURS}h`, hours: GEOSCAPE_SCAN_HOURS, disabled: true };
+  const scan = formatHours(GEOSCAPE_SCAN_HOURS);
+  if (!campaign) return { label: `Scan ${scan}`, hours: GEOSCAPE_SCAN_HOURS, disabled: true };
   const disabled = campaign.strategic.status !== "active";
   const contact = campaign.ufoContact;
-  if (!contact) return { label: `Scan ${GEOSCAPE_SCAN_HOURS}h`, hours: GEOSCAPE_SCAN_HOURS, disabled };
+  if (!contact) return { label: `Scan ${scan}`, hours: GEOSCAPE_SCAN_HOURS, disabled };
   if (contact.status === "crashed") {
-    return { label: `Hold ${GEOSCAPE_SCAN_HOURS}h`, hours: GEOSCAPE_SCAN_HOURS, disabled };
+    return { label: `Hold ${scan}`, hours: GEOSCAPE_SCAN_HOURS, disabled };
   }
   return {
-    label: isInterceptorReady(campaign) ? `Track ${GEOSCAPE_SCAN_HOURS}h` : `Wait ${GEOSCAPE_SCAN_HOURS}h`,
+    label: isInterceptorReady(campaign) ? `Track ${scan}` : `Wait ${scan}`,
     hours: GEOSCAPE_SCAN_HOURS,
     disabled,
   };
@@ -1256,6 +1362,9 @@ export class GeoscapeView {
   private gratSunUniform: { value: Vector3 } | null = null;
   /** Live clock readout node — rewritten each frame for smooth HH:MM flow. */
   private clockStatValue: HTMLElement | null = null;
+  // The contact card's one-shot slide+glow entrance is gated by the module-scoped
+  // `announcedContactId` (declared above the class), which survives view remounts so a
+  // stale contact never re-triggers the "new detection" alert on a screen round-trip.
   /** Expanding pulse rings on surface beacons (animated in the frame loop). */
   private readonly beaconPulseRings: Mesh[] = [];
   /** Slowly rotating translucent cloud shell. */
@@ -1743,8 +1852,12 @@ export class GeoscapeView {
       : "Select a first base site on the globe. This will become the permanent command center for the campaign.";
     const statsGrid = el("div", "geo-status");
     const noticeSlot = el("div");
-    const cardsSlot = el("div");
-    left.append(eyebrow, title, copy, statsGrid, noticeSlot, cardsSlot);
+    const cardsSlot = el("div", "geo-left-cards");
+    // Fixed intro (eyebrow/title/copy/stat strip) + scrollable card body so a
+    // tall state scrolls inside the column instead of overflowing off-screen.
+    const leftBody = el("div", "geo-left-body");
+    leftBody.append(noticeSlot, cardsSlot);
+    left.append(eyebrow, title, copy, statsGrid, leftBody);
     this.root.appendChild(left);
 
     const right = el("section", "geo-panel geo-right");
@@ -1759,7 +1872,7 @@ export class GeoscapeView {
     const actionsSlot = el("div", "geo-actions");
     // The confirm button is a persistent node; refreshActions re-parents it as needed
     // (its click handler reads live selection state, so the node must survive refreshes).
-    const confirm = el("button", "primary");
+    const confirm = el("button", "primary ui-cta");
     confirm.addEventListener("click", () => {
       if (!this.selectedBase) return;
       const difficulty = this.opts.campaign?.strategic.difficulty ?? this.selectedDifficulty;
@@ -1996,16 +2109,27 @@ export class GeoscapeView {
     }
     const panic = highestRegionalPanic(c);
     const objective = campaignObjectiveProgress(c);
+    // Tones are state-derived (Style Bible rule: one accent per semantic class, and
+    // only when the state warrants it) so a calm campaign doesn't glow amber. Matches
+    // the base view's threat thresholds (danger >=70, warn >=40, neutral otherwise).
+    const threat = c.strategic.threat;
+    const threatTone = threat >= 70 ? "danger" : threat >= 40 ? "warn" : "info";
+    const panicTone = panic.panic >= 75 ? "danger" : panic.panic >= 40 ? "warn" : "info";
     this.statsGrid.append(
       (() => {
-        const clockStat = this.stat("Clock", formatCampaignClock(c.clock), "in-world date and time of day");
-        this.clockStatValue = clockStat.querySelector("b");
+        const clockStat = this.stat("Clock", formatCampaignClock(c.clock), "in-world date and time of day", "info");
+        this.clockStatValue = clockStat.querySelector(".ui-chip__value");
         return clockStat;
       })(),
-      this.stat("Threat", `${c.strategic.threat}%`, "global X-COM threat — drives council panic"),
-      this.stat("Funding", `${c.strategic.funding}`, "monthly council funding index"),
-      this.stat("Cores", `${objective.completed}/${objective.required}`, "recovered UFO cores — campaign objective"),
-      this.stat("Panic", `${panic.region} ${panic.panic}%`, "highest regional panic — a region at 100% defects"),
+      this.stat("Threat", formatPercent(threat), "global X-COM threat — drives council panic", threatTone),
+      this.stat("Funding", groupThousands(c.strategic.funding), "monthly council funding index", "accent"),
+      this.stat("Cores", `${objective.completed}/${objective.required}`, "recovered UFO cores — campaign objective", "info"),
+      this.stat(
+        "Panic",
+        `${panic.region} ${formatPercent(panic.panic)}`,
+        "highest regional panic — a region at 100% defects",
+        panicTone,
+      ),
     );
   }
 
@@ -2016,15 +2140,22 @@ export class GeoscapeView {
 
   private refreshCards(): void {
     this.cardsSlot.replaceChildren();
-    if (!this.campaign) return;
-    this.cardsSlot.append(
-      this.objectiveCard(),
-      this.contactCard(),
-      this.aircraftCard(),
-      this.projectCard(),
-      this.councilCard(),
-      this.fundingCard(),
-    );
+    if (!this.campaign) {
+      announcedContactId = null;
+      return;
+    }
+    // Contact card enters with a 150ms slide+glow, but ONLY when a UFO id we have not
+    // announced yet appears — never re-firing every refresh while time flows, and never
+    // on a view remount for a contact that was already on screen (persisted by id).
+    const contact = this.contactCard();
+    const contactId = this.campaign.ufoContact?.id ?? null;
+    if (contactId && contactId !== announcedContactId) contact.classList.add("geo-contact--enter");
+    announcedContactId = contactId;
+    // Everything after the primary objective + live contact collapses into a
+    // single quiet hairline-separated list of rows.
+    const rows = el("div", "geo-rows");
+    rows.append(this.aircraftCard(), this.projectCard(), this.councilCard(), this.fundingCard());
+    this.cardsSlot.append(this.objectiveCard(), contact, rows);
   }
 
   /**
@@ -2037,7 +2168,7 @@ export class GeoscapeView {
     this.speedBar.replaceChildren();
     this.speedButtons = [];
     const c = this.campaign;
-    const reset = el("button");
+    const reset = el("button", "ui-btn");
     reset.textContent = c ? "New campaign" : "Reset";
     reset.addEventListener("click", () => this.opts.onResetCampaign());
     this.actionsSlot.append(reset);
@@ -2070,8 +2201,8 @@ export class GeoscapeView {
     }
     this.speedBar.append(speedGroup);
     const can = canBuildNewBase(c);
-    const build = el("button");
-    build.textContent = this.buildMode ? "Cancel build" : `Build base (${NEW_BASE_COST.credits}c)`;
+    const build = el("button", this.buildMode ? "ui-btn ui-btn--danger" : "ui-btn");
+    build.textContent = this.buildMode ? "Cancel build" : `Build base (${formatCredits(NEW_BASE_COST.credits)})`;
     build.disabled = !this.buildMode && !can.ok;
     build.title = this.buildMode ? "Exit base-placement mode" : can.ok ? "Designate a new radar base on the globe" : (can.reason ?? "Cannot build a new base right now");
     build.setAttribute("aria-pressed", String(this.buildMode));
@@ -3256,7 +3387,7 @@ export class GeoscapeView {
     status.textContent = this.contactStatusLabel(contact);
     const meta = el("p", "geo-contact-meta");
     meta.textContent =
-      `${fmtCoord(contact.lat, "N", "S")} / ${fmtCoord(contact.lon, "E", "W")} · ${remaining}h left`;
+      `${fmtCoord(contact.lat, "N", "S")} / ${fmtCoord(contact.lon, "E", "W")} · ${formatHours(remaining)} left`;
     // The badge TEXT is status-derived so an airborne (tracked/engaging) UFO
     // reads "Airborne UFO", never "Crash site" — matching the status line.
     // missionTypeInfo still drives the marker icon/color/urgent styling; a
@@ -3349,7 +3480,7 @@ export class GeoscapeView {
       option.setAttribute("role", "radio");
       option.setAttribute("aria-checked", String(level === this.selectedDifficulty));
       const name = el("span", "geo-diff-name");
-      name.textContent = `${config.label} — threat ${config.startingThreat}%, foes ×${config.enemyCountMult}`;
+      name.textContent = `${config.label} — threat ${formatPercent(config.startingThreat)}, foes ×${config.enemyCountMult}`;
       const desc = el("span", "geo-diff-desc");
       desc.textContent = DIFFICULTY_DESCRIPTIONS[level];
       option.append(name, desc);
@@ -3400,10 +3531,10 @@ export class GeoscapeView {
     const copy = el("p");
     copy.textContent = `Arrived at ${this.deploymentFlight?.region ?? "mission site"}. Deploy now or wait for daylight.`;
     const actions = el("div", "geo-deploy-actions");
-    const wait = el("button");
+    const wait = el("button", "ui-btn");
     wait.textContent = "Wait";
     wait.addEventListener("click", () => this.waitAtSite());
-    const deploy = el("button", "primary");
+    const deploy = el("button", "primary ui-cta");
     deploy.textContent = "Deploy";
     deploy.addEventListener("click", () => this.deploySquad());
     actions.append(wait, deploy);
@@ -3451,12 +3582,12 @@ export class GeoscapeView {
   private objectiveCard(): HTMLElement {
     const campaign = this.campaign!;
     const objective = campaignObjectiveProgress(campaign);
-    const card = el("section", objective.status === "active" ? "geo-contact idle" : "geo-contact");
+    const card = el("section", "geo-card-primary");
     const title = el("strong");
-    title.textContent = `${objective.title} / ${objective.completed}/${objective.required}`;
+    title.textContent = `${objective.title} · ${objective.completed}/${objective.required}`;
     const copy = el("p");
     copy.textContent =
-      `${objective.summary} Campaign progress ${objective.percent}%. ` +
+      `${objective.summary} Campaign progress ${formatPercent(objective.percent)}. ` +
       (objective.status === "active"
         ? "Intercept UFOs, recover crash sites, and keep council support alive."
         : "No further recovery operations are authorized.");
@@ -3466,14 +3597,15 @@ export class GeoscapeView {
 
   private aircraftCard(): HTMLElement {
     const campaign = this.campaign!;
-    const card = el("section", "geo-contact idle");
+    const repairedAt = campaign.interceptor.repairedAtHour;
+    const repairing = repairedAt !== undefined && repairedAt > campaign.clock.elapsedHours;
+    const card = el("section", repairing ? "geo-row alert" : "geo-row");
     const title = el("strong");
     const copy = el("p");
-    const repairedAt = campaign.interceptor.repairedAtHour;
-    if (repairedAt && repairedAt > campaign.clock.elapsedHours) {
-      title.textContent = `Interceptor repair / ${campaign.interceptor.damage}% damage`;
+    if (repairedAt !== undefined && repairedAt > campaign.clock.elapsedHours) {
+      title.textContent = `Interceptor repair · ${formatPercent(campaign.interceptor.damage)} damage`;
       copy.textContent =
-        `${Math.max(0, repairedAt - campaign.clock.elapsedHours)}h until airborne. ` +
+        `${formatHours(repairedAt - campaign.clock.elapsedHours)} until airborne. ` +
         `${campaign.interceptor.sorties} sorties flown.`;
     } else {
       title.textContent = "Interceptor ready";
@@ -3489,10 +3621,10 @@ export class GeoscapeView {
   private councilCard(): HTMLElement {
     const campaign = this.campaign!;
     const panic = highestRegionalPanic(campaign);
-    const card = el("section", panic.panic >= 75 ? "geo-contact" : "geo-contact idle");
+    const card = el("section", panic.panic >= 75 ? "geo-row alert" : "geo-row");
     const title = el("strong");
     const copy = el("p");
-    title.textContent = `Council panic / ${panic.region} ${panic.panic}%`;
+    title.textContent = `Council panic · ${panic.region} ${formatPercent(panic.panic)}`;
     copy.textContent =
       panic.panic >= 90
         ? "A council region is near collapse. Secure nearby crash sites or funding will crater."
@@ -3505,13 +3637,13 @@ export class GeoscapeView {
 
   private fundingCard(): HTMLElement {
     const report = this.campaign?.lastFundingReport;
-    const card = el("section", "geo-contact idle");
+    const card = el("section", "geo-row");
     const title = el("strong");
     const copy = el("p");
     if (report) {
-      title.textContent = `Funding report ${report.reportNumber} / ${fmtNet(report.net)}c`;
+      title.textContent = `Funding report ${report.reportNumber} · ${formatSignedCredits(report.net)}`;
       copy.textContent =
-        `${report.summary} Current funding ${report.funding}c, threat ${report.threat}%, ` +
+        `${report.summary} Current funding ${formatCredits(report.funding)}, threat ${formatPercent(report.threat)}, ` +
         `score ${report.score}.`;
     } else {
       title.textContent = "Funding report pending";
@@ -3523,11 +3655,11 @@ export class GeoscapeView {
 
   private projectCard(): HTMLElement {
     const report = this.campaign?.projectReports[0];
-    const card = el("section", report ? "geo-contact" : "geo-contact idle");
+    const card = el("section", report ? "geo-row alert" : "geo-row");
     const title = el("strong");
     const copy = el("p");
     if (report) {
-      title.textContent = `Project complete / ${report.title}`;
+      title.textContent = `Project complete · ${report.title}`;
       copy.textContent = `${report.summary} Completed at campaign hour ${report.completedAtHour}.`;
     } else {
       title.textContent = "Project reports pending";
@@ -3537,15 +3669,20 @@ export class GeoscapeView {
     return card;
   }
 
-  private stat(label: string, value: string, hint?: string): HTMLElement {
-    const node = el("div", "geo-stat");
-    const span = el("span");
-    span.textContent = label;
-    const b = el("b");
-    b.textContent = value;
-    if (hint) node.title = `${label}: ${value} — ${hint}`;
-    node.append(span, b);
-    return node;
+  private stat(
+    label: string,
+    value: string,
+    hint?: string,
+    tone?: "info" | "accent" | "warn" | "danger",
+  ): HTMLElement {
+    const chip = el("div", tone ? `ui-chip ui-chip--${tone}` : "ui-chip");
+    const labelEl = el("span", "ui-chip__label");
+    labelEl.textContent = label;
+    const valueEl = el("span", "ui-chip__value");
+    valueEl.textContent = value;
+    if (hint) chip.title = `${label}: ${value} — ${hint}`;
+    chip.append(labelEl, valueEl);
+    return chip;
   }
 
   private updateSelectionHud(): void {

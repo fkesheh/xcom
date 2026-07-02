@@ -82,6 +82,7 @@ import {
 } from "../campaign/storage";
 
 import { Sfx } from "./audio";
+import { ratioToPercent } from "./uiFormat";
 import type { ProjectileKind } from "./effects";
 // The 3D view classes are imported as types only; their values are dynamically
 // imported inside the screen-mount functions below so three.js stays out of the
@@ -162,14 +163,19 @@ function showScreenLoader(label: string): () => void {
   el.setAttribute("aria-busy", "true");
   el.setAttribute("role", "status");
   el.textContent = label;
+  // Inline-styled and CSS-independent on purpose: this overlay must render before
+  // any screen injects the uiTheme CSS (it covers the gap while a screen chunk
+  // downloads or when one fails to load), so it can't rely on --ui-* custom
+  // properties. Values are the Style Bible palette hardcoded (space #04070d, teal
+  // accent #38e8d2, console border #1d3a4a).
   Object.assign(el.style, {
     position: "absolute",
     inset: "0",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    background: "#05060a",
-    color: "#7fd3ff",
+    background: "#04070d",
+    color: "#38e8d2",
     font: "600 13px/1 ui-monospace, SFMono-Regular, monospace",
     letterSpacing: "0.25em",
     textTransform: "uppercase",
@@ -211,6 +217,10 @@ function showScreenError(label: string, onRetry: (() => void) | null): void {
   back.addEventListener("click", () => { el.remove(); void showGeoscape(); });
   actions.appendChild(back);
   el.appendChild(actions);
+  // Inline-styled and CSS-independent on purpose (see showScreenLoader): this must
+  // render even when a screen chunk fails to import, i.e. before any view injects
+  // the uiTheme CSS, so it hardcodes the Style Bible palette (space #04070d, signal
+  // red #ff4a3a, teal accent #38e8d2, console glass) rather than --ui-* vars.
   Object.assign(el.style, {
     position: "absolute",
     inset: "0",
@@ -218,8 +228,8 @@ function showScreenError(label: string, onRetry: (() => void) | null): void {
     flexDirection: "column",
     alignItems: "center",
     justifyContent: "center",
-    background: "#05060a",
-    color: "#ff6b6b",
+    background: "#04070d",
+    color: "#ff4a3a",
     font: "600 13px/1.6 ui-monospace, SFMono-Regular, monospace",
     letterSpacing: "0.15em",
     textTransform: "uppercase",
@@ -229,11 +239,12 @@ function showScreenError(label: string, onRetry: (() => void) | null): void {
   });
   for (const btn of el.querySelectorAll("button")) {
     Object.assign(btn.style, {
-      background: "transparent",
-      border: "1px solid #ff6b6b",
-      color: "#ffb4b4",
+      background: "rgba(10, 20, 32, 0.82)",
+      border: "1px solid #38e8d2",
+      color: "#dff4f0",
       font: "inherit",
       padding: "8px 16px",
+      borderRadius: "6px",
       cursor: "pointer",
     });
   }
@@ -250,17 +261,21 @@ function showErrorToast(message: string): void {
   el.className = "error-toast";
   el.setAttribute("role", "alert");
   el.textContent = message;
+  // Inline-styled and CSS-independent on purpose: the global error backstop must
+  // surface even if the failure happened before/while a screen injected uiTheme
+  // CSS. Style Bible console-glass panel with a signal-red (#ff4a3a) danger edge.
   Object.assign(el.style, {
     position: "fixed",
     bottom: "16px",
     left: "16px",
     zIndex: "10000",
-    background: "#3a0d12",
-    color: "#ffb4b4",
-    border: "1px solid #ff6b6b",
+    background: "rgba(10, 20, 32, 0.82)",
+    color: "#dff4f0",
+    border: "1px solid #1d3a4a",
+    borderLeft: "3px solid #ff4a3a",
     font: "500 12px/1.5 ui-monospace, SFMono-Regular, monospace",
     padding: "10px 14px",
-    borderRadius: "4px",
+    borderRadius: "6px",
     maxWidth: "min(420px, 80vw)",
     cursor: "pointer",
   });
@@ -1939,7 +1954,7 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
           kind: "target",
           label: target.name,
           detail: activePreview?.possible
-            ? `${Math.round(activePreview.hitChance * 100)}% hit chance with ${currentMode} fire`
+            ? `${ratioToPercent(activePreview.hitChance)} hit chance with ${currentMode} fire`
             : activePreview?.reason ?? "No firing solution",
           previews,
         };

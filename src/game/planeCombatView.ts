@@ -27,6 +27,7 @@ import {
 } from "three";
 import type { CampaignState, InterceptionEncounter } from "../campaign/types";
 import { type InterceptionAction, ufoTypeInfo } from "../campaign/geoscape";
+import { UI_TOKENS, UI_BASE, UI_COMPONENTS, UI_PRIMITIVES } from "./uiTheme";
 
 /**
  * Sealed, self-contained 3D dogfight screen (NOT the geoscape). Mirrors the
@@ -93,15 +94,24 @@ function separationFor(range: number): number {
   return SEPARATION_LONG + (SEPARATION_CLOSE - SEPARATION_LONG) * t;
 }
 
-const CSS = `
+/**
+ * Screen-specific rules. Prepended with the shared Track 2 layers (tokens + base
+ * affordances + component/primitive classes) so this screen reads as one system
+ * with the HUD / base / geoscape. Every color/size traces to a `--ui-*` token; the
+ * panels use the console-glass primitive surface and the action buttons use the
+ * shared `.ui-btn` / `.ui-btn--danger` tiers.
+ */
+const PLANE_CSS = `
 #plane-combat {
   position: fixed;
   inset: 0;
   overflow: hidden;
-  color: #dff7ff;
+  color: var(--ui-text);
   background:
-    radial-gradient(circle at 50% 38%, rgba(20,12,40,.55), rgba(3,6,14,.96) 46%, #010206 100%);
-  font: 12px/1.4 Inter, ui-sans-serif, system-ui, sans-serif;
+    radial-gradient(circle at 50% 38%, #0a1220 0, #070d16 46%, #04070d 100%);
+  font-family: var(--ui-font-ui);
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-leading);
   letter-spacing: .02em;
 }
 #plane-combat canvas { width: 100%; height: 100%; display: block; }
@@ -113,8 +123,8 @@ const CSS = `
   z-index: 2;
   pointer-events: none;
   background:
-    linear-gradient(90deg, rgba(103,232,249,.04) 1px, transparent 1px),
-    linear-gradient(rgba(103,232,249,.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(56,232,210,.04) 1px, transparent 1px),
+    linear-gradient(rgba(56,232,210,.03) 1px, transparent 1px),
     radial-gradient(circle at 50% 50%, transparent 55%, rgba(0,0,0,.55) 100%);
   background-size: 44px 44px, 44px 44px, auto;
   mix-blend-mode: screen;
@@ -125,14 +135,13 @@ const CSS = `
   display: flex;
   flex-direction: column;
   width: min(440px, calc(100vw - 28px));
-  padding: 16px;
-  border: 1px solid rgba(103,232,249,.32);
-  border-radius: 12px;
-  background:
-    linear-gradient(145deg, rgba(10,24,36,.94), rgba(3,8,14,.96) 64%),
-    rgba(3,8,14,.94);
-  box-shadow: 0 28px 90px rgba(0,0,0,.5), inset 0 1px rgba(255,255,255,.04);
-  backdrop-filter: blur(10px);
+  padding: var(--ui-sp-4);
+  border: 1px solid var(--ui-border-console);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-panel-glass);
+  box-shadow: var(--ui-glow-inner), var(--ui-shadow);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
 }
 #plane-combat .pc-panel::before {
   content: "";
@@ -141,7 +150,7 @@ const CSS = `
   left: 0;
   width: 38%;
   height: 2px;
-  background: linear-gradient(90deg, #fb7185, transparent);
+  background: linear-gradient(90deg, var(--ui-red), transparent);
 }
 #plane-combat .pc-left {
   top: max(18px, env(safe-area-inset-top));
@@ -152,17 +161,18 @@ const CSS = `
   bottom: max(18px, env(safe-area-inset-bottom));
 }
 #plane-combat .eyebrow {
-  color: #fb7185;
-  font: 800 9px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
-  letter-spacing: .22em;
+  color: var(--ui-red);
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-xs);
+  font-weight: 800;
+  letter-spacing: .18em;
   text-transform: uppercase;
 }
 #plane-combat h2 {
   margin: 6px 0 10px;
-  font-size: 19px;
-  line-height: 1;
-  letter-spacing: .05em;
-  text-transform: uppercase;
+  font-size: var(--ui-text-xl);
+  line-height: var(--ui-leading-tight);
+  letter-spacing: .04em;
   color: #ffe4e6;
 }
 #plane-combat .pc-meta {
@@ -170,16 +180,20 @@ const CSS = `
   flex-wrap: wrap;
   gap: 14px;
   margin: 0 0 4px;
-  color: #94a3b8;
-  font: 700 10px/1 ui-monospace, monospace;
+  color: var(--ui-muted);
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-xs);
+  font-weight: 700;
   letter-spacing: .12em;
   text-transform: uppercase;
 }
-#plane-combat .pc-meta b { color: #e8fbff; font-weight: 800; }
+#plane-combat .pc-meta b { color: var(--ui-text); font-weight: 800; }
 #plane-combat .pc-range {
   margin: 10px 0 4px;
-  color: #94a3b8;
-  font: 700 9px/1 ui-monospace, monospace;
+  color: var(--ui-muted);
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-xs);
+  font-weight: 700;
   letter-spacing: .14em;
   text-transform: uppercase;
 }
@@ -191,51 +205,55 @@ const CSS = `
 #plane-combat .pc-range-seg {
   flex: 1;
   height: 8px;
-  border: 1px solid rgba(103,232,249,.22);
+  border: 1px solid rgba(56,232,210,.22);
   border-radius: 3px;
-  background: rgba(103,232,249,.07);
+  background: rgba(56,232,210,.07);
 }
 #plane-combat .pc-range-seg.active {
-  border-color: #67e8f9;
-  background: linear-gradient(90deg, #67e8f9, #22d3ee);
-  box-shadow: 0 0 10px rgba(103,232,249,.6);
+  border-color: var(--ui-cyan);
+  background: linear-gradient(90deg, var(--ui-cyan), #22d3ee);
+  box-shadow: 0 0 10px rgba(103,232,249,.5);
 }
 #plane-combat .pc-range-labels {
   display: flex;
   gap: 4px;
-  margin-top: 3px;
-  color: #64748b;
-  font: 700 7px/1 ui-monospace, monospace;
-  letter-spacing: .08em;
+  margin-top: 4px;
+  color: var(--ui-dim);
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-xs);
+  font-weight: 700;
+  letter-spacing: .04em;
   text-transform: uppercase;
 }
 #plane-combat .pc-range-labels span { flex: 1; text-align: center; }
-#plane-combat .pc-range-labels span.active { color: #67e8f9; }
+#plane-combat .pc-range-labels span.active { color: var(--ui-cyan); }
 #plane-combat .pc-bar { margin: 8px 0; }
 #plane-combat .pc-bar-label {
   display: flex;
   justify-content: space-between;
   margin-bottom: 4px;
-  color: #cbd5e1;
-  font: 700 9px/1 ui-monospace, monospace;
+  color: var(--ui-muted);
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-xs);
+  font-weight: 700;
   letter-spacing: .12em;
   text-transform: uppercase;
 }
-#plane-combat .pc-bar-label b { color: #e8fbff; font-weight: 800; }
+#plane-combat .pc-bar-label b { color: var(--ui-text); font-weight: 800; font-variant-numeric: tabular-nums; }
 #plane-combat .pc-bar-track {
-  height: 14px;
-  border: 1px solid rgba(255,255,255,.1);
-  border-radius: 999px;
-  background: rgba(255,255,255,.07);
+  height: 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-pill);
+  background: rgba(255,255,255,.06);
   overflow: hidden;
 }
 #plane-combat .pc-bar-fill {
   height: 100%;
-  border-radius: 999px;
+  border-radius: var(--ui-radius-pill);
   transition: width .25s;
 }
-#plane-combat .pc-bar-fill.ufo { background: linear-gradient(90deg, #fb7185, #f43f5e); }
-#plane-combat .pc-bar-fill.interceptor { background: linear-gradient(90deg, #67e8f9, #22d3ee); }
+#plane-combat .pc-bar-fill.ufo { background: linear-gradient(90deg, var(--ui-red), #f43f5e); }
+#plane-combat .pc-bar-fill.interceptor { background: linear-gradient(90deg, var(--ui-cyan), #22d3ee); }
 #plane-combat .pc-log {
   flex: 1;
   min-height: 72px;
@@ -243,36 +261,17 @@ const CSS = `
   margin: 10px 0;
   padding: 8px 10px;
   overflow-y: auto;
-  border: 1px solid rgba(255,255,255,.08);
-  border-radius: 7px;
-  background: rgba(0,0,0,.34);
-  color: #a8c0d0;
-  font: 11px/1.45 ui-monospace, "SF Mono", Menlo, monospace;
+  border: 1px solid var(--ui-border-console);
+  border-radius: var(--ui-radius-sm);
+  background: rgba(4,7,13,.5);
+  color: var(--ui-muted);
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-sm);
+  line-height: 1.45;
 }
 #plane-combat .pc-log p { margin: 0 0 4px; }
-#plane-combat .pc-actions { display: flex; gap: 8px; }
+#plane-combat .pc-actions { display: flex; gap: var(--ui-sp-2); }
 #plane-combat .pc-actions button { flex: 1; }
-#plane-combat button {
-  padding: 10px 12px;
-  border: 1px solid rgba(103,232,249,.32);
-  border-radius: 8px;
-  background: linear-gradient(180deg, rgba(20,40,54,.9), rgba(6,16,24,.92));
-  color: #cfeeff;
-  font: 800 11px/1 ui-monospace, monospace;
-  letter-spacing: .1em;
-  text-transform: uppercase;
-  cursor: pointer;
-  transition: border-color .15s, box-shadow .15s, transform .05s;
-}
-#plane-combat button:hover { border-color: #67e8f9; box-shadow: 0 0 14px rgba(103,232,249,.35); }
-#plane-combat button:active { transform: translateY(1px); }
-#plane-combat button:disabled { opacity: .4; cursor: default; box-shadow: none; }
-#plane-combat button.primary {
-  border-color: rgba(251,113,133,.6);
-  background: linear-gradient(180deg, rgba(60,16,26,.92), rgba(30,8,14,.95));
-  color: #ffe4e6;
-}
-#plane-combat button.primary:hover { border-color: #fb7185; box-shadow: 0 0 14px rgba(251,113,133,.4); }
 #plane-combat .pc-titlebar {
   position: absolute;
   top: max(18px, env(safe-area-inset-top));
@@ -281,12 +280,15 @@ const CSS = `
   z-index: 4;
   padding: 8px 16px;
   border: 1px solid rgba(251,113,133,.4);
-  border-radius: 999px;
-  background: rgba(6,10,16,.72);
-  backdrop-filter: blur(8px);
+  border-radius: var(--ui-radius-pill);
+  background: var(--ui-panel-glass);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
   color: #ffe4e6;
-  font: 800 10px/1 ui-monospace, monospace;
-  letter-spacing: .2em;
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-xs);
+  font-weight: 800;
+  letter-spacing: .18em;
   text-transform: uppercase;
   white-space: nowrap;
 }
@@ -300,17 +302,21 @@ const CSS = `
   pointer-events: none;
   opacity: 0;
   transition: opacity .2s;
-  background: radial-gradient(circle at 50% 50%, rgba(251,113,133,.16), transparent 60%);
+  background: radial-gradient(circle at 50% 50%, rgba(255,74,58,.16), transparent 60%);
 }
 #plane-combat .pc-resolve.active { opacity: 1; }
 #plane-combat .pc-resolve b {
   padding: 14px 30px;
-  border: 1px solid rgba(251,113,133,.6);
-  border-radius: 10px;
-  background: rgba(6,10,16,.86);
+  border: 1px solid var(--ui-border-console);
+  border-radius: var(--ui-radius);
+  background: var(--ui-panel-glass);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
   color: #ffe4e6;
-  font: 800 22px/1 ui-monospace, monospace;
-  letter-spacing: .14em;
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-2xl);
+  font-weight: 800;
+  letter-spacing: .1em;
   text-transform: uppercase;
 }
 #plane-combat .pc-help {
@@ -321,17 +327,22 @@ const CSS = `
   min-width: 38px;
   min-height: 38px;
   padding: 0;
-  border-radius: 8px;
-  border: 1px solid rgba(103,232,249,.5);
-  color: #67e8f9;
-  background: rgba(2,12,20,.82);
-  font: 800 15px/1 ui-monospace, monospace;
+  border-radius: var(--ui-radius-sm);
+  border: 1px solid var(--ui-border-strong);
+  color: var(--ui-cyan);
+  background: var(--ui-panel-glass);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-lg);
+  font-weight: 800;
   cursor: pointer;
-  box-shadow: 0 10px 30px rgba(0,0,0,.4);
+  box-shadow: var(--ui-shadow-sm);
+  transition: border-color var(--ui-fast) var(--ui-ease), background var(--ui-fast) var(--ui-ease);
 }
-#plane-combat .pc-help:hover { border-color: rgba(103,232,249,.95); background: rgba(14,52,67,.95); }
+#plane-combat .pc-help:hover { border-color: var(--ui-border-bright); background: var(--ui-panel-raised); }
 #plane-combat .pc-help:focus-visible {
-  outline: 2px solid #67e8f9;
+  outline: 2px solid var(--ui-cyan);
   outline-offset: 2px;
 }
 #plane-combat .pc-help-overlay {
@@ -343,22 +354,27 @@ const CSS = `
   justify-content: center;
   padding: 20px;
   background: rgba(2,4,10,.66);
+  -webkit-backdrop-filter: blur(4px);
   backdrop-filter: blur(4px);
 }
 #plane-combat .pc-help-overlay.show { display: flex; }
 #plane-combat .pc-help-card {
   width: min(520px, 100%);
   padding: clamp(20px, 4vw, 32px);
-  border: 1px solid rgba(103,232,249,.32);
-  border-radius: 14px;
-  background: linear-gradient(135deg, rgba(19,42,55,.96), rgba(5,11,17,.98) 62%);
-  box-shadow: 0 30px 100px rgba(0,0,0,.55);
+  border: 1px solid var(--ui-border-console);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-panel-glass);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  box-shadow: var(--ui-glow-inner), var(--ui-shadow);
 }
 #plane-combat .pc-help-card p.lede {
   margin: 0 0 4px;
   max-width: 460px;
-  color: #a9c8d7;
-  font: 12px/1.5 Inter, ui-sans-serif, system-ui, sans-serif;
+  color: var(--ui-muted);
+  font-family: var(--ui-font-ui);
+  font-size: var(--ui-text-sm);
+  line-height: 1.5;
 }
 #plane-combat .pc-help-card ul {
   margin: 14px 0 0;
@@ -370,21 +386,25 @@ const CSS = `
 }
 #plane-combat .pc-help-card li {
   padding: 9px 12px;
-  border: 1px solid rgba(255,255,255,.07);
-  border-radius: 8px;
-  background: rgba(0,0,0,.18);
-  color: #cfe2ee;
-  font: 600 11px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
+  background: rgba(4,7,13,.35);
+  color: var(--ui-text);
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-sm);
+  line-height: 1.4;
 }
-#plane-combat .pc-help-card li b { color: #67e8f9; font-weight: 800; }
+#plane-combat .pc-help-card li b { color: var(--ui-cyan); font-weight: 800; }
 #plane-combat .pc-help-actions { display: flex; justify-content: flex-end; margin-top: 16px; }
-#plane-combat .pc-help-actions button { min-width: 130px; min-height: 38px; }
+#plane-combat .pc-help-actions button { min-width: 130px; }
 @media (max-width: 560px) {
   #plane-combat .pc-panel { width: calc(100vw - 24px); }
   #plane-combat .pc-log { max-height: 110px; }
-  #plane-combat .pc-titlebar { font-size: 9px; padding: 7px 12px; }
+  #plane-combat .pc-titlebar { font-size: var(--ui-text-xs); padding: 7px 12px; }
 }
 `;
+
+const CSS = `${UI_TOKENS}\n${UI_BASE}\n${UI_COMPONENTS}\n${UI_PRIMITIVES}\n${PLANE_CSS}`;
 
 export interface PlaneCombatOptions {
   campaign: CampaignState;
@@ -1007,11 +1027,11 @@ export class PlaneCombatView {
     left.append(log);
 
     const actions = el("div", "pc-actions");
-    const closeBtn = el("button");
+    const closeBtn = el("button", "ui-btn");
     closeBtn.textContent = "Close";
-    const attackBtn = el("button", "primary");
+    const attackBtn = el("button", "ui-btn ui-btn--danger");
     attackBtn.textContent = "Attack";
-    const disengageBtn = el("button");
+    const disengageBtn = el("button", "ui-btn");
     disengageBtn.textContent = "Disengage";
     actions.append(closeBtn, attackBtn, disengageBtn);
     left.append(actions);
@@ -1097,7 +1117,7 @@ export class PlaneCombatView {
       list.appendChild(li);
     }
     const actions = el("div", "pc-help-actions");
-    const close = el("button");
+    const close = el("button", "ui-btn");
     close.type = "button";
     close.textContent = "Got it [ESC]";
     close.addEventListener("click", () => this.toggleHelp(false));
