@@ -4,7 +4,6 @@ import {
   BackSide,
   BoxGeometry,
   BufferGeometry,
-  CanvasTexture,
   Color,
   ConeGeometry,
   CylinderGeometry,
@@ -14,7 +13,6 @@ import {
   Group,
   Line,
   LineBasicMaterial,
-  LineLoop,
   type Material,
   Matrix4,
   Mesh,
@@ -27,7 +25,6 @@ import {
   Raycaster,
   RingGeometry,
   Scene,
-  ShaderMaterial,
   SphereGeometry,
   SRGBColorSpace,
   type Texture,
@@ -57,10 +54,20 @@ import {
 } from "../campaign/geoscape";
 import { campaignObjectiveProgress, canBuildNewBase, canLaunchFinalAssault, DIFFICULTY_CONFIGS, highestRegionalPanic, MAX_EXTRA_BASES, NEW_BASE_COST, transportCraft } from "../campaign/storage";
 import {
-  WORLD_CITY_POINTS,
-  WORLD_LAND_RINGS,
-  type LatLon,
-} from "./worldMapData";
+  animateBeaconPulse,
+  createEarthShaderMaterial,
+  createRimAtmosphere,
+  makeCloudTexture,
+  makeEarthTexture,
+  makeGraticuleLatLine,
+  makeGraticuleLonLine,
+  populateBaseBeacon,
+  populateExtraBaseBeacon,
+  populateHqBeacon,
+  populateUfoBeacon,
+  type SurfaceBeacon,
+} from "./globeVisuals";
+import { WORLD_CITY_POINTS } from "./worldMapData";
 
 interface GeoscapeOptions {
   campaign: CampaignState | null;
@@ -107,8 +114,6 @@ function markHintsSeen(): void {
 }
 const EARTH_RADIUS = 1.5;
 const UP = new Vector3(0, 1, 0);
-const MAP_WIDTH = 2048;
-const MAP_HEIGHT = 1024;
 
 /** Engagement range at which an interception encounter begins (mirrors the campaign layer). */
 const ENCOUNTER_START_RANGE = 3;
@@ -1079,144 +1084,6 @@ function makeBase(lat: number, lon: number): BaseLocation {
   };
 }
 
-function hash01(a: number, b: number): number {
-  const n = Math.sin(a * 127.1 + b * 311.7) * 43758.5453123;
-  return n - Math.floor(n);
-}
-
-function mapXY(lat: number, lon: number, width = MAP_WIDTH, height = MAP_HEIGHT): [number, number] {
-  return [((lon + 180) / 360) * width, ((90 - lat) / 180) * height];
-}
-
-function drawLatLonPath(
-  ctx: CanvasRenderingContext2D,
-  polygon: readonly LatLon[],
-  width = MAP_WIDTH,
-  height = MAP_HEIGHT,
-): void {
-  polygon.forEach(([lat, lon], index) => {
-    const [x, y] = mapXY(lat, lon, width, height);
-    if (index === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.closePath();
-}
-
-function makeLandNoiseCanvas(): HTMLCanvasElement {
-  const canvas = document.createElement("canvas");
-  canvas.width = 512;
-  canvas.height = 256;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("2D canvas unavailable");
-
-  for (let y = 0; y < canvas.height; y += 2) {
-    const lat = 90 - (y / canvas.height) * 180;
-    for (let x = 0; x < canvas.width; x += 2) {
-      const lon = (x / canvas.width) * 360 - 180;
-      const n = hash01(x, y);
-      const band = 0.5 + Math.sin((lat * 0.11 + lon * 0.035) * Math.PI) * 0.18;
-      const g = Math.round(58 + n * 54 + band * 24);
-      ctx.fillStyle = `rgba(${Math.round(22 + n * 26)}, ${g}, ${Math.round(47 + n * 35)}, .42)`;
-      ctx.fillRect(x, y, 2, 2);
-    }
-  }
-  return canvas;
-}
-
-function makeEarthTexture(): CanvasTexture {
-  const canvas = document.createElement("canvas");
-  canvas.width = MAP_WIDTH;
-  canvas.height = MAP_HEIGHT;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("2D canvas unavailable");
-
-  const ocean = ctx.createLinearGradient(0, 0, MAP_WIDTH, MAP_HEIGHT);
-  ocean.addColorStop(0, "#08223b");
-  ocean.addColorStop(0.45, "#0a3a62");
-  ocean.addColorStop(1, "#031320");
-  ctx.fillStyle = ocean;
-  ctx.fillRect(0, 0, MAP_WIDTH, MAP_HEIGHT);
-
-  for (let y = 0; y < MAP_HEIGHT; y += 3) {
-    const lat = 90 - (y / MAP_HEIGHT) * 180;
-    const polar = Math.max(0, (Math.abs(lat) - 58) / 32);
-    const shade = Math.round(18 + polar * 38);
-    ctx.fillStyle = `rgba(${shade}, ${shade + 24}, ${shade + 42}, ${0.08 + polar * 0.12})`;
-    ctx.fillRect(0, y, MAP_WIDTH, 3);
-  }
-
-  ctx.lineWidth = 1;
-  for (let lat = -60; lat <= 60; lat += 15) {
-    const [, y] = mapXY(lat, 0);
-    ctx.strokeStyle = lat === 0 ? "rgba(103,232,249,.28)" : "rgba(103,232,249,.12)";
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(MAP_WIDTH, y);
-    ctx.stroke();
-  }
-  for (let lon = -180; lon <= 180; lon += 15) {
-    const [x] = mapXY(0, lon);
-    ctx.strokeStyle = lon === 0 ? "rgba(103,232,249,.2)" : "rgba(103,232,249,.1)";
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, MAP_HEIGHT);
-    ctx.stroke();
-  }
-
-  const landNoise = makeLandNoiseCanvas();
-  for (const polygon of WORLD_LAND_RINGS) {
-    ctx.save();
-    ctx.beginPath();
-    drawLatLonPath(ctx, polygon);
-    ctx.lineJoin = "round";
-    ctx.lineCap = "round";
-    ctx.strokeStyle = "rgba(103,232,249,.26)";
-    ctx.lineWidth = 8;
-    ctx.stroke();
-    ctx.fillStyle = "#175f3f";
-    ctx.fill();
-    ctx.strokeStyle = "rgba(142,246,164,.68)";
-    ctx.lineWidth = 2.5;
-    ctx.stroke();
-    ctx.clip();
-    ctx.globalAlpha = 0.36;
-    ctx.drawImage(landNoise, 0, 0, MAP_WIDTH, MAP_HEIGHT);
-    ctx.restore();
-  }
-
-  ctx.fillStyle = "rgba(210,255,221,.78)";
-  for (const [lat, lon] of WORLD_CITY_POINTS) {
-    const [x, y] = mapXY(lat, lon);
-    ctx.beginPath();
-    ctx.arc(x, y, 2.4, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  const texture = new CanvasTexture(canvas);
-  texture.colorSpace = SRGBColorSpace;
-  return texture;
-}
-
-function makeGridLine(points: Vector3[], color: number, opacity: number): Line {
-  const geometry = new BufferGeometry().setFromPoints(points);
-  const material = new LineBasicMaterial({ color, transparent: true, opacity });
-  return new Line(geometry, material);
-}
-
-function makeLatLine(lat: number): LineLoop {
-  const points: Vector3[] = [];
-  for (let lon = -180; lon <= 180; lon += 6) points.push(latLonToVector(lat, lon, EARTH_RADIUS + 0.018));
-  const geometry = new BufferGeometry().setFromPoints(points);
-  const material = new LineBasicMaterial({ color: 0x67e8f9, transparent: true, opacity: 0.18 });
-  return new LineLoop(geometry, material);
-}
-
-function makeLonLine(lon: number): Line {
-  const points: Vector3[] = [];
-  for (let lat = -84; lat <= 84; lat += 4) points.push(latLonToVector(lat, lon, EARTH_RADIUS + 0.02));
-  return makeGridLine(points, 0x67e8f9, 0.16);
-}
-
 function disposeMaterial(material: Material): void {
   const maps = [
     "map",
@@ -1372,8 +1239,14 @@ export class GeoscapeView {
   private readonly cityLocal: Vector3[] = [];
   /** Scratch for the city-light day/night dot product (world space). */
   private readonly scratchCity = new Vector3();
-  /** Fresnel rim atmosphere material; uSunDir uniform updated each frame. */
-  private rimAtmosphereMat: ShaderMaterial | null = null;
+  /** Earth day/night shader sun-direction uniform (updated each frame). */
+  private earthSunUniform: { value: Vector3 } | null = null;
+  /** Fresnel rim atmosphere sun-direction uniform (updated each frame). */
+  private rimSunUniform: { value: Vector3 } | null = null;
+  /** Live clock readout node — rewritten each frame for smooth HH:MM flow. */
+  private clockStatValue: HTMLElement | null = null;
+  /** Expanding pulse rings on surface beacons (animated in the frame loop). */
+  private readonly beaconPulseRings: Mesh[] = [];
   /** Slowly rotating translucent cloud shell. */
   private cloudMesh: Mesh | null = null;
 
@@ -1549,17 +1422,9 @@ export class GeoscapeView {
     const earthTexture = makeEarthTexture();
     earthTexture.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
 
-    const ocean = new Mesh(
-      new SphereGeometry(EARTH_RADIUS, 64, 36),
-      new MeshStandardMaterial({
-        map: earthTexture,
-        color: 0xffffff,
-        emissive: 0x031c2d,
-        emissiveIntensity: 0.32,
-        roughness: 0.7,
-        metalness: 0.03,
-      }),
-    );
+    const earthShader = createEarthShaderMaterial(earthTexture);
+    this.earthSunUniform = earthShader.uniforms.uSunDir;
+    const ocean = new Mesh(new SphereGeometry(EARTH_RADIUS, 64, 36), earthShader.material);
     this.earthGroup.add(ocean);
 
     const atmosphere = new Mesh(
@@ -1567,20 +1432,18 @@ export class GeoscapeView {
       new MeshBasicMaterial({
         color: 0x67e8f9,
         transparent: true,
-        opacity: 0.13,
+        opacity: 0.08,
         side: BackSide,
         blending: AdditiveBlending,
         depthWrite: false,
       }),
     );
     this.earthGroup.add(atmosphere);
-    // Fresnel rim glow on the day-side limb, layered over the base atmosphere.
-    this.earthGroup.add(this.buildRimAtmosphere());
+    const rim = createRimAtmosphere(EARTH_RADIUS);
+    this.rimSunUniform = rim.uniforms.uSunDir;
+    this.earthGroup.add(rim.mesh);
 
-    // Faint translucent cloud shell, slowly rotating in the frame loop. Lit by
-    // the sun so wisps read on the day side and go dark at night (rather than an
-    // additive wash that would flatten the night-side city lights).
-    const cloudTexture = this.makeCloudTexture();
+    const cloudTexture = makeCloudTexture();
     const cloudMesh = new Mesh(
       new SphereGeometry(EARTH_RADIUS + 0.05, 48, 24),
       new MeshStandardMaterial({
@@ -1599,8 +1462,8 @@ export class GeoscapeView {
 
     this.cityLights = this.makeSignalNodes();
     this.earthGroup.add(this.cityLights);
-    for (let lat = -60; lat <= 60; lat += 30) this.earthGroup.add(makeLatLine(lat));
-    for (let lon = -150; lon <= 180; lon += 30) this.earthGroup.add(makeLonLine(lon));
+    for (let lat = -60; lat <= 60; lat += 30) this.earthGroup.add(makeGraticuleLatLine(lat, EARTH_RADIUS));
+    for (let lon = -150; lon <= 180; lon += 30) this.earthGroup.add(makeGraticuleLonLine(lon, EARTH_RADIUS));
     this.buildBaseMarker();
     this.earthGroup.add(this.baseMarker);
     if (this.selectedBase) this.placeMarker(this.selectedBase);
@@ -1797,13 +1660,15 @@ export class GeoscapeView {
     const arr = colAttr.array as Float32Array;
     // Sun direction in world space (sunLight is parented to the scene, not earthGroup).
     this.scratchA.copy(this.sunLight.position).normalize();
+    const twilight = 0.15;
     for (let i = 0; i < this.cityLocal.length; i++) {
       this.scratchCity.copy(this.cityLocal[i]!);
-      this.earthGroup.localToWorld(this.scratchCity); // earthGroup has no scale → stays unit length
+      this.earthGroup.localToWorld(this.scratchCity);
       this.scratchCity.normalize();
-      const dot = this.scratchCity.dot(this.scratchA); // >0 day, <0 night
-      const night = dot < 0 ? -dot : 0;
-      const glow = 0.08 + night * 1.0;
+      const dot = this.scratchCity.dot(this.scratchA);
+      const t = Math.max(0, Math.min(1, (dot - -twilight) / (twilight - -twilight)));
+      const night = t * t * (3 - 2 * t);
+      const glow = 0.02 + night * 0.98;
       arr[i * 3] = 0.98 * glow;
       arr[i * 3 + 1] = 0.82 * glow;
       arr[i * 3 + 2] = 0.3 * glow;
@@ -1811,285 +1676,37 @@ export class GeoscapeView {
     colAttr.needsUpdate = true;
   }
 
-  /** Fresnel rim atmosphere: brightest on the day-side limb, faint on the night limb. */
-  private buildRimAtmosphere(): Mesh {
-    const material = new ShaderMaterial({
-      transparent: true,
-      blending: AdditiveBlending,
-      side: BackSide,
-      depthWrite: false,
-      uniforms: {
-        uSunDir: { value: new Vector3(1, 0, 0) },
-        uColor: { value: new Color(0x67e8f9) },
-        uPower: { value: 3.0 },
-      },
-      vertexShader: `
-        varying vec3 vNormalW;
-        varying vec3 vViewDir;
-        void main() {
-          vec4 wp = modelMatrix * vec4(position, 1.0);
-          vNormalW = normalize(mat3(modelMatrix) * normal);
-          vViewDir = normalize(cameraPosition - wp.xyz);
-          gl_Position = projectionMatrix * viewMatrix * wp;
-        }
-      `,
-      fragmentShader: `
-        varying vec3 vNormalW;
-        varying vec3 vViewDir;
-        uniform vec3 uSunDir;
-        uniform vec3 uColor;
-        uniform float uPower;
-        void main() {
-          float rim = pow(1.0 - abs(dot(vViewDir, vNormalW)), uPower);
-          float day = max(0.0, dot(normalize(vNormalW), normalize(uSunDir)));
-          float a = rim * (0.16 + 0.7 * day);
-          gl_FragColor = vec4(uColor, a);
-        }
-      `,
-    });
-    this.rimAtmosphereMat = material;
-    return new Mesh(new SphereGeometry(EARTH_RADIUS + 0.17, 64, 32), material);
+  private trackBeacon(beacon: SurfaceBeacon): void {
+    this.beaconPulseRings.push(beacon.pulseRing);
   }
 
-  /** Sync the rim atmosphere's sun direction uniform with the live sun position. */
+  /** Sync atmosphere + earth shader sun direction with the live sun position. */
   private updateAtmosphere(): void {
-    if (!this.rimAtmosphereMat) return;
-    const sunUniform = this.rimAtmosphereMat.uniforms.uSunDir;
-    if (!sunUniform) return;
-    (sunUniform.value as Vector3).copy(this.sunLight.position).normalize();
-  }
-
-  /** Faint translucent cloud shell built from soft procedural wisps (deterministic). */
-  private makeCloudTexture(): CanvasTexture {
-    const canvas = document.createElement("canvas");
-    canvas.width = 1024;
-    canvas.height = 512;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("2D canvas unavailable");
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    // Deterministic soft white wisps scattered across the equirectangular map.
-    for (let i = 0; i < 240; i++) {
-      const cx = hash01(i, 7.3) * canvas.width;
-      const cy = (0.2 + hash01(i, 13.1) * 0.6) * canvas.height;
-      const r = 10 + hash01(i, 21.7) * 46;
-      const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-      const a = 0.05 + hash01(i, 31.9) * 0.12;
-      grad.addColorStop(0, `rgba(255,255,255,${a})`);
-      grad.addColorStop(1, "rgba(255,255,255,0)");
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(cx, cy, r, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    const texture = new CanvasTexture(canvas);
-    texture.colorSpace = SRGBColorSpace;
-    return texture;
+    const sun = this.scratchA.copy(this.sunLight.position).normalize();
+    if (this.earthSunUniform) this.earthSunUniform.value.copy(sun);
+    if (this.rimSunUniform) this.rimSunUniform.value.copy(sun);
   }
 
   private buildBaseMarker(): void {
-    const pulse = new Mesh(
-      new SphereGeometry(0.07, 16, 10),
-      new MeshBasicMaterial({
-        color: 0xfbbf24,
-        transparent: true,
-        opacity: 0.92,
-        blending: AdditiveBlending,
-      }),
-    );
-    const cone = new Mesh(
-      new ConeGeometry(0.07, 0.2, 18),
-      new MeshStandardMaterial({
-        color: 0xfbbf24,
-        emissive: new Color(0xf59e0b),
-        emissiveIntensity: 1.8,
-        roughness: 0.35,
-        metalness: 0.3,
-      }),
-    );
-    cone.position.y = 0.11;
-    const ring = new Mesh(
-      new SphereGeometry(0.12, 18, 8, 0, Math.PI * 2, 0, Math.PI * 0.42),
-      new MeshBasicMaterial({
-        color: 0xfbbf24,
-        transparent: true,
-        opacity: 0.28,
-        wireframe: true,
-        side: DoubleSide,
-      }),
-    );
-    this.baseMarker.add(pulse, cone, ring);
+    this.trackBeacon(populateBaseBeacon(this.baseMarker, EARTH_RADIUS));
   }
 
   /** A slimmed-down cyan marker for an extra radar base (distinct from the gold primary). */
   private buildExtraBaseMarker(): Group {
     const group = new Group();
-    const pulse = new Mesh(
-      new SphereGeometry(0.04, 14, 8),
-      new MeshBasicMaterial({
-        color: 0x67e8f9,
-        transparent: true,
-        opacity: 0.9,
-        blending: AdditiveBlending,
-      }),
-    );
-    const cone = new Mesh(
-      new ConeGeometry(0.04, 0.13, 14),
-      new MeshStandardMaterial({
-        color: 0x67e8f9,
-        emissive: new Color(0x22d3ee),
-        emissiveIntensity: 1.8,
-        roughness: 0.35,
-        metalness: 0.3,
-      }),
-    );
-    cone.position.y = 0.07;
-    const ring = new Mesh(
-      new SphereGeometry(0.07, 14, 6, 0, Math.PI * 2, 0, Math.PI * 0.42),
-      new MeshBasicMaterial({
-        color: 0x67e8f9,
-        transparent: true,
-        opacity: 0.26,
-        wireframe: true,
-        side: DoubleSide,
-      }),
-    );
-    group.add(pulse, cone, ring);
+    this.trackBeacon(populateExtraBaseBeacon(group, EARTH_RADIUS));
     return group;
   }
 
-  /** Blood-red endgame beacon for the revealed alien HQ — a menacing spike
-   *  distinct from the amber base cone and mission-colored UFO marker, so its
-   *  reveal reads unmistakably as the campaign's final objective. */
+  /** Violet/magenta endgame beacon for the revealed alien HQ. */
   private buildHqMarker(): void {
-    const pulse = new Mesh(
-      new SphereGeometry(0.09, 16, 10),
-      new MeshBasicMaterial({
-        color: 0xdc2626,
-        transparent: true,
-        opacity: 0.95,
-        blending: AdditiveBlending,
-      }),
-    );
-    const spike = new Mesh(
-      new ConeGeometry(0.08, 0.32, 6),
-      new MeshStandardMaterial({
-        color: 0x450a0a,
-        emissive: new Color(0xdc2626),
-        emissiveIntensity: 2.2,
-        roughness: 0.25,
-        metalness: 0.55,
-      }),
-    );
-    spike.position.y = 0.16;
-    // A second inverted spike below the pulse core makes the silhouette read
-    // as an alien spire rather than a friendly cone from any camera angle.
-    const undercut = new Mesh(
-      new ConeGeometry(0.05, 0.14, 6),
-      new MeshStandardMaterial({
-        color: 0x450a0a,
-        emissive: new Color(0xdc2626),
-        emissiveIntensity: 1.6,
-        roughness: 0.25,
-        metalness: 0.55,
-      }),
-    );
-    undercut.rotation.x = Math.PI;
-    undercut.position.y = -0.07;
-    const ring = new Mesh(
-      new SphereGeometry(0.15, 18, 8, 0, Math.PI * 2, 0, Math.PI * 0.42),
-      new MeshBasicMaterial({
-        color: 0xdc2626,
-        transparent: true,
-        opacity: 0.3,
-        wireframe: true,
-        side: DoubleSide,
-      }),
-    );
-    // Outer halo, same treatment as the UFO marker's urgent halo — the HQ is
-    // always the highest-priority object on the globe once revealed.
-    const halo = new Mesh(
-      new RingGeometry(0.19, 0.24, 28),
-      new MeshBasicMaterial({
-        color: 0xef4444,
-        transparent: true,
-        opacity: 0.42,
-        side: DoubleSide,
-        blending: AdditiveBlending,
-      }),
-    );
-    halo.rotation.x = -Math.PI / 2;
-    this.hqMarker.add(pulse, spike, undercut, ring, halo);
+    this.trackBeacon(populateHqBeacon(this.hqMarker, EARTH_RADIUS));
   }
 
   private buildUfoMarker(missionType: MissionType | undefined, ufoType: UfoType | undefined): void {
     const info = missionTypeInfo(missionType);
     const ufoColor = ufoTypeInfo(ufoType).color;
-    const core = new Mesh(
-      new SphereGeometry(0.06, 16, 10),
-      new MeshBasicMaterial({
-        color: info.color,
-        transparent: true,
-        opacity: 0.95,
-        blending: AdditiveBlending,
-      }),
-    );
-    const ring = new Mesh(
-      new RingGeometry(0.1, 0.16, 28),
-      new MeshBasicMaterial({
-        color: info.color,
-        transparent: true,
-        opacity: 0.55,
-        side: DoubleSide,
-        blending: AdditiveBlending,
-      }),
-    );
-    ring.rotation.x = -Math.PI / 2;
-    const beam = new Mesh(
-      new ConeGeometry(0.05, 0.16, 18),
-      new MeshBasicMaterial({
-        color: info.color,
-        transparent: true,
-        opacity: 0.46,
-        blending: AdditiveBlending,
-      }),
-    );
-    beam.position.y = 0.08;
-    // UFO-type tint: an outer ring colored by the UFO variety (scout/harvester/
-    // terror/battleship). Additive to the mission-type coloring above — the core,
-    // ring, and beam keep the mission color, and the urgent halo below is kept.
-    // The type color is always paired with the icon + label in the contact card,
-    // so it is never conveyed by color alone.
-    const typeRing = new Mesh(
-      new RingGeometry(0.27, 0.31, 28),
-      new MeshBasicMaterial({
-        color: ufoColor,
-        transparent: true,
-        opacity: 0.5,
-        side: DoubleSide,
-        blending: AdditiveBlending,
-      }),
-    );
-    typeRing.rotation.x = -Math.PI / 2;
-    // Urgent mission types (terror / base defense) get a second outer halo so the
-    // marker reads as higher-priority on the globe; the render loop also pulses
-    // these faster. Color is always paired with the icon + label in the contact
-    // card, so the mission type is never conveyed by color alone.
-    if (info.urgent) {
-      const halo = new Mesh(
-        new RingGeometry(0.14, 0.18, 28),
-        new MeshBasicMaterial({
-          color: info.color,
-          transparent: true,
-          opacity: 0.4,
-          side: DoubleSide,
-          blending: AdditiveBlending,
-        }),
-      );
-      halo.rotation.x = -Math.PI / 2;
-      this.ufoMarker.add(core, ring, halo, beam, typeRing);
-    } else {
-      this.ufoMarker.add(core, ring, beam, typeRing);
-    }
+    this.trackBeacon(populateUfoBeacon(this.ufoMarker, EARTH_RADIUS, info.color, ufoColor, info.urgent));
   }
 
   private buildHud(): {
@@ -2369,7 +1986,11 @@ export class GeoscapeView {
     const panic = highestRegionalPanic(c);
     const objective = campaignObjectiveProgress(c);
     this.statsGrid.append(
-      this.stat("Clock", formatCampaignClock(c.clock), "in-world date and time of day"),
+      (() => {
+        const clockStat = this.stat("Clock", formatCampaignClock(c.clock), "in-world date and time of day");
+        this.clockStatValue = clockStat.querySelector("b");
+        return clockStat;
+      })(),
       this.stat("Threat", `${c.strategic.threat}%`, "global X-COM threat — drives council panic"),
       this.stat("Funding", `${c.strategic.funding}`, "monthly council funding index"),
       this.stat("Cores", `${objective.completed}/${objective.required}`, "recovered UFO cores — campaign objective"),
@@ -2806,6 +2427,45 @@ export class GeoscapeView {
     attr.needsUpdate = true;
   }
 
+  /** True when game time is advancing on the render-side tick cadence. */
+  private isTimeFlowing(): boolean {
+    const speed = this.timeSpeed;
+    if (
+      speed <= 0 ||
+      this.deploying ||
+      this.deployArrived ||
+      !this.campaign ||
+      this.campaign.strategic.status !== "active" ||
+      this.isEngaging()
+    ) {
+      return false;
+    }
+    return SPEED_TICKS[speed] !== undefined;
+  }
+
+  /**
+   * Fractional campaign hours for render-side animation: discrete clock ticks plus
+   * the in-progress fraction of the current SPEED_TICKS interval.
+   */
+  private displayHours(): number {
+    const c = this.campaign;
+    if (!c) return 12;
+    const base = c.clock.elapsedHours;
+    if (!this.isTimeFlowing()) return base;
+    const tick = SPEED_TICKS[this.timeSpeed]!;
+    const frac = Math.min(1, Math.max(0, this.timeAccumulatorMs / tick.ms));
+    return base + frac * tick.hours;
+  }
+
+  /** Smooth HH:MM clock readout (updated each frame while time flows). */
+  private updateClockReadout(): void {
+    if (!this.clockStatValue || !this.campaign) return;
+    const hourOfDay = this.displayHours() % 24;
+    const hour = Math.floor(hourOfDay);
+    const minutes = Math.floor((hourOfDay - hour) * 60);
+    this.clockStatValue.textContent = `Day ${this.campaign.clock.day} ${String(hour).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+  }
+
   /**
    * Advance the directional sun around the globe's polar axis from the campaign
    * clock, so one hemisphere is lit (day) and the opposite is dark (night). The
@@ -2814,10 +2474,7 @@ export class GeoscapeView {
    * at full day for readability.
    */
   private updateTerminator(): void {
-    // Fractional hours so the sun/terminator creeps minute-by-minute as time
-    // flows (SPEED_TICKS advance fractional hours); integer `hour` would snap
-    // the day/night line to whole-hour steps.
-    const hour = this.campaign ? this.campaign.clock.elapsedHours % 24 : 12;
+    const hour = this.displayHours() % 24;
     const azimuth = ((hour - 12) / 24) * Math.PI * 2 + Math.PI / 2;
     const radius = 6;
     this.sunLight.position.set(
@@ -4008,6 +3665,10 @@ export class GeoscapeView {
     this.updateTerminator();
     this.updateCityLights();
     this.updateAtmosphere();
+    this.updateClockReadout();
+    for (const ring of this.beaconPulseRings) {
+      if (ring.parent) animateBeaconPulse(ring, now, this.reducedMotion);
+    }
     if (this.cloudMesh) this.cloudMesh.rotation.y += 0.00018;
     this.controls.update();
     // Camera shake: offset around the controls-derived base, then restore so the
