@@ -517,6 +517,17 @@ let concreteMat: MeshStandardMaterial | null = null;
 let wornMat: MeshStandardMaterial | null = null;
 
 /**
+ * Mark a cached, page-lifetime material as SHARED so a view's scene-teardown
+ * (baseView disposeObject) skips it. These materials + their bound textures are
+ * reused across every base view AND every interior dive; disposing them freed
+ * their GPU maps out from under the next mount, blacking out subsequent interiors.
+ */
+function markShared(m: MeshStandardMaterial): MeshStandardMaterial {
+  m.userData.shared = true;
+  return m;
+}
+
+/**
  * Riveted metal-panel PBR material. `tint` (a palette hex) multiplies the
  * neutral steel albedo; default (no tint) shows the panel's own steel tone.
  * Metalness/roughness overridable for darker structural variants.
@@ -537,6 +548,7 @@ export function metalPanelMaterial(tint?: number, opts?: MetalPanelOptions): Mes
       metalness,
       roughness,
     });
+    markShared(m);
     panelMatCache.set(key, m);
   }
   return m;
@@ -554,6 +566,7 @@ export function concreteMaterial(): MeshStandardMaterial {
       metalness: 0.0,
       roughness: 0.95,
     });
+    markShared(concreteMat);
   }
   return concreteMat;
 }
@@ -570,6 +583,7 @@ export function wornSteelMaterial(): MeshStandardMaterial {
       metalness: 0.7,
       roughness: 0.55,
     });
+    markShared(wornMat);
   }
   return wornMat;
 }
@@ -593,6 +607,7 @@ export function screenMaterial(color: number, label?: string): MeshStandardMater
       metalness: 0.1,
       roughness: 0.35,
     });
+    markShared(m);
     screenMatCache.set(key, m);
   }
   return m;
@@ -614,6 +629,7 @@ export function accentEmissive(color: number, intensity = 1.0): MeshStandardMate
       metalness: 0.2,
       roughness: 0.4,
     });
+    markShared(m);
     accentMatCache.set(key, m);
   }
   return m;

@@ -3,6 +3,7 @@ import {
   AdditiveBlending,
   AmbientLight,
   BoxGeometry,
+  BufferGeometry,
   CanvasTexture,
   Color,
   ConeGeometry,
@@ -154,13 +155,89 @@ const CAPTIVE_SPECIES: Record<string, string> = {
   commander: "Commander",
 };
 
-interface BaseCorridor {
-  id: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
+/** Cardinal direction on the base grid. `cellCenter` maps grid +y to world +z,
+ *  so north = -y/-z, south = +y/+z, east = +x, west = -x. */
+export type CorridorDir = "north" | "south" | "east" | "west";
+
+/** One paved hallway tile — a free grid cell the router turned into corridor.
+ *  `open` = sides that seamlessly join another corridor tile; `doors` = sides
+ *  that open onto a constructed facility's bay (a doorway threshold); every
+ *  remaining side is a rock/pad WALL. Coordinates are grid cells (world via
+ *  cellCenter). */
+export interface CorridorTile {
+  cx: number;
+  cy: number;
+  open: CorridorDir[];
+  doors: CorridorDir[];
 }
+
+/** An orthogonal hop between two adjacent corridor tiles — the travel edges the
+ *  strip-lights and crew follow. `axis` is the world axis the hop runs along. */
+export interface CorridorSegment {
+  ax: number;
+  ay: number;
+  bx: number;
+  by: number;
+  axis: "x" | "z";
+}
+
+/** The routed corridor network, DERIVED from the live facility layout (never
+ *  hardcoded). All coordinates are grid cells — convert with the same mapping as
+ *  {@link BaseView.getCorridorWaypointLoops}. Exposed via
+ *  {@link BaseView.getCorridorGraph} so the crew/people system can walk
+ *  personnel along real hallways.
+ *  - `tiles`    one entry per paved cell (floor + walls + doorways)
+ *  - `segments` adjacent-tile hops (strip-light + crew travel edges)
+ *  - `patrols`  one ordered out-and-back loop per connected component with >=2
+ *               tiles; consecutive cells AND the closing wrap are always
+ *               orthogonally adjacent, so crew never cut across a bay.
+ *  - `spine`    index into `patrols` of the component that reaches the access
+ *               lift (the main spine), or -1 if none. */
+export interface CorridorGraph {
+  tiles: CorridorTile[];
+  segments: CorridorSegment[];
+  patrols: Array<Array<readonly [number, number]>>;
+  spine: number;
+}
+
+/** Cardinal steps in stable N/E/S/W order — the single source of adjacency for
+ *  routing (flood fill, doorway scan, Euler tour) so every pass is deterministic. */
+const CORRIDOR_DIRS: ReadonlyArray<readonly [CorridorDir, number, number]> = [
+  ["north", 0, -1],
+  ["east", 1, 0],
+  ["south", 0, 1],
+  ["west", -1, 0],
+];
+
+/** Corridor curb height/thickness (also used for curb placement offsets). */
+const CURB_H = 0.16;
+const CURB_T = 0.07;
+/**
+ * The corridor's fixed set of constant-dimension tile/strip geometries, derived
+ * from CELL and built ONCE at module scope — instead of a fresh BoxGeometry per
+ * paved tile/segment (~6+ per tile over ~10-15 tiles). Shared across every tile
+ * AND every BaseView instance; tagged so a view teardown never frees them.
+ */
+const CORRIDOR_GEO = (() => {
+  const span = CELL - 0.28;
+  const wallLen = span * 0.9;
+  const thLen = span * 0.5;
+  const runLen = CELL * 0.62;
+  const g = {
+    floor: new BoxGeometry(span, 0.08, span),
+    thresholdX: new BoxGeometry(thLen, 0.02, 0.06),
+    thresholdZ: new BoxGeometry(0.06, 0.02, thLen),
+    curbX: new BoxGeometry(wallLen, CURB_H, CURB_T),
+    curbZ: new BoxGeometry(CURB_T, CURB_H, wallLen),
+    stripX: new BoxGeometry(wallLen * 0.9, 0.02, 0.04),
+    stripZ: new BoxGeometry(0.04, 0.02, wallLen * 0.9),
+    center: new BoxGeometry(0.14, 0.008, 0.14),
+    railX: new BoxGeometry(runLen, 0.01, 0.03),
+    railZ: new BoxGeometry(0.03, 0.01, runLen),
+  } as const;
+  for (const geo of Object.values(g)) geo.userData.shared = true;
+  return g;
+})();
 
 type RotationAxis = "x" | "y" | "z";
 
@@ -174,63 +251,6 @@ interface BaseRotator {
 /** A research project paired with its current tree status. Derived from
  *  {@link researchTree}'s return type so it tracks the campaign layer's shape. */
 type ResearchTreeNode = ReturnType<typeof researchTree>[number];
-
-/** Corridor cells (the empty grid cells between bays). Bay positions are sealed
- *  in src/campaign/base.ts, and the unbuildable facilities render as expansion
- *  pads (lab-2 / medbay-2 / workshop-2 / power-2 fill the entire y=4 row;
- *  radar-2 fills [7,0]-[7,1]), so the empty cells collapse into three
- *  4-connected components that cannot be bridged without editing campaign data:
- *    spine      x=4, y=0..3  (radar -> command/workshop -> stores -> access/power)
- *    left hall  x=0..1, y=2  (hangar south face <-> living north face)
- *    right hall x=7, y=2..3  (stores east face <-> power east face)
- *  The old single-cell pads [2,0] and [2,3] connected to NOTHING (every 4-neighbor
- *  a bay or pad), so they are dropped — they read as concrete strips floating in
- *  rock. Each bay still opens onto a corridor via its partition-curb doorway gap,
- *  and crew patrol every component (see CREW_LOOP_CELLS / _LEFT) so the base
- *  reads as one lived-in facility rather than isolated boxes. */
-const BASE_CORRIDORS: readonly BaseCorridor[] = [
-  { id: "spine-radar", x: 4, y: 0, w: 1, h: 1 },
-  { id: "spine-command-workshop", x: 4, y: 1, w: 1, h: 1 },
-  { id: "spine-command-stores", x: 4, y: 2, w: 1, h: 1 },
-  { id: "spine-access-power", x: 4, y: 3, w: 1, h: 1 },
-  { id: "left-hangar-living-a", x: 0, y: 2, w: 1, h: 1 },
-  { id: "left-hangar-living-b", x: 1, y: 2, w: 1, h: 1 },
-  { id: "right-stores", x: 7, y: 2, w: 1, h: 1 },
-  { id: "right-power", x: 7, y: 3, w: 1, h: 1 },
-];
-
-/** Spine patrol (cell coords) — a closed out-and-back along the x=4 hall, the
- *  largest corridor component. Every consecutive pair AND the closing
- *  last->first are orthogonally adjacent, and each cell resolves to a corridor
- *  cellCenter, so crew never leave the hallway or cut across a bay niche. (The
- *  old loop strung together non-adjacent cells and clipped through the radar
- *  dish, the access lift, and the command bay, floating above their recessed
- *  floors.) Cell centers resolve to baseGroup-local space at build time. */
-const CREW_LOOP_CELLS: ReadonlyArray<readonly [number, number]> = [
-  [4, 0],
-  [4, 1],
-  [4, 2],
-  [4, 3],
-  [4, 2],
-  [4, 1],
-];
-
-/** Left-hall patrol — the hangar<->living connector, a separate corridor
- *  component walled off from the spine by hangar/command/living. Same
- *  orthogonal-adjacency rule; populated by its own CrewSystem (addCrew) so that
- *  hall reads as lived-in too rather than dead space. */
-const CREW_LOOP_CELLS_LEFT: ReadonlyArray<readonly [number, number]> = [
-  [0, 2],
-  [1, 2],
-];
-
-/** Right-hall patrol — the stores<->power connector along x=7, the third
- *  corridor component. Its own CrewSystem so every visible hallway reads as
- *  populated at hero distance. Same orthogonal-adjacency rule (no bay clipping). */
-const CREW_LOOP_CELLS_RIGHT: ReadonlyArray<readonly [number, number]> = [
-  [7, 2],
-  [7, 3],
-];
 
 const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMITIVES + "\n" + `
 #base-view {
@@ -1493,13 +1513,28 @@ function disposeMaterial(material: Material): void {
   material.dispose();
 }
 
+/**
+ * Free a view's GPU resources on teardown — but NEVER the page-lifetime SHARED
+ * singletons (procedural textures/materials in baseTextures, the baseFacilities
+ * GEO cache, and the interior diorama geometry/material caches). Those are marked
+ * `userData.shared === true` at their cache sites and are reused across every
+ * BaseView instance AND across every interior dive; disposing them freed their
+ * GPU textures out from under the next dive/re-entry, which rendered subsequent
+ * facility interiors as a near-black void (their emissive screens/beacons and
+ * mapped surfaces went dark). Skipping them here keeps the shared layer intact
+ * while still reclaiming the genuinely per-view geometry/materials (corridor
+ * tiles, terrain slab, cutaway shell, labels, per-view tint materials).
+ */
+function isShared(res: BufferGeometry | Material): boolean {
+  return res.userData?.shared === true;
+}
 function disposeObject(obj: Group | Scene): void {
   const disposedGeometries = new Set<unknown>();
   const disposedMaterials = new Set<Material>();
   obj.traverse((child) => {
     if (child instanceof Mesh || child instanceof LineSegments || child instanceof Sprite) {
       if (child instanceof Mesh || child instanceof LineSegments) {
-        if (!disposedGeometries.has(child.geometry)) {
+        if (!disposedGeometries.has(child.geometry) && !isShared(child.geometry)) {
           disposedGeometries.add(child.geometry);
           child.geometry.dispose();
         }
@@ -1507,11 +1542,11 @@ function disposeObject(obj: Group | Scene): void {
       const material = child.material;
       if (Array.isArray(material)) {
         for (const one of material) {
-          if (disposedMaterials.has(one)) continue;
+          if (disposedMaterials.has(one) || isShared(one)) continue;
           disposedMaterials.add(one);
           disposeMaterial(one);
         }
-      } else if (!disposedMaterials.has(material)) {
+      } else if (!disposedMaterials.has(material) && !isShared(material)) {
         disposedMaterials.add(material);
         disposeMaterial(material);
       }
@@ -1658,16 +1693,30 @@ export class BaseView {
   private readonly baseGroup = new Group();
   private readonly pulseMaterials: Array<{ material: MeshBasicMaterial; opacity: number }> = [];
   private readonly rotators: BaseRotator[] = [];
-  /** Animated crew (personnel) walking the corridor loop — drives life. Owned
-   *  by the dedicated CrewSystem module; ticked in frame(), disposed on teardown. */
-  private crewSystem: CrewSystem | null = null;
-  /** Second crew system patrolling the disconnected left hall (hangar<->living)
-   *  so every corridor component reads as populated. Same lifecycle as the spine
-   *  crew: ticked in frame(), disposed on teardown. */
-  private crewSystemLeft: CrewSystem | null = null;
-  /** Third crew system patrolling the right hall (stores<->power) so every
-   *  visible corridor reads as populated at hero distance. Same lifecycle. */
-  private crewSystemRight: CrewSystem | null = null;
+  /** Animated crew (personnel) walking the routed corridor loops — drives life.
+   *  One CrewSystem per connected corridor component (the {@link corridorGraph}
+   *  patrols), so every hall reads as populated. Each owns its pooled meshes +
+   *  deterministic motion; ticked in frame(), disposed on teardown. */
+  private crewSystems: CrewSystem[] = [];
+  /** The corridor network routed from the current facility layout. Built in
+   *  buildScene before the corridor geometry/crew; exposed via getCorridorGraph. */
+  private corridorGraph: CorridorGraph = { tiles: [], segments: [], patrols: [], spine: -1 };
+  /** Facility name-chip labels collected during build for a one-shot screen-space
+   *  de-overlap pass (layoutFacilityLabels). Sprites are camera-facing, so bays
+   *  close in world XZ collide; the pass lifts colliders to a higher tier. */
+  private readonly facilityLabelAnchors: Array<{
+    sprite: Sprite;
+    wx: number;
+    wz: number;
+    baseY: number;
+  }> = [];
+  /** Expansion-pad niche meshes + their (hidden-by-default) labels, revealed only
+   *  on hover so empty EXPANSION slots don't clutter the cutaway. */
+  private readonly expansionHovers: Array<{ mesh: Mesh; label: Sprite; id: string }> = [];
+  /** The expansion-pad meshes, cached once after buildScene (the set is invariant
+   *  for a view's life) so pointermove raycasts never re-.map() a fresh array. */
+  private expansionMeshCache: Mesh[] | null = null;
+  private hoveredExpansionId: string | null = null;
   /** Previous frame timestamp (ms) for computing a frame delta without per-frame
    *  allocation. 0 sentinel => first frame uses a nominal 16ms step. */
   private prevTimeMs = 0;
@@ -1697,9 +1746,11 @@ export class BaseView {
    *  by buildFacilityInterors on enter, disposed on exit to avoid leaks. */
   private interiorRoot: Group | null = null;
   /** Resting 3/4 interior hero framing — close, slightly elevated, looking into
-   *  the open-front diorama. The frame loop adds a subtle drift on top. */
-  private readonly interiorCamPos = new Vector3(3.0, 2.2, 4.2);
-  private readonly interiorCamTarget = new Vector3(0, 0.85, -0.2);
+   *  the now fully-enclosed diorama (floor + walls + ceiling). Pulled in and the
+   *  target lifted so the sealed room fills the frame with lit surfaces instead
+   *  of leaving the cavern void around it. The frame loop adds a subtle drift. */
+  private readonly interiorCamPos = new Vector3(2.45, 1.9, 3.15);
+  private readonly interiorCamTarget = new Vector3(0, 1.05, -0.45);
   /** Hub look-at target (origin). Reused as the dive-out tween destination. */
   private readonly hubCamTarget = new Vector3(0, 0, 0);
   /** The point the camera currently looks at — updated every frame so a dive
@@ -1790,14 +1841,10 @@ export class BaseView {
     dom.removeEventListener("click", this.onCanvasClick);
     window.removeEventListener("keydown", this.onKeydown);
     window.removeEventListener("resize", this.resize);
-    // CrewSystem owns its pooled meshes/materials; tear it down before the scene
-    // walk so its internal dispose() is the single owner of those resources.
-    this.crewSystem?.dispose();
-    this.crewSystem = null;
-    this.crewSystemLeft?.dispose();
-    this.crewSystemLeft = null;
-    this.crewSystemRight?.dispose();
-    this.crewSystemRight = null;
+    // CrewSystem owns its pooled meshes/materials; tear each down before the
+    // scene walk so its internal dispose() is the single owner of those resources.
+    for (const crew of this.crewSystems) crew.dispose();
+    this.crewSystems = [];
     // Free the mounted interior diorama explicitly (geometry + materials) so a
     // teardown mid-dive never leaks; the scene walk below handles the hub.
     this.clearInterior();
@@ -1968,11 +2015,16 @@ export class BaseView {
     // diorama avoids the hub's yaw/scale and frames cleanly on its own terms.
     this.scene.add(this.interiorGroup);
 
+    // Route the corridor network FIRST (data-driven, from the live layout) so the
+    // corridor geometry and the crew share one graph.
+    this.corridorGraph = this.computeCorridorGraph();
     this.buildTerrainSlab();
     this.buildCutawayShell();
     this.buildCorridorGrid();
     for (const facility of availableBaseFacilities(this.opts.campaign)) this.buildExpansionPad(facility);
     for (const facility of constructedFacilities(this.opts.campaign)) this.buildFacility(facility);
+    // One-shot de-overlap of the facility name chips once every bay is placed.
+    this.layoutFacilityLabels();
     this.addOverheadSystems();
     this.addCrew();
     this.addPerimeterShafts();
@@ -2144,83 +2196,323 @@ export class BaseView {
     this.rotators.push({ object, axis, speed, baseRotation });
   }
 
-  /** Lay every corridor in the connected network so the bays read as one
-   *  facility. Shared floor/strip materials are created once in buildScene. */
-  private buildCorridorGrid(): void {
-    for (const corridor of BASE_CORRIDORS) this.buildCorridor(corridor);
+  /** Route the corridor network from the CURRENT facility layout (data-driven,
+   *  never hardcoded): pave the free grid cells that form hallways between bays,
+   *  give each constructed facility exactly one doorway onto the hall, and emit
+   *  per-component patrol loops for the crew. Corridors are strictly orthogonal
+   *  and only ever occupy FREE cells, so a hall can never cross a facility or
+   *  expansion footprint. */
+  private computeCorridorGraph(): CorridorGraph {
+    const W = STARTER_BASE_GRID.width;
+    const H = STARTER_BASE_GRID.height;
+    const inBounds = (x: number, y: number): boolean => x >= 0 && x < W && y >= 0 && y < H;
+    const key = (x: number, y: number): number => y * W + x;
+
+    // Occupancy: constructed facilities AND expansion pads both block corridors
+    // (pads render as solid rock niches). Only cells free of both get paved.
+    const facilityAt: (string | null)[] = new Array<string | null>(W * H).fill(null);
+    const blocked: boolean[] = new Array<boolean>(W * H).fill(false);
+    const accessKeys = new Set<number>();
+    for (const f of constructedFacilities(this.opts.campaign)) {
+      for (let dx = 0; dx < f.w; dx++)
+        for (let dy = 0; dy < f.h; dy++) {
+          const k = key(f.x + dx, f.y + dy);
+          blocked[k] = true;
+          facilityAt[k] = f.id;
+          if (f.kind === "access") accessKeys.add(k);
+        }
+    }
+    for (const f of availableBaseFacilities(this.opts.campaign)) {
+      for (let dx = 0; dx < f.w; dx++)
+        for (let dy = 0; dy < f.h; dy++) blocked[key(f.x + dx, f.y + dy)] = true;
+    }
+    const fidAt = (k: number): string | null => facilityAt[k] ?? null;
+    const isFree = (x: number, y: number): boolean => inBounds(x, y) && !blocked[key(x, y)];
+
+    // Free cells scanned row-major → deterministic component + doorway ordering.
+    const free: Array<[number, number]> = [];
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++) if (isFree(x, y)) free.push([x, y]);
+
+    // 4-connected components of free cells (flood fill).
+    const comp: number[] = new Array<number>(W * H).fill(-1);
+    const components: Array<Array<[number, number]>> = [];
+    for (const [sx, sy] of free) {
+      if (comp[key(sx, sy)] !== -1) continue;
+      const id = components.length;
+      const cells: Array<[number, number]> = [];
+      const stack: Array<[number, number]> = [[sx, sy]];
+      comp[key(sx, sy)] = id;
+      while (stack.length > 0) {
+        const [x, y] = stack.pop()!;
+        cells.push([x, y]);
+        for (const [, dx, dy] of CORRIDOR_DIRS) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (!isFree(nx, ny) || comp[key(nx, ny)] !== -1) continue;
+          comp[key(nx, ny)] = id;
+          stack.push([nx, ny]);
+        }
+      }
+      components.push(cells);
+    }
+
+    // A component is a real hallway only if a bay opens onto it. Keep those with
+    // >=2 cells; a lone free cell reads as a floating plank, so drop singletons
+    // UNLESS dropping one would orphan a facility from every corridor.
+    const bordersFacility = (cells: Array<[number, number]>): boolean =>
+      cells.some(([x, y]) =>
+        CORRIDOR_DIRS.some(([, dx, dy]) => {
+          const nx = x + dx;
+          const ny = y + dy;
+          return inBounds(nx, ny) && fidAt(key(nx, ny)) !== null;
+        }),
+      );
+    const servedFacilities = (cells: Array<[number, number]>): Set<string> => {
+      const set = new Set<string>();
+      for (const [x, y] of cells)
+        for (const [, dx, dy] of CORRIDOR_DIRS) {
+          const nx = x + dx;
+          const ny = y + dy;
+          const fid = inBounds(nx, ny) ? fidAt(key(nx, ny)) : null;
+          if (fid) set.add(fid);
+        }
+      return set;
+    };
+
+    const kept = new Set<number>();
+    const reachable = new Set<string>();
+    for (let i = 0; i < components.length; i++) {
+      const cells = components[i]!;
+      if (cells.length >= 2 && bordersFacility(cells)) {
+        kept.add(i);
+        for (const fid of servedFacilities(cells)) reachable.add(fid);
+      }
+    }
+    // Orphan guard: re-admit any singleton that is the ONLY corridor a facility
+    // can reach, so no bay is left doorless.
+    for (let i = 0; i < components.length; i++) {
+      if (kept.has(i)) continue;
+      const cells = components[i]!;
+      const serves = servedFacilities(cells);
+      if (serves.size === 0) continue;
+      if ([...serves].some((fid) => !reachable.has(fid))) {
+        kept.add(i);
+        for (const fid of serves) reachable.add(fid);
+      }
+    }
+
+    const paved = new Set<number>();
+    for (const i of kept) for (const [x, y] of components[i]!) paved.add(key(x, y));
+
+    // Row-major paved order so tiles/segments/doorways are emitted deterministically.
+    const orderedPaved: Array<[number, number]> = [];
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++) if (paved.has(key(x, y))) orderedPaved.push([x, y]);
+
+    // Tiles: classify each side. Each constructed facility gets exactly ONE
+    // doorway (the first paved edge, in row-major N/E/S/W order, that borders it)
+    // so every bay reads with a single clear entrance onto the hall.
+    const tiles: CorridorTile[] = [];
+    const doorAssigned = new Set<string>();
+    for (const [x, y] of orderedPaved) {
+      const open: CorridorDir[] = [];
+      const doors: CorridorDir[] = [];
+      for (const [dir, dx, dy] of CORRIDOR_DIRS) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (!inBounds(nx, ny)) continue;
+        const nk = key(nx, ny);
+        if (paved.has(nk)) {
+          open.push(dir);
+          continue;
+        }
+        const fid = fidAt(nk);
+        if (fid !== null && !doorAssigned.has(fid)) {
+          doors.push(dir);
+          doorAssigned.add(fid);
+        }
+      }
+      tiles.push({ cx: x, cy: y, open, doors });
+    }
+
+    // Segments: one per adjacent paved pair (scan east + south only to dedup).
+    const segments: CorridorSegment[] = [];
+    for (const [x, y] of orderedPaved) {
+      if (x + 1 < W && paved.has(key(x + 1, y)))
+        segments.push({ ax: x, ay: y, bx: x + 1, by: y, axis: "x" });
+      if (y + 1 < H && paved.has(key(x, y + 1)))
+        segments.push({ ax: x, ay: y, bx: x, by: y + 1, axis: "z" });
+    }
+
+    // Patrol loops (largest component first, so the biggest gets the most crew).
+    const patrols: Array<Array<readonly [number, number]>> = [];
+    let spine = -1;
+    const keptSorted = [...kept].sort((a, b) => components[b]!.length - components[a]!.length);
+    for (const i of keptSorted) {
+      const loop = this.eulerTour(components[i]!, paved);
+      if (loop.length < 2) continue;
+      const idx = patrols.length;
+      patrols.push(loop);
+      if (
+        spine === -1 &&
+        components[i]!.some(([x, y]) =>
+          CORRIDOR_DIRS.some(([, dx, dy]) => {
+            const nx = x + dx;
+            const ny = y + dy;
+            return inBounds(nx, ny) && accessKeys.has(key(nx, ny));
+          }),
+        )
+      ) {
+        spine = idx;
+      }
+    }
+
+    return { tiles, segments, patrols, spine };
   }
 
-  private buildCorridor(corridor: BaseCorridor): void {
+  /** Euler tour of a free-cell component's spanning tree: visit every cell and
+   *  return toward the start so every consecutive pair — AND the closing wrap
+   *  from the last cell back to the first — is orthogonally adjacent. That yields
+   *  a clean crew loop that never cuts across a bay. Deterministic: the start is
+   *  the lowest row-major cell and neighbours are walked in fixed N/E/S/W order. */
+  private eulerTour(
+    cells: Array<[number, number]>,
+    paved: Set<number>,
+  ): Array<readonly [number, number]> {
+    const W = STARTER_BASE_GRID.width;
+    const H = STARTER_BASE_GRID.height;
+    const key = (x: number, y: number): number => y * W + x;
+    const visited = new Set<number>();
+    const order: Array<readonly [number, number]> = [];
+    const start = cells.reduce((a, b) => (key(a[0], a[1]) <= key(b[0], b[1]) ? a : b));
+    const walk = (x: number, y: number): void => {
+      visited.add(key(x, y));
+      order.push([x, y]);
+      for (const [, dx, dy] of CORRIDOR_DIRS) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+        const nk = key(nx, ny);
+        if (!paved.has(nk) || visited.has(nk)) continue;
+        walk(nx, ny);
+        order.push([x, y]); // backtrack edge keeps every step adjacent
+      }
+    };
+    walk(start[0], start[1]);
+    // The tour ends back at `start`; drop that trailing duplicate so the closing
+    // wrap (last -> first) is a genuine single-cell hop, not a zero-length hold.
+    if (order.length > 1) order.pop();
+    return order;
+  }
+
+  /** The routed corridor network derived from the current facility layout.
+   *  Exposed so the crew/people system can path personnel along real hallways.
+   *  Shape: {@link CorridorGraph} — `tiles` / `segments` / `patrols` / `spine`,
+   *  all in grid-cell coordinates (convert to world with the same mapping as
+   *  {@link getCorridorWaypointLoops}). */
+  getCorridorGraph(): CorridorGraph {
+    return this.corridorGraph;
+  }
+
+  /** World-space (baseGroup-local) patrol loops — one per corridor component,
+   *  pinned to the corridor floor (y≈0.08, the figure origin is at the feet).
+   *  Handed to CrewSystem so personnel walk the real routed hallways. */
+  getCorridorWaypointLoops(): Vector3[][] {
+    return this.corridorGraph.patrols.map((loop) =>
+      loop.map(([cx, cy]) => {
+        const p = this.cellCenter(cx, cy, 1, 1);
+        p.y = 0.08;
+        return p;
+      }),
+    );
+  }
+
+  /** Lay the corridor geometry from the routed graph: a paved floor tile per
+   *  cell, lit rails along every travel segment, and per-tile walls/doorways.
+   *  Shared floor/strip/steel materials are created once in buildScene. */
+  private buildCorridorGrid(): void {
+    for (const tile of this.corridorGraph.tiles) this.buildCorridorTile(tile);
+    for (const segment of this.corridorGraph.segments) this.buildCorridorStrip(segment);
+  }
+
+  /** One paved hallway cell: recessed-flush concrete floor, steel curbs + dim
+   *  strip-lights on WALL sides (rock/pad), an open gap + bright threshold on
+   *  DOORWAY sides (a bay entrance), and a seamless join on OPEN sides (another
+   *  corridor tile). Strictly orthogonal — no diagonal or floating segments. */
+  private buildCorridorTile(tile: CorridorTile): void {
     const steel = this.sharedSteel!;
     const group = new Group();
-    group.position.copy(this.cellCenter(corridor.x, corridor.y, corridor.w, corridor.h));
+    group.position.copy(this.cellCenter(tile.cx, tile.cy, 1, 1));
     this.baseGroup.add(group);
 
-    const width = corridor.w * CELL - 0.28;
-    const depth = corridor.h * CELL - 0.28;
-    const long = Math.max(width, depth);
-    const short = Math.min(width, depth);
-    const longAxisIsX = width >= depth;
-
-    // Lighter concrete trench floor (palette-derived) — a paved hallway strip a
-    // touch brighter than the sunken bay floors, connecting the rooms.
-    const floor = new Mesh(new BoxGeometry(width, 0.08, depth), this.corridorFloor!);
+    const floor = new Mesh(CORRIDOR_GEO.floor, this.corridorFloor!);
     floor.position.y = 0.035;
     floor.receiveShadow = true;
     group.add(floor);
 
-    const edge = new LineSegments(
-      new EdgesGeometry(floor.geometry),
-      this.corridorStripMat!,
-    );
-    edge.position.copy(floor.position);
-    group.add(edge);
-
-    // Low steel curbs along the long sides only — frames the hall as built
-    // while leaving the short ends fully open as DOORWAY gaps onto each bay.
-    const curbH = 0.16;
-    const curbLong = long * 0.42;
-    const curbDeep = 0.07;
-    const offset = short / 2 - 0.05;
-    for (const sign of [-1, 1]) {
-      const curb = new Mesh(
-        longAxisIsX
-          ? new BoxGeometry(curbLong, curbH, curbDeep)
-          : new BoxGeometry(curbDeep, curbH, curbLong),
-        steel,
-      );
-      curb.position.y = curbH / 2 + 0.03;
-      if (longAxisIsX) curb.position.z = sign * offset;
-      else curb.position.x = sign * offset;
+    const half = CELL / 2;
+    const edge = half - CURB_T / 2 - 0.03;
+    const openSet = new Set(tile.open);
+    const doorSet = new Set(tile.doors);
+    // north=-z, south=+z, east=+x, west=-x; `alongX` = the wall runs on the x axis.
+    const sides: ReadonlyArray<{ dir: CorridorDir; x: number; z: number; alongX: boolean }> = [
+      { dir: "north", x: 0, z: -edge, alongX: true },
+      { dir: "south", x: 0, z: edge, alongX: true },
+      { dir: "east", x: edge, z: 0, alongX: false },
+      { dir: "west", x: -edge, z: 0, alongX: false },
+    ];
+    for (const s of sides) {
+      if (openSet.has(s.dir)) continue; // seamless join — no wall between tiles
+      if (doorSet.has(s.dir)) {
+        // Doorway: leave the gap open, mark it with a bright threshold strip.
+        const threshold = new Mesh(
+          s.alongX ? CORRIDOR_GEO.thresholdX : CORRIDOR_GEO.thresholdZ,
+          this.corridorStripMat!,
+        );
+        threshold.position.set(s.x, 0.085, s.z);
+        group.add(threshold);
+        continue;
+      }
+      // WALL: steel curb hugging the edge + a dim edge strip-light on top.
+      const curb = new Mesh(s.alongX ? CORRIDOR_GEO.curbX : CORRIDOR_GEO.curbZ, steel);
+      curb.position.set(s.x, CURB_H / 2 + 0.03, s.z);
       curb.castShadow = true;
       curb.receiveShadow = true;
       group.add(curb);
-    }
-
-    // Low emissive STRIP-LIGHTS along both long edges (the hallway work-lights)
-    // plus a faint center travel line. Shared palette-teal glow material.
-    const stripLen = long * 0.78;
-    const stripOff = short / 2 - 0.06;
-    for (const sign of [-1, 1]) {
       const strip = new Mesh(
-        longAxisIsX
-          ? new BoxGeometry(stripLen, 0.02, 0.05)
-          : new BoxGeometry(0.05, 0.02, stripLen),
+        s.alongX ? CORRIDOR_GEO.stripX : CORRIDOR_GEO.stripZ,
         this.corridorStripMat!,
       );
-      strip.position.y = 0.11;
-      if (longAxisIsX) strip.position.z = sign * stripOff;
-      else strip.position.x = sign * stripOff;
+      strip.position.set(s.x, 0.12, s.z);
       group.add(strip);
     }
-    const travel = new Mesh(
-      longAxisIsX
-        ? new BoxGeometry(long * 0.86, 0.008, 0.022)
-        : new BoxGeometry(0.022, 0.008, long * 0.86),
-      this.corridorStripMat!,
-    );
-    travel.position.y = 0.078;
-    group.add(travel);
+
+    // Faint center travel dot so a through-tile still reads as lit hallway.
+    const center = new Mesh(CORRIDOR_GEO.center, this.corridorStripMat!);
+    center.position.y = 0.078;
+    group.add(center);
+  }
+
+  /** Twin lit rails spanning a travel segment (the gap between two adjacent tile
+   *  centers) so the corridor path reads as one continuous lit strip. Runs along
+   *  the segment axis — strictly orthogonal, following the routed graph edges. */
+  private buildCorridorStrip(segment: CorridorSegment): void {
+    const a = this.cellCenter(segment.ax, segment.ay, 1, 1);
+    const b = this.cellCenter(segment.bx, segment.by, 1, 1);
+    const group = new Group();
+    group.position.set((a.x + b.x) / 2, 0.079, (a.z + b.z) / 2);
+    this.baseGroup.add(group);
+    const off = CELL * 0.24;
+    for (const sign of [-1, 1]) {
+      const rail = new Mesh(
+        segment.axis === "x" ? CORRIDOR_GEO.railX : CORRIDOR_GEO.railZ,
+        this.corridorStripMat!,
+      );
+      if (segment.axis === "x") rail.position.z = sign * off;
+      else rail.position.x = sign * off;
+      group.add(rail);
+    }
   }
 
   private buildFacility(facility: BaseFacility): void {
@@ -2304,8 +2596,44 @@ export class BaseView {
     this.bayLights.push({ light: bayLight, facilityId: facility.id, base: baseIntensity });
 
     const label = makeLabel(facility.label, accent);
-    label.position.set(0, floorY + 0.92, -depth * 0.32);
+    const labelBaseY = floorY + 0.92;
+    label.position.set(0, labelBaseY, -depth * 0.32);
     group.add(label);
+    // Register for the one-shot de-overlap pass (layoutFacilityLabels). The bay
+    // group sits at y=0, so the label's LOCAL y equals its world y — safe to
+    // compare across bays. wx/wz are the bay center in baseGroup-local space.
+    const center = this.roomCenter(facility);
+    this.facilityLabelAnchors.push({ sprite: label, wx: center.x, wz: center.z, baseY: labelBaseY });
+  }
+
+  /** One-shot facility name-chip de-overlap. Camera-facing sprites at similar
+   *  world XZ collide on screen; walk them in build order and lift any that lands
+   *  near an already-placed chip to a higher tier. Deterministic (stable build
+   *  order) and runs once — no per-frame cost. */
+  private layoutFacilityLabels(): void {
+    const placed: Array<{ wx: number; wz: number; y: number }> = [];
+    const stepY = 0.36;
+    const near = CELL * 1.05;
+    for (const anchor of this.facilityLabelAnchors) {
+      let y = anchor.baseY;
+      let collided = true;
+      while (collided) {
+        collided = false;
+        for (const p of placed) {
+          if (
+            Math.abs(p.wx - anchor.wx) < near &&
+            Math.abs(p.wz - anchor.wz) < near &&
+            Math.abs(p.y - y) < stepY * 0.9
+          ) {
+            y += stepY;
+            collided = true;
+            break;
+          }
+        }
+      }
+      anchor.sprite.position.y = y;
+      placed.push({ wx: anchor.wx, wz: anchor.wz, y });
+    }
   }
 
   /** Low steel partition curbs around a bay — frames it as a room while leaving
@@ -2352,6 +2680,7 @@ export class BaseView {
     niche.position.y = -0.05;
     niche.receiveShadow = true;
     niche.castShadow = true;
+    niche.userData.expansionId = facility.id;
     group.add(niche);
 
     const edge = new LineSegments(
@@ -2367,10 +2696,14 @@ export class BaseView {
     edge.position.copy(niche.position);
     group.add(edge);
 
+    // EXPANSION label is hidden until the pad is hovered so empty slots don't
+    // clutter the cutaway (revealed by onPointerMove).
     const marker = makeLabel("Expansion", BASE_PALETTE.floorLine);
-    marker.position.set(0, 0.22, 0);
+    marker.position.set(0, 0.32, 0);
     marker.scale.set(0.9, 0.24, 1);
+    marker.visible = false;
     group.add(marker);
+    this.expansionHovers.push({ mesh: niche, label: marker, id: facility.id });
   }
 
   private addOverheadSystems(): void {
@@ -2401,41 +2734,25 @@ export class BaseView {
    *  LCG), and disposal; we just place its group on the base so it transforms
    *  with the carved facility and tick it each frame. */
   private addCrew(): void {
-    this.crewSystem = new CrewSystem({
-      waypoints: this.crewLoopToWorld(CREW_LOOP_CELLS),
-      count: 9,
-      seed: 1337,
-    });
-    this.baseGroup.add(this.crewSystem.group);
-
-    // The left hall is a separate corridor component walled off from the spine;
-    // give it its own small crew so it reads as a lived-in connector, not dead
-    // space. Patrols only orthogonally-adjacent corridor cells (no bay clipping).
-    this.crewSystemLeft = new CrewSystem({
-      waypoints: this.crewLoopToWorld(CREW_LOOP_CELLS_LEFT),
-      count: 3,
-      seed: 4242,
-    });
-    this.baseGroup.add(this.crewSystemLeft.group);
-
-    // The right hall (stores<->power) is the third corridor component; populate
-    // it too so every visible foreground hallway has moving personnel.
-    this.crewSystemRight = new CrewSystem({
-      waypoints: this.crewLoopToWorld(CREW_LOOP_CELLS_RIGHT),
-      count: 3,
-      seed: 9900,
-    });
-    this.baseGroup.add(this.crewSystemRight.group);
-  }
-
-  /** Resolve a cell-coord patrol loop to baseGroup-local waypoints pinned to the
-   *  corridor floor (top ~0.075; the figure origin is at the feet). */
-  private crewLoopToWorld(cells: ReadonlyArray<readonly [number, number]>): Vector3[] {
-    return cells.map(([cx, cy]) => {
-      const p = this.cellCenter(cx, cy, 1, 1);
-      p.y = 0.08;
-      return p;
-    });
+    // One CrewSystem per routed corridor component (spine gets the most crew).
+    // Seeds are deterministic per component index — no Math.random / Date.now —
+    // so reloads reproduce the same personnel placement.
+    const loops = this.getCorridorWaypointLoops();
+    for (let i = 0; i < loops.length; i++) {
+      const loop = loops[i]!;
+      if (loop.length < 2) continue;
+      const isSpine = i === this.corridorGraph.spine;
+      const crew = new CrewSystem({
+        waypoints: loop,
+        count: isSpine ? 9 : 3,
+        seed: isSpine ? 1337 : (0x9e3779b9 ^ ((i + 1) * 0x85ebca6b)) >>> 0,
+        // Honour prefers-reduced-motion: freeze the idle turn/sway/bob decoration
+        // (walkers still travel — that's state, not decoration).
+        reducedMotion: this.reducedMotion,
+      });
+      this.baseGroup.add(crew.group);
+      this.crewSystems.push(crew);
+    }
   }
 
   private updateRotators(elapsed: number): void {
@@ -3704,30 +4021,67 @@ export class BaseView {
     if (this.disposed || this.facilityMeshes.length === 0 || this.interiorRoot) return;
     const hit = this.facilityMeshAt(event);
     const id = hit?.facilityId ?? null;
-    if (id !== this.hoveredFacilityId) {
+    const facilityChanged = id !== this.hoveredFacilityId;
+    if (facilityChanged) {
       this.hoveredFacilityId = id;
       this.applyFacilityHighlight();
     }
+    // Expansion-pad hover (facilities win): reveal only the hovered slot's label.
+    const expId = hit ? null : this.expansionIdAt();
+    const expansionChanged = expId !== this.hoveredExpansionId;
+    if (expansionChanged) {
+      this.hoveredExpansionId = expId;
+      for (const pad of this.expansionHovers) pad.label.visible = pad.id === expId;
+    }
     const dom = this.renderer.domElement;
     if (!this.tooltipEl) return;
-    if (hit) {
-      const facility = findBaseFacility(hit.facilityId);
-      const building = this.opts.campaign.activeConstruction?.facilityId === hit.facilityId;
-      this.tooltipEl.replaceChildren();
-      const strong = el("strong");
-      strong.textContent = facility?.label ?? hit.facilityId;
-      const note = el("span");
-      note.textContent = building ? "Under construction" : (facility?.effect ?? "");
-      this.tooltipEl.append(strong, note);
+    // Rebuild the tooltip's DOM only when the hovered target actually changes;
+    // every subsequent move over the same target only repositions it (no per-move
+    // findBaseFacility lookup or replaceChildren() churn).
+    const hovering = hit !== null || expId !== null;
+    if (facilityChanged || expansionChanged) {
+      if (hit) {
+        const facility = findBaseFacility(hit.facilityId);
+        const building = this.opts.campaign.activeConstruction?.facilityId === hit.facilityId;
+        this.tooltipEl.replaceChildren();
+        const strong = el("strong");
+        strong.textContent = facility?.label ?? hit.facilityId;
+        const note = el("span");
+        note.textContent = building ? "Under construction" : (facility?.effect ?? "");
+        this.tooltipEl.append(strong, note);
+      } else if (expId) {
+        const facility = findBaseFacility(expId);
+        this.tooltipEl.replaceChildren();
+        const strong = el("strong");
+        strong.textContent = facility?.label ?? "Expansion slot";
+        const note = el("span");
+        note.textContent = "Unexcavated — open Construction to build here";
+        this.tooltipEl.append(strong, note);
+      }
+      this.tooltipEl.classList.toggle("visible", hovering);
+    }
+    if (hovering) {
       this.tooltipEl.style.left = `${event.clientX}px`;
       this.tooltipEl.style.top = `${event.clientY}px`;
-      this.tooltipEl.classList.add("visible");
       dom.style.cursor = "pointer";
     } else {
-      this.tooltipEl.classList.remove("visible");
       dom.style.cursor = "default";
     }
   };
+
+  /** Raycast the expansion-pad niches under the current pointer ray (already set
+   *  by facilityMeshAt earlier in the same pointermove). Returns the hovered pad
+   *  id, or null. The mesh list is invariant after buildScene, so it is cached. */
+  private expansionIdAt(): string | null {
+    if (this.expansionHovers.length === 0) return null;
+    if (this.expansionMeshCache === null) {
+      this.expansionMeshCache = this.expansionHovers.map((pad) => pad.mesh);
+    }
+    const hits = this.raycaster.intersectObjects(this.expansionMeshCache, false);
+    if (hits.length === 0) return null;
+    const id = hits[0]!.object.userData.expansionId;
+    return typeof id === "string" ? id : null;
+  }
 
   /** Click a facility floor in the 3D base: open that facility's dedicated room
    *  (the lab, workshop, barracks, or hangar), keep it selected so the cutaway
@@ -3737,7 +4091,17 @@ export class BaseView {
   private onCanvasClick = (event: MouseEvent): void => {
     if (this.disposed || this.facilityMeshes.length === 0 || this.interiorRoot) return;
     const hit = this.facilityMeshAt(event);
-    if (!hit) return;
+    if (!hit) {
+      // Clicking an unexcavated expansion pad (which shows a pointer cursor +
+      // "open Construction to build here" tooltip) opens the Construction room so
+      // the advertised click is not a silent no-op.
+      const expId = this.expansionIdAt();
+      if (expId !== null) {
+        this.activeRoom = "construction";
+        this.refreshHud();
+      }
+      return;
+    }
     this.selectedFacilityId = hit.facilityId;
     const facility = findBaseFacility(hit.facilityId);
     this.activeRoom = facility ? roomForFacilityKind(facility.kind) : "overview";
@@ -3754,7 +4118,10 @@ export class BaseView {
     if (this.disposed) return;
     // Tear down any prior interior first (defensive — never two at once).
     this.clearInterior();
-    const diorama = buildFacilityInterior(role);
+    // Pass the LIVE captive count so containment occupancy reads correctly without
+    // re-parsing the whole persisted campaign blob from localStorage on every dive.
+    const captiveCount = this.opts.campaign.captives?.length ?? 0;
+    const diorama = buildFacilityInterior(role, captiveCount);
     diorama.traverse((child) => {
       if (child instanceof Mesh) {
         child.castShadow = true;
@@ -3767,6 +4134,10 @@ export class BaseView {
     // Clear any lingering hover affordance (tooltip + pointer cursor) from the
     // hub facility the player just clicked — the dive replaces that interaction.
     this.hoveredFacilityId = null;
+    if (this.hoveredExpansionId !== null) {
+      this.hoveredExpansionId = null;
+      for (const pad of this.expansionHovers) pad.label.visible = false;
+    }
     if (this.tooltipEl) this.tooltipEl.classList.remove("visible");
     this.renderer.domElement.style.cursor = "default";
     this.beginCameraTween(this.interiorCamPos, this.interiorCamTarget, 760);
@@ -3902,9 +4273,7 @@ export class BaseView {
       for (const mat of this.reactorCores) mat.emissiveIntensity = reactorPulse;
       this.updateRotators(elapsed);
     }
-    this.crewSystem?.tick(dt);
-    this.crewSystemLeft?.tick(dt);
-    this.crewSystemRight?.tick(dt);
+    for (const crew of this.crewSystems) crew.tick(dt);
     this.renderer.render(this.scene, this.camera);
   };
 }

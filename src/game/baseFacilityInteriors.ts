@@ -30,14 +30,20 @@
 import {
   BoxGeometry,
   BufferGeometry,
+  Color,
   ConeGeometry,
   CylinderGeometry,
   ExtrudeGeometry,
+  Float32BufferAttribute,
   Group,
+  HemisphereLight,
   LatheGeometry,
+  LineBasicMaterial,
+  LineSegments,
   Mesh,
   MeshStandardMaterial,
   PlaneGeometry,
+  PointLight,
   Shape,
   SphereGeometry,
   Vector2,
@@ -46,7 +52,9 @@ import { BASE_PALETTE, type FacilityRole } from "./basePalette";
 import {
   accentEmissive,
   concreteMaterial,
+  concreteTextures,
   metalPanelMaterial,
+  metalPanelTextures,
   screenMaterial,
   wornSteelMaterial,
 } from "./baseTextures";
@@ -77,6 +85,51 @@ const MAT = {
   worn: wornSteelMaterial(),
   /** Cool overhead white derived from the palette's lightest structural grey. */
   stripLight: accentEmissive(BASE_PALETTE.steelEdge, 2.6),
+} as const;
+
+// ---------------------------------------------------------------------------
+// Interior SHELL materials (floor / walls / ceiling) — brighter than the hub's
+// dark concrete/steel so a room reads as a LIT space, not a black void. The hub
+// hides its dark floor under bay props; a sparse interior (e.g. radar) shows the
+// shell across most of the frame, so the shell itself must hold a luminance floor.
+// These keep the shared procedural texture DETAIL + relief (albedo map + normal
+// map) but add a cool FLAT self-emissive so the surface never falls below the
+// brief's "~0.25 luminance so walls/floor read" — even the shadow side reads.
+// Module singletons (built once, tagged shared via add()), so they cost nothing
+// per dive and are never disposed by a view teardown.
+const _concreteTex = concreteTextures();
+const _panelTex = metalPanelTextures();
+const SHELL_MAT = {
+  floor: new MeshStandardMaterial({
+    map: _concreteTex.map,
+    normalMap: _concreteTex.normalMap,
+    normalScale: new Vector2(0.7, 0.7),
+    color: 0xffffff,
+    emissive: new Color(0x4c5a6e),
+    emissiveIntensity: 1.05,
+    metalness: 0.0,
+    roughness: 0.95,
+  }),
+  wall: new MeshStandardMaterial({
+    map: _panelTex.map,
+    normalMap: _panelTex.normalMap,
+    normalScale: new Vector2(0.6, 0.6),
+    color: 0xffffff,
+    emissive: new Color(0x3f4b5c),
+    emissiveIntensity: 0.85,
+    metalness: 0.5,
+    roughness: 0.55,
+  }),
+  ceiling: new MeshStandardMaterial({
+    map: _panelTex.map,
+    normalMap: _panelTex.normalMap,
+    normalScale: new Vector2(0.6, 0.6),
+    color: 0xffffff,
+    emissive: new Color(0x2c3644),
+    emissiveIntensity: 0.7,
+    metalness: 0.55,
+    roughness: 0.5,
+  }),
 } as const;
 
 /** Two lab status-light tints so rack boards read as live (varied), not flat. */
@@ -144,10 +197,23 @@ function tileUV(geo: BufferGeometry, rx: number, ry: number): void {
   uv.needsUpdate = true;
 }
 
+/**
+ * Cache for {@link bevelBox}: every caller passes constant literal dims, so a
+ * finite set of chamfered-box geometries is created ONCE and shared for the life
+ * of the page — no per-dive GPU geometry allocation, and (like every other
+ * interior geometry) nothing the dive teardown needs to dispose. Keyed on the
+ * exact dims+bevel.
+ */
+const bevelCache = new Map<string, ExtrudeGeometry>();
+
 /** An extruded rectangle WITH bevel, centered on Z — a chamfered box that reads
  * as crafted rather than a naked primitive. Shape spans the XY plane, extruded
- * along Z, then recentered so local origin is the part center. */
+ * along Z, then recentered so local origin is the part center. Memoized: repeated
+ * dims return the same shared geometry. */
 function bevelBox(w: number, h: number, d: number, bevel = 0.03): ExtrudeGeometry {
+  const key = `${w}|${h}|${d}|${bevel}`;
+  const cached = bevelCache.get(key);
+  if (cached) return cached;
   const hw = w / 2;
   const hh = h / 2;
   const shape = new Shape();
@@ -165,6 +231,7 @@ function bevelBox(w: number, h: number, d: number, bevel = 0.03): ExtrudeGeometr
     steps: 1,
   });
   geo.translate(0, 0, -d / 2);
+  bevelCache.set(key, geo);
   return geo;
 }
 
@@ -173,10 +240,15 @@ const SHELL = {
   floor: new BoxGeometry(ROOM_W, 0.2, ROOM_D),
   backWall: new BoxGeometry(ROOM_W, ROOM_H, WALL_T),
   sideWall: new BoxGeometry(WALL_T, ROOM_H, ROOM_D),
+  // A lidded ceiling: closes the top of the room so the dive camera never frames
+  // props against the black cavern void above the walls (the interior read as a
+  // lit ceiling instead of empty black). Same footprint as the floor slab.
+  ceiling: new BoxGeometry(ROOM_W, WALL_T, ROOM_D),
 } as const;
 tileUV(SHELL.floor, ROOM_W / 1.7, ROOM_D / 1.7); // concrete slabs ~1.7 units
 tileUV(SHELL.backWall, ROOM_W / 1.3, ROOM_H / 1.3); // riveted panels
 tileUV(SHELL.sideWall, ROOM_D / 1.3, ROOM_H / 1.3);
+tileUV(SHELL.ceiling, ROOM_W / 1.5, ROOM_D / 1.5);
 
 // --- Server rack: an extruded beveled cabinet (sculpted, not a box) ---
 const RACK_W = 0.62;
@@ -313,6 +385,27 @@ const CELL_BODY = bevelBox(0.6, 1.7, 0.5, 0.02);
 tileUV(CELL_BODY, 1.2, 2.2);
 const CELL_FIELD = new PlaneGeometry(0.42, 1.3);
 const CELL_CONSOLE = bevelBox(0.9, 0.9, 0.5, 0.025);
+// Captive silhouette (a hunched dark humanoid) shown when a cell is occupied.
+const SIL_BODY = new CylinderGeometry(0.11, 0.17, 0.82, 12);
+const SIL_HEAD = new SphereGeometry(0.12, 12, 10);
+
+/** Violet-magenta psi glow for OCCUPIED containment cells (Style Bible endgame
+ *  hue), distinct from the room's acid-green biohazard accent. */
+const CONTAINMENT_VIOLET = 0xc86bff;
+const CELL_VIOLET = {
+  /** Bright neutralization field + status beacon for a held captive. */
+  field: accentEmissive(CONTAINMENT_VIOLET, 1.3),
+  beacon: accentEmissive(CONTAINMENT_VIOLET, 2.2),
+  /** Dim, near-dark field/beacon for an empty cell. */
+  fieldDim: accentEmissive(CONTAINMENT_VIOLET, 0.16),
+  beaconDim: accentEmissive(CONTAINMENT_VIOLET, 0.3),
+} as const;
+/** Near-black captive body — reads as a silhouette against the violet field. */
+const MAT_SILHOUETTE = new MeshStandardMaterial({
+  color: BASE_PALETTE.rock,
+  metalness: 0.1,
+  roughness: 0.9,
+});
 
 // ---------------------------------------------------------------------------
 // Composition helpers
@@ -327,6 +420,12 @@ function add(
   scale: Vec3 = [1, 1, 1],
   rotation: Vec3 = [0, 0, 0],
 ): Mesh {
+  // Every interior geometry + material is a page-lifetime shared singleton (module
+  // caches + the bevelBox/texture caches). Tag them so baseView's scene-teardown
+  // (disposeObject) skips them — disposing these freed their GPU maps out from
+  // under the NEXT dive, blacking out subsequent facility interiors.
+  geometry.userData.shared = true;
+  material.userData.shared = true;
   const mesh = new Mesh(geometry, material);
   mesh.position.set(position[0], position[1], position[2]);
   mesh.scale.set(scale[0], scale[1], scale[2]);
@@ -335,12 +434,134 @@ function add(
   return mesh;
 }
 
-/** Build the shared room shell (textured floor + back/left/right walls). */
+/** Build the shared room shell (textured floor + faint teal floor grid + the
+ *  back/left/right walls that enclose the room so nothing reads as a void). */
 function addShell(group: Group): void {
-  add(group, SHELL.floor, MAT.concrete, [0, -0.1, 0]);
-  add(group, SHELL.backWall, MAT.panel, [0, ROOM_H / 2, -ROOM_D / 2]);
-  add(group, SHELL.sideWall, MAT.panel, [-ROOM_W / 2, ROOM_H / 2, 0]);
-  add(group, SHELL.sideWall, MAT.panel, [ROOM_W / 2, ROOM_H / 2, 0]);
+  add(group, SHELL.floor, SHELL_MAT.floor, [0, -0.1, 0]);
+  // Faint vector-console floor grid — reinforces the room's spatial read.
+  const grid = new LineSegments(FLOOR_GRID_GEO, FLOOR_GRID_MAT);
+  grid.geometry.userData.shared = true;
+  grid.material.userData.shared = true;
+  group.add(grid);
+  add(group, SHELL.backWall, SHELL_MAT.wall, [0, ROOM_H / 2, -ROOM_D / 2]);
+  add(group, SHELL.sideWall, SHELL_MAT.wall, [-ROOM_W / 2, ROOM_H / 2, 0]);
+  add(group, SHELL.sideWall, SHELL_MAT.wall, [ROOM_W / 2, ROOM_H / 2, 0]);
+  // Ceiling lid — caps the top so the hero camera frames a lit room, not props
+  // floating in the black cavern void above the walls.
+  add(group, SHELL.ceiling, SHELL_MAT.ceiling, [0, ROOM_H - WALL_T / 2, 0]);
+}
+
+// ---------------------------------------------------------------------------
+// Interior LIGHTING RIG + MOTION (self-contained so an interior reads as a lit
+// room the moment it mounts, independent of the hub's scene lights).
+// ---------------------------------------------------------------------------
+
+/**
+ * Faint teal floor-grid line geometry across the shared room footprint, cached
+ * once at module scope (mirrors every other interior geometry). disposeObject in
+ * baseView disposes LineSegments geometry/material on teardown and three.js
+ * re-uploads the shared resource on the next mount.
+ */
+function buildFloorGridGeo(): BufferGeometry {
+  const hw = ROOM_W / 2;
+  const hd = ROOM_D / 2;
+  const y = 0.015; // just above the floor top (floor box top sits at y = 0)
+  const step = 0.8;
+  const pts: number[] = [];
+  for (let x = -hw; x <= hw + 1e-3; x += step) pts.push(x, y, -hd, x, y, hd);
+  for (let z = -hd; z <= hd + 1e-3; z += step) pts.push(-hw, y, z, hw, y, z);
+  const geo = new BufferGeometry();
+  geo.setAttribute("position", new Float32BufferAttribute(pts, 3));
+  return geo;
+}
+const FLOOR_GRID_GEO = buildFloorGridGeo();
+const FLOOR_GRID_MAT = new LineBasicMaterial({
+  color: BASE_PALETTE.floorLine,
+  transparent: true,
+  opacity: 0.22,
+});
+
+/**
+ * Give an interior a lighting rig so its shell/props read as a real room (never
+ * a black void): a cool hemisphere fill (the >=25 luminance floor), a cool
+ * overhead room light, and two warm/accent PRACTICALS that contribute actual
+ * light (a warm desk lamp + the facility-accent hero glow). All lights are
+ * children of the interior Group, so baseView's remove()/disposeObject teardown
+ * takes them with the diorama — no leak (they cast no shadows, hold no GPU map).
+ */
+function addInteriorLighting(group: Group, role: FacilityRole): void {
+  // A FIXED four-light rig for EVERY interior (identical count across all roles,
+  // so a dive never changes the renderer's visible-light configuration between
+  // rooms — no per-room shader recompile). The room is now a closed shell (floor
+  // + walls + ceiling) that occludes the hub's external key/rim lights, so this
+  // rig alone must carry the room; it is tuned to keep every surface well clear
+  // of black (the >=0.25 luminance floor the brief calls for).
+  // Cool sky / warm ground hemisphere — the ambient fill that lifts the whole
+  // shell (walls/floor/ceiling) off pure black while keeping the console-cool mood.
+  const hemi = new HemisphereLight(0x9fb2cc, 0x2a2018, 2.1);
+  hemi.position.set(0, ROOM_H, 0);
+  group.add(hemi);
+  // Cool overhead room light (the strip-light housings sit here) — lifted in
+  // intensity now that the ceiling seals off the hub key light.
+  const overhead = new PointLight(0xe6eef4, 16, 15, 2);
+  overhead.position.set(0, ROOM_H - 0.35, 0.4);
+  group.add(overhead);
+  // Warm desk practical toward the open front-right (a lamp/console pool).
+  const warm = new PointLight(0xffcf9a, 7.5, 9, 2);
+  warm.position.set(1.7, 1.25, 1.2);
+  group.add(warm);
+  // Facility-accent hero glow near the room's centre feature (screen/vat/core).
+  const accent = new PointLight(BASE_PALETTE.accent[role], 5.5, 8, 2);
+  accent.position.set(0, 1.15, -0.2);
+  group.add(accent);
+}
+
+/** Whether the OS/browser asks for reduced motion — cached once (mirrors the
+ *  flag baseView captures at construction). Gates every decorative accent. */
+let reducedMotionCache: boolean | null = null;
+function prefersReducedMotion(): boolean {
+  if (reducedMotionCache === null) {
+    reducedMotionCache =
+      typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+  return reducedMotionCache;
+}
+
+/** ms -> s for performance.now()-driven decorative motion. */
+const MS_TO_S = 0.001;
+
+type Axis = "x" | "y" | "z";
+
+/**
+ * Attach a decorative, reduced-motion-gated animation to a single mesh via
+ * onBeforeRender (fires each frame the mesh renders — no baseView frame-loop
+ * wiring needed, no per-frame allocation, GC'd with the mesh on teardown).
+ */
+function driveSpin(mesh: Mesh, axis: Axis, speed: number): void {
+  const base = mesh.rotation[axis];
+  mesh.onBeforeRender = () => {
+    if (prefersReducedMotion()) return;
+    mesh.rotation[axis] = base + performance.now() * MS_TO_S * speed;
+  };
+}
+function drivePulse(mesh: Mesh, amp: number, periodS: number): void {
+  const bx = mesh.scale.x;
+  const by = mesh.scale.y;
+  const bz = mesh.scale.z;
+  const w = (Math.PI * 2) / periodS;
+  mesh.onBeforeRender = () => {
+    if (prefersReducedMotion()) return;
+    const s = 1 + Math.sin(performance.now() * MS_TO_S * w) * amp;
+    mesh.scale.set(bx * s, by * s, bz * s);
+  };
+}
+function driveSlide(mesh: Mesh, axis: Axis, amp: number, periodS: number): void {
+  const base = mesh.position[axis];
+  const w = (Math.PI * 2) / periodS;
+  mesh.onBeforeRender = () => {
+    if (prefersReducedMotion()) return;
+    mesh.position[axis] = base + Math.sin(performance.now() * MS_TO_S * w) * amp;
+  };
 }
 
 /**
@@ -509,6 +730,13 @@ function buildLabInterior(): Group {
   bench.rotation.y = -Math.PI / 7;
   g.add(bench);
 
+  // Lab centrifuge on a plinth (front-centre open floor) — a spinning rotor is
+  // this room's motion accent (reduced-motion-gated inside driveSpin).
+  add(g, DISK, MAT.panelDark, [0.7, 0.05, 1.6], [0.6, 1, 0.6]);
+  add(g, POST, MAT.worn, [0.7, 0.3, 1.6], [1.1, 0.5, 1.1]);
+  const centrifuge = add(g, bevelBox(0.44, 0.12, 0.13, 0.02), MAT.worn, [0.7, 0.6, 1.6]);
+  driveSpin(centrifuge, "y", 3.0);
+
   // Overhead beams carrying strip lights (exposed — keeps the 3/4 sightline open).
   for (const sx of [-1, 1]) {
     add(g, BEAM, MAT.panel, [sx * 2.0, ROOM_H - 0.12, 0]);
@@ -572,6 +800,8 @@ function buildCommandInterior(): Group {
   map.userData.interiorScreen = true;
   const beam = add(g, HOLO_BEAM, accent.beacon, [0, 1.85, 0], [1, 1.95, 1]);
   beam.userData.interiorPulse = true;
+  // Motion accent: the holo projection beam breathes vertically (>=2s period).
+  drivePulse(beam, 0.06, 3.0);
 
   // Three console desks arrayed in an arc facing the table (front, open side).
   const arcZ = 1.35;
@@ -669,6 +899,9 @@ function buildWorkshopInterior(): Group {
     add(g, GANTRY_BEAM_X, MAT.panel, [0, ROOM_H - 0.08, z]);
   }
   add(g, GANTRY_BEAM_Z, MAT.panel, [0, ROOM_H - 0.08, -0.42]);
+  // Motion accent: a service carriage slides along the gantry beam (>=2s period).
+  const carriage = add(g, bevelBox(0.3, 0.14, 0.3, 0.02), MAT.worn, [0, ROOM_H - 0.22, -0.42]);
+  driveSlide(carriage, "x", 0.9, 4.0);
 
   // Robotic arm hanging from the gantry's center beam.
   add(g, bevelBox(0.22, 0.1, 0.22, 0.02), MAT.worn, [0, ROOM_H - 0.18, -0.42]); // sled
@@ -768,10 +1001,12 @@ function buildBarracksInterior(): Group {
   add(g, LOCKER, MAT_PROPS.frame, [-0.7, 0.9, -ROOM_D / 2 + 0.28]);
   add(g, LOCKER, MAT_PROPS.frame, [0.7, 0.9, -ROOM_D / 2 + 0.28]);
 
-  // Warm standing lamps between the beds.
+  // Warm standing lamps between the beds — a slow paired breathe is this quiet
+  // room's motion accent (gentle, >=3s period, reduced-motion-gated).
   for (const x of [-0.6, 0.6]) {
     add(g, POST, MAT_PROPS.frame, [x, 0.9, -0.3], [1, 1.8, 1]);
-    add(g, BEAD, warm, [x, 1.85, -0.3], [1.4, 1, 1.4]);
+    const lamp = add(g, BEAD, warm, [x, 1.85, -0.3], [1.4, 1, 1.4]);
+    drivePulse(lamp, 0.14, 3.6);
   }
 
   // Warm overhead strip lighting (not the cool strip) + a corner pillar.
@@ -838,6 +1073,9 @@ function buildHangarInterior(): Group {
   add(g, CRANE_BEAM, MAT.panel, [-2.3, ROOM_H - 0.1, -0.25], [1, 1, 1], [0, Math.PI / 2, 0]);
   add(g, CRANE_HOIST, MAT.worn, [-1.4, ROOM_H - 0.45, -0.25]);
   add(g, BEAD, MAT_PROPS.dark, [-1.4, ROOM_H - 0.75, -0.25]);
+  // Motion accent: a bright service light travels along the crane rail (>=2s).
+  const service = add(g, BEAD, accent.beacon, [-1.4, ROOM_H - 0.58, -0.25], [1.2, 1, 1.2]);
+  driveSlide(service, "z", 1.0, 5.0);
 
   // Tool rack against the right wall + tools.
   add(g, TOOL_RACK, MAT_PROPS.frame, [2.45, 0.65, -0.4]);
@@ -894,8 +1132,12 @@ function buildRadarInterior(): Group {
     [1, 1, 1],
     [-0.85, 0, 0],
   );
-  // Forward-compat rotation tag (baseView frame loop may spin the dish on Y).
+  // Motion accent: the dish sweeps by spinning about the vertical mast axis.
+  // YXZ Euler order applies the fixed tilt (x) BEFORE the animated spin (y) so
+  // the tilted dish rotates cleanly on the mast instead of coning.
+  dish.rotation.order = "YXZ";
   dish.userData.interiorRotor = { axis: "y", speed: 0.4 };
+  driveSpin(dish, "y", 0.5);
   // Emissive emitter at the dish's focal point.
   const emitter = add(g, BEAD, accent.beacon, [mx, 2.32, mz + 0.35], [1.3, 1, 1.3]);
   emitter.userData.interiorPulse = true;
@@ -970,6 +1212,8 @@ function buildReactorInterior(): Group {
     [0.78, 0.96, 0.78],
   );
   inner.userData.interiorPulse = true;
+  // Motion accent: the core breathes (scale pulse, >=2s period).
+  drivePulse(inner, 0.045, 2.4);
   add(g, CORE_TOP, MAT_PROPS.dark, [0, 2.0, 0]);
   add(g, BEAD, accent.beacon, [0, 2.12, 0]);
 
@@ -1034,19 +1278,39 @@ function buildReactorInterior(): Group {
  * stripes, and the standard prop/lighting dressing shared with the other
  * rooms.
  */
-function buildContainmentInterior(): Group {
+function buildContainmentInterior(captiveCount: number): Group {
   const g = new Group();
   const hex = BASE_PALETTE.accent.containment;
   const accent = ACCENT.containment;
   addShell(g);
 
   // Three sealed holding cells along the back wall — the room's signature row.
+  // Occupied cells glow violet (psi hue) with a captive silhouette + a faint
+  // violet backlight; empty cells stay dark. Occupancy comes from the live
+  // captive roster (see buildFacilityInterior / readCaptiveCount).
   const cellX = [-1.6, 0, 1.6];
-  for (const x of cellX) {
-    add(g, CELL_BODY, MAT.panelDark, [x, 0.85, -ROOM_D / 2 + 0.35]);
-    const field = add(g, CELL_FIELD, accent.glow, [x, 0.9, -ROOM_D / 2 + 0.61]);
+  const cellZ = -ROOM_D / 2 + 0.35;
+  for (let i = 0; i < cellX.length; i++) {
+    const x = cellX[i]!;
+    const occupied = i < captiveCount;
+    add(g, CELL_BODY, MAT.panelDark, [x, 0.85, cellZ]);
+    const field = add(
+      g,
+      CELL_FIELD,
+      occupied ? CELL_VIOLET.field : CELL_VIOLET.fieldDim,
+      [x, 0.9, cellZ + 0.26],
+    );
     field.userData.interiorPulse = true;
-    add(g, BEAD, accent.beacon, [x, 1.78, -ROOM_D / 2 + 0.35]);
+    // Motion accent: occupied fields flicker faintly (>=2s period).
+    drivePulse(field, occupied ? 0.06 : 0.02, 2.6);
+    add(g, BEAD, occupied ? CELL_VIOLET.beacon : CELL_VIOLET.beaconDim, [x, 1.78, cellZ]);
+    if (occupied) {
+      // Captive silhouette held inside the cell against the emissive violet field
+      // (CELL_VIOLET.field already glows — no per-cell PointLight, so the interior
+      // keeps a constant light count regardless of occupancy: no shader recompile).
+      add(g, SIL_BODY, MAT_SILHOUETTE, [x, 0.56, cellZ + 0.08]);
+      add(g, SIL_HEAD, MAT_SILHOUETTE, [x, 1.08, cellZ + 0.08]);
+    }
   }
 
   // Control console facing the cells, with a status readout screen.
@@ -1089,7 +1353,7 @@ function buildContainmentInterior(): Group {
  * Origin is at floor center (y = 0 is the floor surface); the front wall is open
  * toward +z for the camera.
  */
-export function buildFacilityInterior(role: FacilityRole): Group {
+export function buildFacilityInterior(role: FacilityRole, captiveCount?: number): Group {
   const group = (() => {
     switch (role) {
       case "lab":
@@ -1107,10 +1371,35 @@ export function buildFacilityInterior(role: FacilityRole): Group {
       case "reactor":
         return buildReactorInterior();
       case "containment":
-        return buildContainmentInterior();
+        // Prefer an injected count (e.g. from baseView's campaign); otherwise
+        // fall back to the persisted campaign so occupancy reads correctly even
+        // without a call-site change.
+        return buildContainmentInterior(captiveCount ?? readCaptiveCount());
     }
   })();
+  // Every interior gets its own lighting rig so it reads as a lit room the
+  // instant it mounts (never a black void), independent of the hub scene lights.
+  addInteriorLighting(group, role);
   group.userData.facilityRole = role;
   group.userData.interior = true;
   return group;
+}
+
+/**
+ * Best-effort read of how many live captives are held, from the persisted
+ * campaign. Used only as a fallback when the caller does not inject a count
+ * (baseView currently calls buildFacilityInterior(role) with no count). Guarded:
+ * any storage/parse failure yields 0 (empty containment). Deterministic given
+ * the same persisted state.
+ */
+function readCaptiveCount(): number {
+  try {
+    const raw =
+      typeof localStorage !== "undefined" ? localStorage.getItem("blacksite.campaign.v1") : null;
+    if (!raw) return 0;
+    const parsed = JSON.parse(raw) as { captives?: unknown };
+    return Array.isArray(parsed.captives) ? parsed.captives.length : 0;
+  } catch {
+    return 0;
+  }
 }

@@ -25,13 +25,8 @@ import {
   type BufferGeometry,
   SphereGeometry,
 } from "three";
-import {
-  accentMaterial,
-  concreteMaterial,
-  rockMaterial,
-  steelMaterial,
-  type FacilityRole,
-} from "./basePalette";
+import { accentMaterial, rockMaterial, type FacilityRole } from "./basePalette";
+import { concreteMaterial, metalPanelMaterial, wornSteelMaterial } from "./baseTextures";
 
 export type { FacilityRole } from "./basePalette";
 
@@ -59,9 +54,17 @@ const GEO = {
   cone: new ConeGeometry(0.5, 1, 20, 1, true),
 } as const;
 
-/** Shared structural materials (immutable, never per-facility tuned). */
+/**
+ * Shared structural materials (immutable, never per-facility tuned). Material
+ * QUALITY pass: steel/concrete now carry the procedural riveted-panel and
+ * cracked-concrete PBR maps from baseTextures (albedo + normalMap → real
+ * surface relief and roughness variation), and a worn-steel variant adds
+ * roughness break-up on secondary machinery — the hub bays now read at the same
+ * crafted quality as the interior dioramas instead of flat primitives.
+ */
 const MAT = {
-  steel: steelMaterial(),
+  steel: metalPanelMaterial(undefined, { metalness: 0.58, roughness: 0.5 }),
+  worn: wornSteelMaterial(),
   concrete: concreteMaterial(),
   rock: rockMaterial(),
 } as const;
@@ -92,6 +95,17 @@ const ACCENT: Record<FacilityRole, AccentSet> = {
   reactor: makeAccent("reactor"),
   containment: makeAccent("containment"),
 };
+
+// Mark every page-lifetime shared geometry/material so a base view's scene
+// teardown (baseView disposeObject) never frees them: these are module singletons
+// reused across every BaseView instance. Freeing them once blacked out the art on
+// the next base entry (their GPU maps were released out from under the reuse).
+for (const g of Object.values(GEO)) g.userData.shared = true;
+for (const m of Object.values(MAT)) m.userData.shared = true;
+for (const a of Object.values(ACCENT)) {
+  a.glow.userData.shared = true;
+  a.beacon.userData.shared = true;
+}
 
 /**
  * Uniform art-upgrade scale: every facility model is enlarged so its silhouette
@@ -246,7 +260,7 @@ function buildWorkshop(group: Group): void {
   add(group, GEO.box, accent.glow, [0.14, 0.32, -0.1], [0.26, 0.08, 0.18]); // weld head glow
   add(group, GEO.box, MAT.steel, [0.14, 0.29, -0.1], [0.24, 0.06, 0.16]); // weld head
   // Forge with amber glow — the workshop's signature, enlarged + brighter.
-  add(group, GEO.box, MAT.steel, [-0.28, 0.24, 0.2], [0.3, 0.4, 0.3]);
+  add(group, GEO.box, MAT.worn, [-0.28, 0.24, 0.2], [0.3, 0.4, 0.3]);
   add(group, GEO.cone, accent.beacon, [-0.28, 0.44, 0.2], [0.28, 0.32, 0.28]);
   add(group, GEO.box, accent.glow, [-0.28, 0.14, 0.2], [0.22, 0.08, 0.22]);
   add(group, GEO.bead, accent.beacon, [-0.28, 0.5, 0.2]);
@@ -344,7 +358,7 @@ function buildRadar(group: Group): void {
   }
   add(group, GEO.bead, accent.beacon, [-0.32, 1.1, 0.3]);
   // Base equipment cabinet.
-  add(group, GEO.box, MAT.steel, [0.22, 0.2, 0.26], [0.3, 0.34, 0.24]);
+  add(group, GEO.box, MAT.worn, [0.22, 0.2, 0.26], [0.3, 0.34, 0.24]);
   add(group, GEO.box, accent.glow, [0.22, 0.32, 0.14], [0.2, 0.09, 0.02]);
   addBeacon(group, "radar", 0.38, 0.5, -0.34);
 }
@@ -369,8 +383,8 @@ function buildReactor(group: Group): void {
   }
   // Conduit pipes running out to junction boxes.
   for (const sx of [-1, 1]) {
-    add(group, GEO.post, MAT.steel, [sx * 0.42, 0.4, 0], [1, 0.14, 1], [0, 0, Math.PI / 2]);
-    add(group, GEO.box, MAT.steel, [sx * 0.5, 0.4, 0], [0.16, 0.28, 0.28]);
+    add(group, GEO.post, MAT.worn, [sx * 0.42, 0.4, 0], [1, 0.14, 1], [0, 0, Math.PI / 2]);
+    add(group, GEO.box, MAT.worn, [sx * 0.5, 0.4, 0], [0.16, 0.28, 0.28]);
     add(group, GEO.dot, accent.glow, [sx * 0.5, 0.52, 0]);
   }
   // Base plinth struts.

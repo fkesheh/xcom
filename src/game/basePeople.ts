@@ -62,6 +62,12 @@ export interface CrewOptions {
   readonly count: number;
   /** Seed for the deterministic LCG that places/speeds/phases the crew. */
   readonly seed: number;
+  /**
+   * When true, freeze DECORATIVE crew motion (idle breathing/sway/turn-in-place)
+   * so idle figures stand still. Walkers still travel — patrolling personnel is
+   * game state, not decoration. Defaults to false.
+   */
+  readonly reducedMotion?: boolean;
 }
 
 /** Maximum number of crew figures (pool cap). */
@@ -125,6 +131,33 @@ const IDLE_BOB_FREQ = 1.3;
 const IDLE_BOB_AMP = 0.005;
 const IDLE_SWAY_FREQ = 0.9;
 const IDLE_SWAY_AMP = 0.03;
+// Idle "turn-in-place": the figure slowly looks around its planted heading.
+// Two low harmonics (long periods, ≥2s) sum to an organic, non-mechanical sweep
+// that never spins — decoration, so reducedMotion freezes it (Style Bible §2).
+const IDLE_TURN_FREQ_A = 0.42; // ~15s period
+const IDLE_TURN_AMP_A = 0.5; // ~29°
+const IDLE_TURN_FREQ_B = 0.19; // ~33s period
+const IDLE_TURN_AMP_B = 0.32; // ~18°
+
+/**
+ * Role sash/beacon colors — distinct facility-department hues drawn straight
+ * from the frozen palette accent tokens (never ad-hoc hex). Each figure is
+ * assigned one deterministically so the crew reads as a mix of departments
+ * (blue command, teal science, amber engineering, green hangar, violet radar,
+ * yellow reactor) instead of an identical uniform.
+ */
+const SASH_ROLE_COLORS: readonly number[] = [
+  BASE_PALETTE.accent.command,
+  BASE_PALETTE.accent.lab,
+  BASE_PALETTE.accent.workshop,
+  BASE_PALETTE.accent.hangar,
+  BASE_PALETTE.accent.radar,
+  BASE_PALETTE.accent.reactor,
+];
+/** Emissive glow for the diagonal chest sash (reads clearly at hero distance). */
+const SASH_INTENSITY = 1.6;
+/** Brighter matching beacon so role color double-reads from the chest bead. */
+const BEACON_INTENSITY = 2.4;
 
 /** Shared fallback point for the (rare) no-waypoint case — never mutated. */
 const ORIGIN = new Vector3(0, 0, 0);
@@ -162,6 +195,10 @@ interface CrewMember {
   readonly offset: number;
   /** Phase offset for idle breathing/sway. */
   readonly bobPhase: number;
+  /** Base heading (radians) an idle figure turns-in-place around. Walkers: 0. */
+  readonly idleYaw: number;
+  /** Phase offset for the idle turn-in-place sweep. Walkers: 0. */
+  readonly turnPhase: number;
   /** Fixed world position for idle figures. */
   readonly idlePos: Vector3;
   /** Joint handles for the walk/idle pose. */
@@ -225,11 +262,12 @@ function buildSegments(waypoints: Vector3[]): { segments: Segment[]; totalLength
  * color texture. People-domain cloth (baseTextures covers architecture), so it
  * lives here; the base tone is derived from the frozen palette (steelEdge
  * muted toward concrete) so figures read against dark floors and harmonize
- * with the steel architecture. Returns the texture plus the underlying canvas
- * 2D context's color hex (unused by caller; kept out of the return). The
- * caller owns disposal of both the texture and the material built from it.
+ * with the steel architecture. Returns the raw canvas; the caller wraps it in a
+ * CanvasTexture and owns disposal of both texture and material. Grime noise is
+ * drawn from the supplied seeded `noise` generator (never Math.random) so the
+ * bake is deterministic across runs.
  */
-function makeCoverallsCanvas(): HTMLCanvasElement {
+function makeCoverallsCanvas(noise: () => number): HTMLCanvasElement {
   const size = 256;
   const canvas = document.createElement("canvas");
   canvas.width = size;
@@ -262,7 +300,7 @@ function makeCoverallsCanvas(): HTMLCanvasElement {
     const img = g.getImageData(0, 0, size, size);
     const d = img.data;
     for (let i = 0; i < d.length; i += 4) {
-      const n = (Math.random() * 24 - 12) | 0;
+      const n = (noise() * 24 - 12) | 0;
       d[i] = Math.max(0, Math.min(255, d[i]! + n));
       d[i + 1] = Math.max(0, Math.min(255, d[i + 1]! + n));
       d[i + 2] = Math.max(0, Math.min(255, d[i + 2]! + n));
@@ -284,6 +322,7 @@ export class CrewSystem {
   private readonly members: CrewMember[] = [];
   private readonly segments: Segment[];
   private readonly totalLength: number;
+  private readonly reducedMotion: boolean;
   private elapsedSec = 0;
   private disposed = false;
 
@@ -304,12 +343,14 @@ export class CrewSystem {
   // — NOT disposed here (see file header).
   private readonly helmetMat: MeshStandardMaterial;
   private readonly visorMat: MeshStandardMaterial;
-  private readonly sashMat: MeshStandardMaterial;
-  private readonly beaconMat: MeshStandardMaterial;
+  // One sash + matching beacon material per role color (module-cached, shared).
+  private readonly sashMats: MeshStandardMaterial[];
+  private readonly beaconMats: MeshStandardMaterial[];
 
   constructor(opts: CrewOptions) {
     this.group = new Group();
     this.group.name = "crew";
+    this.reducedMotion = opts.reducedMotion === true;
 
     // --- Shared geometry (one set per instance, reused by every figure) ---
     this.headGeo = new RoundedBoxGeometry(HEAD_W, HEAD_H, HEAD_D, 3, HEAD_BEVEL);
@@ -344,7 +385,10 @@ export class CrewSystem {
     this.beaconGeo = new SphereGeometry(0.012, 10, 8);
 
     // --- Coveralls: woven canvas texture on a palette-derived PBR material. ---
-    this.coverallsCanvas = makeCoverallsCanvas();
+    // Grime noise is driven by a SEPARATE seeded LCG (offset from opts.seed so it
+    // doesn't perturb the placement stream) → the texture bakes identically every
+    // run: no Math.random in render state (Style Bible determinism rule).
+    this.coverallsCanvas = makeCoverallsCanvas(makeLcg((opts.seed >>> 0) ^ 0x9e3779b9));
     this.coverallsTex = new CanvasTexture(this.coverallsCanvas);
     this.coverallsTex.anisotropy = 4;
     this.coverallsMat = new MeshStandardMaterial({
@@ -357,8 +401,10 @@ export class CrewSystem {
     // --- Shared materials (baseTextures vocabulary: metal helmet + accents). ---
     this.helmetMat = wornSteelMaterial();
     this.visorMat = accentEmissive(BASE_PALETTE.accent.lab, 1.8);
-    this.sashMat = accentEmissive(BASE_PALETTE.accent.hangar, 1.4);
-    this.beaconMat = accentEmissive(BASE_PALETTE.accent.hangar, 2.2);
+    // Per-role sash + beacon (all accentEmissive results are module-cached and
+    // shared, so this is a handful of cache lookups, not new GPU allocations).
+    this.sashMats = SASH_ROLE_COLORS.map((c) => accentEmissive(c, SASH_INTENSITY));
+    this.beaconMats = SASH_ROLE_COLORS.map((c) => accentEmissive(c, BEACON_INTENSITY));
 
     const built = buildSegments(opts.waypoints);
     this.segments = built.segments;
@@ -380,7 +426,8 @@ export class CrewSystem {
     const walkCount = count - idleCount;
 
     for (let i = 0; i < count; i++) {
-      const built = this.buildFigure();
+      const roleIndex = Math.floor(rng() * SASH_ROLE_COLORS.length);
+      const built = this.buildFigure(roleIndex);
       const walking = canWalk && i < walkCount;
       const member = walking
         ? this.makeWalker(built.actor, built.rig, rng)
@@ -395,7 +442,7 @@ export class CrewSystem {
    * torso with diagonal sash + chest beacon, and articulated arms/legs hung
    * from joint pivots. Feet at y=0; returns the actor root + rig joint handles.
    */
-  private buildFigure(): { actor: Group; rig: RigJoints } {
+  private buildFigure(roleIndex: number): { actor: Group; rig: RigJoints } {
     const actor = new Group();
     // body sits at pelvis height; legs hang below, trunk+arms rise above.
     const body = new Group();
@@ -415,14 +462,14 @@ export class CrewSystem {
     torso.castShadow = true;
     trunk.add(torso);
 
-    // Diagonal accent sash across the chest (bandolier strap).
-    const sash = new Mesh(this.sashGeo, this.sashMat);
+    // Diagonal accent sash across the chest (bandolier strap) — role color.
+    const sash = new Mesh(this.sashGeo, this.sashMats[roleIndex]!);
     sash.position.set(0, TORSO_LEN * SASH_Y_FRAC, TORSO_DEPTH * 0.5);
     sash.rotation.z = 0.5;
     trunk.add(sash);
 
-    // High-vis chest beacon on the front.
-    const beacon = new Mesh(this.beaconGeo, this.beaconMat);
+    // High-vis chest beacon on the front — matches the sash's role color.
+    const beacon = new Mesh(this.beaconGeo, this.beaconMats[roleIndex]!);
     beacon.position.set(0.012, TORSO_LEN * BEACON_Y_FRAC, TORSO_DEPTH * 0.52);
     trunk.add(beacon);
 
@@ -495,7 +542,17 @@ export class CrewSystem {
     const offset = this.totalLength > 0 ? rng() * this.totalLength : 0;
     const bobPhase = rng() * TAU;
     poseWalk(rig, (offset / STRIDE) * TAU);
-    return { actor, rig, walking: true, speed, offset, bobPhase, idlePos: ORIGIN };
+    return {
+      actor,
+      rig,
+      walking: true,
+      speed,
+      offset,
+      bobPhase,
+      idleYaw: 0,
+      turnPhase: 0,
+      idlePos: ORIGIN,
+    };
   }
 
   private makeIdle(
@@ -506,17 +563,31 @@ export class CrewSystem {
   ): CrewMember {
     const pos = waypoints.length > 0 ? waypoints[Math.floor(rng() * waypoints.length)]! : ORIGIN;
     actor.position.copy(pos);
-    actor.rotation.y = rng() * TAU;
+    const idleYaw = rng() * TAU;
+    actor.rotation.y = idleYaw;
     const bobPhase = rng() * TAU;
-    poseIdle(rig, 0, bobPhase);
-    return { actor, rig, walking: false, speed: 0, offset: 0, bobPhase, idlePos: pos };
+    const turnPhase = rng() * TAU;
+    poseIdle(rig, 0, bobPhase, this.reducedMotion);
+    return {
+      actor,
+      rig,
+      walking: false,
+      speed: 0,
+      offset: 0,
+      bobPhase,
+      idleYaw,
+      turnPhase,
+      idlePos: pos,
+    };
   }
 
   /**
    * Advance the crew by `dtMs` milliseconds. Allocation-free: only pre-built
    * joint rotations/positions are mutated. Walkers travel the loop with a full
    * stride cycle (legs/arms/bob/lean) and turn to face their travel direction;
-   * idle figures hold a relaxed stance with a gentle sway + breathing bob.
+   * idle figures hold a relaxed stance with a gentle sway + breathing bob and a
+   * slow turn-in-place (look-around). Idle motion is decoration → frozen when
+   * this.reducedMotion is set; walkers always travel (patrolling is state).
    */
   tick(dtMs: number): void {
     if (this.disposed || this.members.length === 0) return;
@@ -532,8 +603,14 @@ export class CrewSystem {
         if (total <= 1e-6) {
           // No path to walk — fall back to an idle pose so the figure still
           // looks alive instead of frozen mid-stride.
-          m.actor.position.y = m.idlePos.y + Math.sin(t * IDLE_BOB_FREQ + m.bobPhase) * IDLE_BOB_AMP;
-          poseIdle(m.rig, t, m.bobPhase);
+          if (this.reducedMotion) {
+            m.actor.position.y = m.idlePos.y;
+            poseIdle(m.rig, 0, m.bobPhase, true);
+          } else {
+            m.actor.position.y =
+              m.idlePos.y + Math.sin(t * IDLE_BOB_FREQ + m.bobPhase) * IDLE_BOB_AMP;
+            poseIdle(m.rig, t, m.bobPhase, false);
+          }
           continue;
         }
         const d = t * m.speed + m.offset; // continuous distance (monotonic phase)
@@ -559,8 +636,20 @@ export class CrewSystem {
         const actor = m.actor;
         actor.position.x = m.idlePos.x;
         actor.position.z = m.idlePos.z;
-        actor.position.y = m.idlePos.y + Math.sin(t * IDLE_BOB_FREQ + m.bobPhase) * IDLE_BOB_AMP;
-        poseIdle(m.rig, t, m.bobPhase);
+        if (this.reducedMotion) {
+          // Decoration frozen: stand still at the planted heading + rest pose.
+          actor.position.y = m.idlePos.y;
+          actor.rotation.y = m.idleYaw;
+          poseIdle(m.rig, 0, m.bobPhase, true);
+        } else {
+          actor.position.y = m.idlePos.y + Math.sin(t * IDLE_BOB_FREQ + m.bobPhase) * IDLE_BOB_AMP;
+          // Turn-in-place: slow two-harmonic look-around about the base heading.
+          actor.rotation.y =
+            m.idleYaw +
+            Math.sin(t * IDLE_TURN_FREQ_A + m.turnPhase) * IDLE_TURN_AMP_A +
+            Math.sin(t * IDLE_TURN_FREQ_B + m.turnPhase) * IDLE_TURN_AMP_B;
+          poseIdle(m.rig, t, m.bobPhase, false);
+        }
       }
     }
   }
@@ -615,7 +704,7 @@ function poseWalk(rig: RigJoints, phase: number): void {
  * Pose an idle figure at time `t`: relaxed stance (slight leg spread, resting
  * arms) with a gentle lateral sway + faint forward lean. Pure scalar mutation.
  */
-function poseIdle(rig: RigJoints, t: number, bobPhase: number): void {
+function poseIdle(rig: RigJoints, t: number, bobPhase: number, reduced: boolean): void {
   rig.hipL.rotation.x = 0.05;
   rig.hipR.rotation.x = -0.05;
   rig.kneeL.rotation.x = KNEE_REST;
@@ -625,5 +714,6 @@ function poseIdle(rig: RigJoints, t: number, bobPhase: number): void {
   rig.elbowL.rotation.x = ELBOW_REST;
   rig.elbowR.rotation.x = ELBOW_REST;
   rig.trunk.rotation.x = 0.04;
-  rig.trunk.rotation.z = Math.sin(t * IDLE_SWAY_FREQ + bobPhase) * IDLE_SWAY_AMP;
+  // Lateral breathing sway is decoration → flat when motion is reduced.
+  rig.trunk.rotation.z = reduced ? 0 : Math.sin(t * IDLE_SWAY_FREQ + bobPhase) * IDLE_SWAY_AMP;
 }
