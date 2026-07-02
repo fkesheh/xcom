@@ -19,7 +19,7 @@
 
 import type { Grid, TileType, Vec2 } from "./types";
 import type { Rng } from "./rng";
-import type { Legend, TerrainBlock } from "./terrain";
+import type { Legend, TerrainBlock, TerrainTheme } from "./terrain";
 import {
   DROPSHIP_PREFAB,
   GROUND_INDEX,
@@ -512,10 +512,20 @@ export function generateMap(rng: Rng, opts: GenerateMapOptions = {}): GeneratedM
   const width = snapDim(opts.width);
   const height = snapDim(opts.height);
 
-  // (a) Theme — explicit id when valid, else a seeded pick.
+  // (a) Theme resolution. An explicit id MUST resolve — an unknown one throws
+  //     rather than silently falling through to a random theme (which would also
+  //     diverge the rng stream). Only when no id is given do we seed-pick from the
+  //     random-eligible pool (special themes excluded).
   const ids = themeIds();
-  const requested = opts.themeId !== undefined ? getTheme(opts.themeId) : undefined;
-  const theme = requested ?? getTheme(rng.pick(ids) ?? "farmland") ?? getTheme(ids[0] ?? "farmland");
+  let theme: TerrainTheme | undefined;
+  if (opts.themeId !== undefined) {
+    theme = getTheme(opts.themeId);
+    if (!theme) {
+      throw new Error(`generateMap: unknown terrain theme "${opts.themeId}"`);
+    }
+  } else {
+    theme = getTheme(rng.pick(ids) ?? "farmland") ?? getTheme(ids[0] ?? "farmland");
+  }
   if (!theme) throw new Error("no terrain themes available");
 
   // (b) One palette + legend shared by theme blocks AND prefabs.

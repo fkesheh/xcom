@@ -1,10 +1,12 @@
 /**
  * Facility INTERIOR dioramas for the "enter facility" camera dive. Each of the
- * seven roles is a dense, textured, sculpted diorama the camera flies INTO and
+ * eight roles is a dense, textured, sculpted diorama the camera flies INTO and
  * reads as a real room: LAB (research vat + server racks), COMMAND (holo war
  * table + console arc), WORKSHOP (gantry + robotic arm + forge), BARRACKS
  * (stacked bunk beds + lockers), HANGAR (interceptor on a pad + crane), RADAR
- * (lathed dish on a mast + antennas), REACTOR (pulsing core + conduits).
+ * (lathed dish on a mast + antennas), REACTOR (pulsing core + conduits),
+ * CONTAINMENT (sealed holding cells + neutralization console — a modest
+ * treatment relative to the other seven).
  *
  * ANTI-BLOB CORE: every surface that was a flat color box is now a PROCEDURAL
  * TEXTURE + NORMAL MAP from baseTextures — riveted metal-panel walls/racks,
@@ -104,6 +106,7 @@ const ACCENT: Record<FacilityRole, AccentSet> = {
   hangar: makeAccent("hangar"),
   radar: makeAccent("radar"),
   reactor: makeAccent("reactor"),
+  containment: makeAccent("containment"),
 };
 
 /**
@@ -303,6 +306,13 @@ const COOLING_TANK = new CylinderGeometry(0.36, 0.36, 1.5, 18);
 const COOLING_CAP = new CylinderGeometry(0.38, 0.36, 0.1, 18);
 const REACTOR_CONSOLE = bevelBox(0.9, 0.9, 0.5, 0.025);
 const WARN_STRIPE = new BoxGeometry(0.45, 0.13, 0.05);
+
+// CONTAINMENT — sealed holding cells + a facing control console. Modest reuse
+// of the panel/bevel vocabulary rather than a bespoke sculpted set.
+const CELL_BODY = bevelBox(0.6, 1.7, 0.5, 0.02);
+tileUV(CELL_BODY, 1.2, 2.2);
+const CELL_FIELD = new PlaneGeometry(0.42, 1.3);
+const CELL_CONSOLE = bevelBox(0.9, 0.9, 0.5, 0.025);
 
 // ---------------------------------------------------------------------------
 // Composition helpers
@@ -1017,9 +1027,63 @@ function buildReactorInterior(): Group {
 }
 
 /**
- * Build a facility INTERIOR diorama for the given role. Each of the seven roles
+ * Build the CONTAINMENT interior — sickly toxic-green holding block. A MODEST
+ * treatment (matching the bay diorama in baseFacilities.ts): three sealed
+ * holding cells along the back wall, each with a pulsing neutralization-field
+ * pane and a status beacon, a control console facing them, hazard floor
+ * stripes, and the standard prop/lighting dressing shared with the other
+ * rooms.
+ */
+function buildContainmentInterior(): Group {
+  const g = new Group();
+  const hex = BASE_PALETTE.accent.containment;
+  const accent = ACCENT.containment;
+  addShell(g);
+
+  // Three sealed holding cells along the back wall — the room's signature row.
+  const cellX = [-1.6, 0, 1.6];
+  for (const x of cellX) {
+    add(g, CELL_BODY, MAT.panelDark, [x, 0.85, -ROOM_D / 2 + 0.35]);
+    const field = add(g, CELL_FIELD, accent.glow, [x, 0.9, -ROOM_D / 2 + 0.61]);
+    field.userData.interiorPulse = true;
+    add(g, BEAD, accent.beacon, [x, 1.78, -ROOM_D / 2 + 0.35]);
+  }
+
+  // Control console facing the cells, with a status readout screen.
+  add(g, CELL_CONSOLE, MAT.panel, [0, 0.45, 1.1]);
+  const screen = add(g, BENCH_SCREEN, screenMaterial(hex, "HOLD"), [0, 0.86, 1.36]);
+  screen.userData.interiorScreen = true;
+
+  // Hazard warning-stripes along the back wall base (mirrors the reactor's
+  // convention, recolored to the containment accent).
+  for (let i = 0; i < 5; i++) {
+    const x = -1.6 + i * 0.8;
+    add(g, WARN_STRIPE, i % 2 === 0 ? accentEmissive(hex, 0.7) : MAT_PROPS.dark, [
+      x,
+      0.32,
+      -ROOM_D / 2 + 0.04,
+    ]);
+  }
+
+  // Overhead strip + accent wall work-light + floor beacon + corner pillar.
+  add(g, STRIP, MAT.stripLight, [0, ROOM_H - 0.2, 1.2]);
+  add(g, bevelBox(0.5, 0.16, 0.06, 0.02), accent.glow, [
+    ROOM_W / 2 - WALL_T / 2 - 0.04,
+    ROOM_H - 0.6,
+    0.4,
+  ]);
+  add(g, POST, accent.glow, [ROOM_W / 2 - 0.4, 0.75, -ROOM_D / 2 + 0.5], [1, 1.5, 1]);
+  add(g, BEAD, accent.beacon, [ROOM_W / 2 - 0.4, 1.5, -ROOM_D / 2 + 0.5]);
+  add(g, PILLAR, MAT.panel, [-ROOM_W / 2 + 0.28, ROOM_H / 2, ROOM_D / 2 - 0.28], [1, ROOM_H, 1]);
+
+  return g;
+}
+
+/**
+ * Build a facility INTERIOR diorama for the given role. Each of the eight roles
  * gets its own dense, textured, sculpted diorama (the LAB remains the hero; the
- * other six are detailed to the same quality). The returned Group is tagged
+ * other six are detailed to the same quality, and CONTAINMENT is deliberately
+ * modest). The returned Group is tagged
  * `userData.facilityRole`; animated accents self-tag (userData.interiorPulse /
  * interiorBlink / interiorScreen / interiorRotor) for the baseView frame loop.
  * Origin is at floor center (y = 0 is the floor surface); the front wall is open
@@ -1042,6 +1106,8 @@ export function buildFacilityInterior(role: FacilityRole): Group {
         return buildRadarInterior();
       case "reactor":
         return buildReactorInterior();
+      case "containment":
+        return buildContainmentInterior();
     }
   })();
   group.userData.facilityRole = role;

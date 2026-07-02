@@ -469,7 +469,17 @@ export type GameEvent =
   | { type: "objectiveDropped"; unitId: UnitId; label: string; target: Vec2 }
   | { type: "turnStarted"; faction: Faction; turn: number }
   | { type: "turnEnded"; faction: Faction }
-  | { type: "gameOver"; status: BattleStatus }
+  | {
+      type: "gameOver";
+      status: BattleStatus;
+      /**
+       * Enemy units left still {@link Unit.unconscious} (alive, hp > 0) at a
+       * PLAYER victory, taken as captures. Populated only on a player win; the
+       * game layer turns each into a campaign captive (see MissionCapture). Rank
+       * defaults to "soldier" when the unit/template omits one.
+       */
+      captures?: readonly { templateId: string; rank: EnemyRank }[];
+    }
   | { type: "itemThrown"; unitId: UnitId; itemId: string; from: Vec2; to: Vec2; tuLeft: number }
   | {
       type: "scanActivated";
@@ -482,6 +492,36 @@ export type GameEvent =
   | { type: "minePlaced"; unitId: UnitId; itemId: string; pos: Vec2; tuLeft: number }
   | { type: "blastDetonated"; itemId: string; center: Vec2; radius: number; hits: BlastHit[] }
   | { type: "itemUsed"; unitId: UnitId; targetId: UnitId; itemId: string; healed: number; tuLeft: number }
+  | {
+      /** A stun-rod melee strike landed, building STUN on a hostile target. */
+      type: "stunStrike";
+      unitId: UnitId;
+      targetId: UnitId;
+      itemId: string;
+      /** STUN points this strike added to the target. */
+      stun: number;
+      /** Target's total accumulated {@link Unit.stun} after the strike. */
+      targetStun: number;
+      /** True when this strike dropped the target {@link Unit.unconscious}. */
+      knockedOut: boolean;
+      tuLeft: number;
+    }
+  | {
+      /** An {@link Unit.unconscious} unit's stun decayed below its hp and it woke. */
+      type: "woke";
+      unitId: UnitId;
+    }
+  | {
+      /**
+       * A surviving unit's accumulated STUN reached its (post-damage) hp and it
+       * fell {@link Unit.unconscious}. Symmetric to `woke`: gunfire/blasts that
+       * push hp down to or below existing stun knock the unit out, mirroring the
+       * stun-rod rule. Distinct from `stunStrike` (whose own `knockedOut` flag
+       * covers the rod path); this fires for damage-induced knockouts.
+       */
+      type: "knockedOut";
+      unitId: UnitId;
+    }
   | { type: "panicked"; unitId: UnitId; behavior: PanicBehavior }
   | { type: "moraleChanged"; unitId: UnitId; morale: number }
   | { type: "stanceChanged"; unitId: UnitId; stance: UnitStance; tuLeft: number }

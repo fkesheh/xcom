@@ -313,6 +313,25 @@ export interface CampaignCaptive {
 }
 
 /**
+ * The debrief-facing outcome of a mission's captive intake, computed at intake
+ * time (before any interrogation research consumes a freshly-secured captive).
+ * Reading THIS instead of diffing the captive roster keeps the debrief tally
+ * accurate and lets the UI distinguish "no containment facility" from
+ * "containment full".
+ */
+export interface CaptiveIntakeReport {
+  /** Aliens newly secured into containment this mission (rank + species template). */
+  secured: { rank: CaptiveRank; templateId: string }[];
+  /** Captures lost this mission — either no facility, or capacity overflow. */
+  lost: number;
+  /** Whether a built Alien Containment facility existed when the intake resolved. */
+  hadContainment: boolean;
+  /** Total captives held after intake, and the containment capacity (for "N/8"). */
+  held: number;
+  capacity: number;
+}
+
+/**
  * The alien headquarters, seeded on land at campaign start. Hidden until an
  * interrogation (or the 5-operations fallback milestone) reveals it, after which
  * a transport can launch the alienBaseAssault final mission at its location.
@@ -377,4 +396,10 @@ export interface CampaignState {
   captives?: CampaignCaptive[];
   /** The alien HQ (seeded on land at campaign start; revealed via interrogation or the fallback milestone). */
   alienHq?: AlienHq;
+  /**
+   * Outcome of the most recent mission's captive intake, set by recordMissionResult
+   * for the debrief to read. Transient/session-scoped: recomputed each mission and
+   * not reconstructed on load (the debrief only shows immediately after a mission).
+   */
+  lastCaptiveIntake?: CaptiveIntakeReport;
 }

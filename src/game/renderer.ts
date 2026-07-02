@@ -43,10 +43,13 @@ import {
   PlaneGeometry,
   Raycaster,
   RingGeometry,
+  CanvasTexture,
   Scene,
   Shape,
   ShapeGeometry,
   SphereGeometry,
+  Sprite,
+  SpriteMaterial,
   SRGBColorSpace,
   Vector2,
   Vector3,
@@ -123,6 +126,11 @@ const SCRATCH_COLOR = new Color();
 const BLACK = new Color(0, 0, 0);
 /** Reddened emissive tint blended over a hit figure for the damage flash. */
 const HIT_RED = new Color(1, 0.08, 0.08);
+/** Electric-cyan emissive tint blended over a stunned figure (distinct from the
+ *  red damage flash — a non-lethal takedown reads differently from a bullet hit). */
+const STUN_CYAN = new Color(0.35, 0.9, 1);
+/** Desaturated grey a KO'd (unconscious, captured) figure is pulled toward. */
+const KO_GREY = new Color(0.32, 0.34, 0.4);
 /** World-up constant: shared by the camera pan/orbit hot paths instead of a per-frame `new Vector3(0,1,0)`. */
 const UP = new Vector3(0, 1, 0);
 
@@ -223,6 +231,10 @@ const MOVE_TWEEN_MS = 220;
 // Hit-reaction flinch + ragdoll-collapse timing (presentation-only).
 const HIT_REACT_MS = 200;
 const DEATH_COLLAPSE_MS = 420;
+/** Stun-rod strike flash duration (a snappy electric jolt). */
+const STUN_REACT_MS = 240;
+/** How long a floating stun number rises and fades above the struck target. */
+const STUN_FLOAT_MS = 900;
 // Screen-shake envelope: impulses add to a decaying energy value (exp decay).
 const SHAKE_DECAY_RATE = 12; // ~150ms fade for a shot, ~300ms for a blast
 const SHAKE_MAX = 0.2;
@@ -329,6 +341,28 @@ function cloneFeatureMaterials(obj: Object3D): FeaturePart[] {
 }
 
 /** Promise-based tween: drives `onUpdate(t in [0,1])` for `ms`, then resolves. */
+/** Rasterize a short label to a CanvasTexture for a billboarded sprite (floating
+ *  combat readouts). Bold, outlined text so it reads against any battlescape. */
+function makeTextTexture(text: string, fill: string): CanvasTexture {
+  const canvas = document.createElement("canvas");
+  canvas.width = 256;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d");
+  if (ctx) {
+    ctx.font = "bold 44px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = "rgba(2,6,12,0.9)";
+    ctx.strokeText(text, 128, 34);
+    ctx.fillStyle = fill;
+    ctx.fillText(text, 128, 34);
+  }
+  const texture = new CanvasTexture(canvas);
+  texture.colorSpace = SRGBColorSpace;
+  return texture;
+}
+
 function tween(ms: number, onUpdate: (t: number) => void): Promise<void> {
   return new Promise<void>((resolve) => {
     const start = performance.now();
@@ -347,6 +381,12 @@ interface UnitView {
   character: Group; // procedural figure, rotated to face the unit's Dir8
   hpBar: Group; // billboarded toward the camera
   hpFill: Mesh;
+  /** Lazily-captured base material tones, used to desaturate then restore a
+   *  KO'd (unconscious) figure without cumulative drift across syncs. */
+  koParts?: { mat: MeshStandardMaterial; color: Color; emissiveIntensity: number }[];
+  /** Whether the figure is currently rendered in its unconscious (laid-down,
+   *  dimmed) state — toggled in applyUnconscious so restore runs exactly once. */
+  ko?: boolean;
 }
 
 /** One coloured material of a tile feature, with its lit base tones (for fog). */
@@ -1416,6 +1456,59 @@ export class Renderer {
     view.hpBar.position.y = kneel ? HP_BAR_Y_KNEEL : HP_BAR_Y;
   }
 
+  /** Capture a figure's per-material base tones once so a KO desaturation can be
+   *  applied and later restored exactly (materials are owned per unit view). */
+  private captureKoParts(view: UnitView): void {
+    if (view.koParts) return;
+    const parts: { mat: MeshStandardMaterial; color: Color; emissiveIntensity: number }[] = [];
+    view.character.traverse((node) => {
+      if (!(node instanceof Mesh)) return;
+      const src = node.material;
+      const mats: MeshStandardMaterial[] = Array.isArray(src)
+        ? src.filter((x): x is MeshStandardMaterial => x instanceof MeshStandardMaterial)
+        : src instanceof MeshStandardMaterial
+          ? [src]
+          : [];
+      for (const mat of mats) {
+        if (!parts.some((p) => p.mat === mat)) {
+          parts.push({ mat, color: mat.color.clone(), emissiveIntensity: mat.emissiveIntensity });
+        }
+      }
+    });
+    view.koParts = parts;
+  }
+
+  /**
+   * Reflect a unit's unconscious (stunned-out) state on its figure: lay the body
+   * collapsed onto the ground, sink it slightly, hide the HP bar, and desaturate
+   * its materials so a captured alien reads clearly as neutralized. Restores the
+   * upright, full-colour figure exactly once if the unit wakes ({@link woke}).
+   * Idempotent — driven every sync, but material edits only fire on transition.
+   */
+  private applyUnconscious(view: UnitView, unit: Unit): void {
+    const ko = unit.unconscious === true && unit.alive;
+    if (ko) {
+      this.captureKoParts(view);
+      view.character.rotation.x = 1.42; // folded onto the ground, like a downed body
+      view.root.position.y = -0.04;
+      view.hpBar.visible = false;
+      for (const p of view.koParts ?? []) {
+        p.mat.color.copy(p.color).lerp(KO_GREY, 0.6);
+        p.mat.emissiveIntensity = p.emissiveIntensity * 0.15;
+      }
+      view.ko = true;
+    } else if (view.ko) {
+      view.character.rotation.x = 0;
+      view.root.position.y = 0;
+      view.hpBar.visible = true;
+      for (const p of view.koParts ?? []) {
+        p.mat.color.copy(p.color);
+        p.mat.emissiveIntensity = p.emissiveIntensity;
+      }
+      view.ko = false;
+    }
+  }
+
   /** Tiles any living player can currently see, as a set of cell indices. */
   private computeVisibleCells(state: BattleState): Set<number> {
     const out = new Set<number>();
@@ -1500,6 +1593,9 @@ export class Renderer {
       this.faceView(view, unit.facing);
       this.applyStance(view, unit);
       this.updateHp(view, unit);
+      // Unconscious (stunned-out) units lie collapsed + desaturated; runs after
+      // face/stance/position so it can override the figure's pitch and y-offset.
+      this.applyUnconscious(view, unit);
       const shown = unit.alive && (unit.faction === "player" || visEnemies.has(unit.id));
       view.root.visible = shown;
     }
@@ -1946,6 +2042,81 @@ export class Renderer {
     view.root.scale.setScalar(1);
     view.character.rotation.x = 0;
     if (this.selectedId === ev.unitId) this.setSelected(null);
+  }
+
+  /**
+   * Stun-rod strike feedback on the target: a quick electric-cyan emissive flush
+   * over the figure plus a jittery shake (the "electric jolt"), and a floating
+   * stun number that rises and fades above its head — styled in electric cyan so
+   * it reads distinctly from the red damage flash. Presentation-only. A knockout
+   * lets the ensuing syncFromState collapse + desaturate the (now unconscious)
+   * figure via {@link applyUnconscious}, so this call just sells the hit.
+   */
+  async playStunStrike(ev: Extract<GameEvent, { type: "stunStrike" }>): Promise<void> {
+    const view = this.unitViews.get(ev.targetId);
+    if (!view || !view.root.visible) return;
+    this.floatStunNumber(
+      new Vector3(view.root.position.x, HP_BAR_Y + 0.3, view.root.position.z),
+      ev.stun,
+      ev.knockedOut === true,
+    );
+    this.addShake(ev.knockedOut ? 0.1 : 0.05);
+
+    const saved: { mat: MeshStandardMaterial; emissive: Color; intensity: number }[] = [];
+    view.character.traverse((node) => {
+      if (!(node instanceof Mesh)) return;
+      const src = node.material;
+      const mats: MeshStandardMaterial[] = Array.isArray(src)
+        ? src.filter((x): x is MeshStandardMaterial => x instanceof MeshStandardMaterial)
+        : src instanceof MeshStandardMaterial
+          ? [src]
+          : [];
+      for (const mat of mats) {
+        if (!saved.some((s) => s.mat === mat)) {
+          saved.push({ mat, emissive: mat.emissive.clone(), intensity: mat.emissiveIntensity });
+        }
+      }
+    });
+    const baseZ = view.character.rotation.z;
+    await tween(STUN_REACT_MS, (t) => {
+      const flash = Math.max(0, 1 - t);
+      // Buzzing electric jitter: a fast sign-flipping wobble that decays out.
+      view.character.rotation.z = baseZ + Math.sin(t * 48) * 0.12 * flash;
+      for (const s of saved) {
+        s.mat.emissive.copy(s.emissive).lerp(STUN_CYAN, flash);
+        s.mat.emissiveIntensity = s.intensity + flash * 2.4;
+      }
+    });
+    // Restore emissive; leave rotation.z at the KO-agnostic base (syncFromState
+    // re-derives the figure's transform, and applyUnconscious owns the collapse).
+    for (const s of saved) {
+      s.mat.emissive.copy(s.emissive);
+      s.mat.emissiveIntensity = s.intensity;
+    }
+    view.character.rotation.z = baseZ;
+  }
+
+  /** Spawn a short-lived billboarded number sprite that rises and fades above a
+   *  world point. Used for the stun readout; cyan-tinted (brighter on a KO) so it
+   *  never reads as the (never-drawn) damage number. Self-disposes on completion. */
+  private floatStunNumber(worldPos: Vector3, value: number, knockedOut: boolean): void {
+    const label = knockedOut ? `${value} ⚡ KO` : `+${value}`;
+    const texture = makeTextTexture(label, knockedOut ? "#b8ffff" : "#8fe4ff");
+    const material = new SpriteMaterial({ map: texture, transparent: true, depthTest: false });
+    const sprite = new Sprite(material);
+    sprite.scale.set(knockedOut ? 2.0 : 1.4, knockedOut ? 0.5 : 0.35, 1);
+    sprite.position.copy(worldPos);
+    sprite.renderOrder = 999;
+    this.fxGroup.add(sprite);
+    const startY = worldPos.y;
+    void tween(STUN_FLOAT_MS, (t) => {
+      sprite.position.y = startY + t * 1.1;
+      material.opacity = 1 - t * t;
+    }).then(() => {
+      this.fxGroup.remove(sprite);
+      texture.dispose();
+      material.dispose();
+    });
   }
 
   /**

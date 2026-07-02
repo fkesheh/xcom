@@ -90,6 +90,7 @@ const ACCENT: Record<FacilityRole, AccentSet> = {
   hangar: makeAccent("hangar"),
   radar: makeAccent("radar"),
   reactor: makeAccent("reactor"),
+  containment: makeAccent("containment"),
 };
 
 /**
@@ -166,6 +167,9 @@ export function buildFacilityModel(role: FacilityRole): Group {
       break;
     case "reactor":
       buildReactor(group);
+      break;
+    case "containment":
+      buildContainment(group);
       break;
     default:
       buildFallback(group, role);
@@ -374,6 +378,25 @@ function buildReactor(group: Group): void {
     add(group, GEO.box, MAT.steel, [sx * 0.24, 0.06, 0], [0.12, 0.12, 0.38]);
   }
   addBeacon(group, "reactor", 0, 1.14, -0.36);
+}
+
+/** Containment (toxic green): a row of sealed holding cells against the back
+ *  wall, each with a glowing neutralization-field bar, facing a small control
+ *  console (1x1 bay, modest — reuses the shared primitives only). */
+function buildContainment(group: Group): void {
+  const accent = ACCENT.containment;
+  addPad(group);
+  addHalo(group, accent, 0.3);
+  // Three sealed cells: steel housing + a glowing field bar + a status light.
+  for (let i = -1; i <= 1; i++) {
+    add(group, GEO.box, MAT.steel, [i * 0.3, 0.22, -0.24], [0.24, 0.44, 0.2]);
+    add(group, GEO.box, accent.glow, [i * 0.3, 0.34, -0.13], [0.2, 0.05, 0.02]);
+    add(group, GEO.dot, accent.beacon, [i * 0.3, 0.46, -0.24]);
+  }
+  // Control console facing the cells.
+  add(group, GEO.box, MAT.steel, [0, 0.12, 0.24], [0.3, 0.22, 0.16]);
+  add(group, GEO.box, accent.glow, [0, 0.2, 0.18], [0.22, 0.06, 0.1]);
+  addBeacon(group, "containment", 0.4, 0.5, 0.36);
 }
 
 /** Unknown/default role: a compact command-style beacon on a steel plinth. */

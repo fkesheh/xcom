@@ -35,6 +35,9 @@ export const BASE_PALETTE = {
     hangar: 0x50e06a,
     radar: 0xc060ff,
     reactor: 0xffce5a,
+    /** Sickly acid-green biohazard glow for the containment cells — a colder,
+     *  more toxic yellow-green than hangar's clean emerald. */
+    containment: 0xb8ff3a,
   },
   /** Danger / offline / low-power. */
   danger: 0xe05060,

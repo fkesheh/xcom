@@ -1,13 +1,23 @@
 import type {
   CampaignResources,
   CampaignState,
+  CaptiveRank,
   MissionContext,
   MissionType,
   OperationPlan,
   OperationTheme,
   UfoContact,
+  UfoType,
 } from "./types";
-import { campaignMissionSeed, difficultyConfig, hasBaseFacility } from "./storage";
+import {
+  campaignMissionSeed,
+  canLaunchFinalAssault,
+  difficultyConfig,
+  hasBaseFacility,
+  ALIEN_BASE_THEME,
+  ALIEN_HQ_CREW_SIZE,
+  UFO_CREW_PROFILES,
+} from "./storage";
 
 const THEMES: readonly OperationTheme[] = ["farmland", "urban", "desert", "arctic", "jungle", "forest"];
 const CODE_A = ["Silent", "Ash", "Iron", "Night", "Glass", "Violet", "Black", "Cold"] as const;
@@ -58,6 +68,14 @@ function rewardForMission(
         elerium: 1,
         alienData: 1 + Math.floor(enemyCount / 4),
       };
+    case "alienBaseAssault":
+      // The decapitating strike on the HQ yields the campaign's richest haul.
+      return {
+        credits: 500 + missionNumber * 30,
+        alloys: 30 + enemyCount * 2,
+        elerium: 20 + Math.floor(missionNumber / 2),
+        alienData: 12 + enemyCount,
+      };
     case "crashSite":
     default:
       return {
@@ -75,8 +93,13 @@ function durationFor(enemyCount: number, contactStrength: number): number {
   return BASE_OPERATION_DURATION_HOURS + enemyBurden + contactBurden;
 }
 
-/** Mission type this contact seeds when assaulted (defaults to a UFO crash-site recovery). */
-export function determineMissionType(campaign: CampaignState): MissionType {
+/**
+ * Mission type this operation runs. An explicit override wins (used to launch the
+ * final "alienBaseAssault"); otherwise it is the current contact's mission type,
+ * defaulting to a UFO crash-site recovery.
+ */
+export function determineMissionType(campaign: CampaignState, override?: MissionType): MissionType {
+  if (override) return override;
   return campaign.ufoContact?.missionType ?? "crashSite";
 }
 
@@ -88,6 +111,8 @@ export function objectiveFor(missionType: MissionType): string {
       return "Rescue civilians and neutralize the attackers.";
     case "baseDefense":
       return "Repel the base assault.";
+    case "alienBaseAssault":
+      return "Breach the alien headquarters, eliminate its command crew, and end the invasion.";
     case "crashSite":
     default:
       return "Recover the UFO power source, extract it to the dropship, or neutralize all contacts.";
@@ -109,6 +134,7 @@ function missionRegion(
   campaign: CampaignState,
 ): string {
   if (missionType === "baseDefense") return campaign.base.region;
+  if (missionType === "alienBaseAssault") return campaign.alienHq?.location.region ?? campaign.base.region;
   return contact?.region ?? campaign.base.region;
 }
 
@@ -202,6 +228,13 @@ function briefingFor(ctx: BriefingContext): string {
         body +
         "Hold the line and repel the base assault."
       );
+    case "alienBaseAssault":
+      return (
+        `The alien headquarters has been located in ${ctx.region}. ` +
+        `Operation ${ctx.codename} is the decapitating strike that ends the war. ` +
+        body +
+        "The HQ is defended by an elite garrison led by a commander. Breach it and eliminate the command crew."
+      );
     case "crashSite":
     default:
       return (
@@ -217,8 +250,29 @@ function briefingFor(ctx: BriefingContext): string {
   }
 }
 
-export function generateOperation(campaign: CampaignState): OperationPlan {
-  const missionType = determineMissionType(campaign);
+/**
+ * Whether an operation has a reachable deploy site given the campaign's current
+ * contact state. The final alien-base assault launches from the revealed HQ,
+ * INDEPENDENT of any UFO contact, so it bypasses every contact guard — including
+ * the "crash lost at sea" refusal that would otherwise silently swallow the
+ * ASSAULT ALIEN HQ launch when a stale over-ocean contact is present. Every other
+ * mission needs a crashed (over land) or landed contact to deploy against.
+ */
+export function canDeployToOperationSite(campaign: CampaignState, operation: OperationPlan): boolean {
+  if (operation.missionType === "alienBaseAssault") return true;
+  const contact = campaign.ufoContact;
+  const status = contact?.status;
+  if (status !== "crashed" && status !== "landed") return false;
+  if (status === "crashed" && contact?.overOcean === true) return false;
+  return true;
+}
+
+export function generateOperation(
+  campaign: CampaignState,
+  missionTypeOverride?: MissionType,
+): OperationPlan {
+  const missionType = determineMissionType(campaign, missionTypeOverride);
+  if (missionType === "alienBaseAssault") return generateAssaultOperation(campaign);
   const missionNumber = campaign.missionsAttempted + 1;
   const contact = missionContact(campaign);
   const missionSeed = contact?.missionSeed ?? campaignMissionSeed(campaign);
@@ -278,4 +332,117 @@ export function generateOperation(campaign: CampaignState): OperationPlan {
     }),
     objective: objectiveFor(missionType),
   };
+}
+
+/**
+ * Build the final alien-base assault at the revealed HQ. Unlike a UFO recovery it
+ * has no contact: the target is `campaign.alienHq.location`, the map uses the
+ * ALIEN_BASE_THEME, and the crew is a fixed elite garrison of ALIEN_HQ_CREW_SIZE
+ * (guaranteed to field a commander + leader — see {@link alienBaseCrewRanks}).
+ */
+function generateAssaultOperation(campaign: CampaignState): OperationPlan {
+  const missionNumber = campaign.missionsAttempted + 1;
+  const missionSeed = campaignMissionSeed(campaign);
+  const a = (missionSeed >>> 5) ^ missionNumber;
+  const b = (missionSeed >>> 17) ^ (missionNumber * 31);
+  const enemyCount = difficultyConfig(campaign).alienHqCrewSize;
+  const region = missionRegion("alienBaseAssault", undefined, campaign);
+  const codename = `${pick(CODE_A, a)} ${pick(CODE_B, b)}`;
+  const reward = rewardForMission(missionNumber, enemyCount, "alienBaseAssault");
+  const durationHours = durationFor(enemyCount, 4);
+  const size = 38;
+  return {
+    missionNumber,
+    missionSeed,
+    codename,
+    region,
+    themeId: ALIEN_BASE_THEME,
+    missionType: "alienBaseAssault",
+    missionContext: undefined,
+    enemyCount,
+    durationHours,
+    width: size,
+    height: size,
+    reward,
+    briefing: briefingFor({
+      missionType: "alienBaseAssault",
+      contact: undefined,
+      codename,
+      region,
+      enemyCount,
+      themeId: ALIEN_BASE_THEME,
+      durationHours,
+      facilityIntel: [],
+    }),
+    objective: objectiveFor("alienBaseAssault"),
+  };
+}
+
+/**
+ * Create the final-assault operation IF it can be launched (HQ revealed and the
+ * assault unlocked via commanderInterrogation or the fallback milestone). Returns
+ * undefined otherwise. This is the entry point the UI calls to start the assault.
+ */
+export function launchFinalAssault(campaign: CampaignState): OperationPlan | undefined {
+  if (!canLaunchFinalAssault(campaign)) return undefined;
+  return generateOperation(campaign, "alienBaseAssault");
+}
+
+/** Deterministic PRNG (mulberry32) so crew composition is reproducible for a seed. */
+function crewRng(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Crew rank composition for a crashed/landed UFO, driven by its UFO_CREW_PROFILE.
+ * A crew always fields rank-and-file soldiers; profiles with `hasLeader` promote
+ * one slot to a leader, and `commanderChance` (seeded) may add a commander. This
+ * is the campaign layer's source of truth for which ranks a UFO fields, so
+ * captures of leaders/commanders become possible in normal play.
+ */
+export function ufoCrewRanks(ufoType: UfoType, seed: number, crewSize: number): CaptiveRank[] {
+  const size = Math.max(1, Math.floor(crewSize));
+  const ranks: CaptiveRank[] = new Array<CaptiveRank>(size).fill("soldier");
+  const profile = UFO_CREW_PROFILES[ufoType];
+  const rng = crewRng(seed ^ 0x1b873593);
+  let slot = 0;
+  if (profile.commanderChance > 0 && rng() < profile.commanderChance && slot < size) {
+    ranks[slot++] = "commander";
+  }
+  if (profile.hasLeader && slot < size) {
+    ranks[slot++] = "leader";
+    // A navigator adds mid-rank variety on larger crewed UFOs. Rank-and-file
+    // profiles (scouts) stay all soldiers.
+    if (size >= 5 && slot < size) {
+      ranks[slot++] = "navigator";
+    }
+  }
+  return ranks;
+}
+
+/**
+ * Crew rank composition for the alien-base assault: `crewSize` aliens (defaults to
+ * the commander-difficulty ALIEN_HQ_CREW_SIZE) that ALWAYS include exactly one
+ * commander and at least one leader, the rest a mix of navigators and soldiers.
+ * The size is difficulty-scaled (see DifficultyConfig.alienHqCrewSize), so callers
+ * pass the operation's enemyCount to keep the spawned crew and the plan in lockstep.
+ * Deterministic in the seed.
+ */
+export function alienBaseCrewRanks(seed: number, crewSize: number = ALIEN_HQ_CREW_SIZE): CaptiveRank[] {
+  const size = Math.max(2, Math.floor(crewSize));
+  const ranks: CaptiveRank[] = new Array<CaptiveRank>(size).fill("soldier");
+  ranks[0] = "commander";
+  ranks[1] = "leader";
+  const rng = crewRng(seed ^ 0xcc9e2d51);
+  // Sprinkle a couple of navigators through the rank-and-file for variety.
+  for (let i = 2; i < size; i++) {
+    if (rng() < 0.3) ranks[i] = "navigator";
+  }
+  return ranks;
 }

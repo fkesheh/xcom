@@ -17,6 +17,7 @@ import type {
   BattleState,
   Command,
   Dir8,
+  EnemyRank,
   Faction,
   GameEvent,
   Item,
@@ -30,7 +31,7 @@ import type {
   UnitStance,
   Vec2,
 } from "./types";
-import { DIR8_VECTORS, MORALE, MOTION_SCANNER, PROX_MINE, PSI, SMOKE, STANCE, TU_COST } from "./types";
+import { DIR8_VECTORS, MORALE, MOTION_SCANNER, PROX_MINE, PSI, SMOKE, STANCE, STUN, TU_COST } from "./types";
 import { cellIndex, destroyCoverAt, moveCost } from "./grid";
 import { blocksMove, inBounds } from "./grid";
 import { canSee, dir8Towards, lineOfFire, visibleEnemyIds, visibleTiles } from "./los";
@@ -98,12 +99,17 @@ export function checkVictory(state: BattleState): GameEvent | null {
   if (state.status !== "playing") return null;
   if (state.objective?.extracted) {
     state.status = "player_win";
-    return { type: "gameOver", status: "player_win" };
+    return playerWinEvent(state);
   }
-  const enemiesAlive = state.units.some((u) => u.faction === "enemy" && u.alive);
+  // An unconscious hostile is neutralized: it takes no turns and cannot fight, so
+  // a battle where every surviving enemy is stunned out is already won (the KO'd
+  // aliens become captures below). Only a conscious, living enemy keeps it going.
+  const enemiesActive = state.units.some(
+    (u) => u.faction === "enemy" && u.alive && !u.unconscious,
+  );
   const playersAlive = state.units.some((u) => u.faction === "player" && u.alive);
-  if (!enemiesAlive) {
-    // Wiping the hostiles wins any mission. For "recover" we also satisfy the
+  if (!enemiesActive) {
+    // Clearing the hostiles wins any mission. For "recover" we also satisfy the
     // objective (legacy behaviour); a "rescue" objective is won purely by
     // clearing the aliens — civilian survival is a score concern, not a trigger,
     // so its recover/extract flags stay untouched.
@@ -112,13 +118,72 @@ export function checkVictory(state: BattleState): GameEvent | null {
       state.objective.extracted = true;
     }
     state.status = "player_win";
-    return { type: "gameOver", status: "player_win" };
+    return playerWinEvent(state);
   }
   if (!playersAlive) {
     state.status = "enemy_win";
     return { type: "gameOver", status: "enemy_win" };
   }
   return null;
+}
+
+/**
+ * The `gameOver` player-win event, attaching `captures` ONLY when at least one
+ * enemy was taken unconscious — so a clean sweep with no captures emits the exact
+ * legacy `{ type, status }` shape (no empty array), keeping existing callers and
+ * event snapshots byte-for-byte unchanged.
+ */
+function playerWinEvent(state: BattleState): GameEvent {
+  const captures = collectCaptures(state);
+  return captures.length > 0
+    ? { type: "gameOver", status: "player_win", captures }
+    : { type: "gameOver", status: "player_win" };
+}
+
+/**
+ * Enemy units still {@link Unit.unconscious} (alive, hp > 0) at a player victory,
+ * shaped for the game-layer debrief (each becomes a MissionCapture). Rank falls
+ * back to "soldier" when the unit omits one. Deterministic: ascending unit id.
+ */
+export function collectCaptures(
+  state: BattleState,
+): { templateId: string; rank: EnemyRank }[] {
+  return state.units
+    .filter((u) => homeFaction(u) === "enemy" && u.alive && u.unconscious === true && u.hp > 0)
+    .sort((a, b) => a.id - b.id)
+    .map((u) => ({ templateId: u.templateId, rank: u.rank ?? "soldier" }));
+}
+
+/**
+ * A unit's HOME faction — the side it belongs to regardless of any active mind
+ * control. Mind control swaps `faction` to the controller's side and stashes the
+ * unit's home faction on `controlledByFaction`; capture eligibility keys off the
+ * home faction so a mind-controlled PLAYER soldier stunned while enthralled is
+ * never miscounted as an alien capture (and a player-controlled alien still is).
+ */
+function homeFaction(unit: Unit): Faction {
+  return unit.controlledByFaction ?? unit.faction;
+}
+
+/**
+ * Apply the damage-induced knockout rule to every unit: a living, conscious unit
+ * whose accumulated STUN has reached its current hp falls {@link Unit.unconscious}
+ * (mirroring the stun-rod threshold and the symmetric `stun < hp` wake rule). Only
+ * units carrying stun are considered, so legacy stun-free battles are untouched.
+ * Returns a `knockedOut` event per newly-downed unit in ascending id order.
+ * Idempotent: already-unconscious units are skipped, so repeated calls are safe.
+ */
+function applyStunKnockouts(state: BattleState): GameEvent[] {
+  const events: GameEvent[] = [];
+  for (const u of state.units) {
+    if (!u.alive || u.unconscious) continue;
+    if (u.stun === undefined || u.stun <= 0) continue;
+    if (u.hp > 0 && u.stun >= u.hp) {
+      u.unconscious = true;
+      events.push({ type: "knockedOut", unitId: u.id });
+    }
+  }
+  return events;
 }
 
 export function canRecoverObjective(state: BattleState, unit: Unit): boolean {
@@ -403,6 +468,15 @@ export function executeMove(state: BattleState, unitId: UnitId, to: Vec2): GameE
       if (over) events.push(over);
       break;
     }
+    // Reaction fire may have driven the mover's stun >= hp: it falls unconscious
+    // mid-move. Stop advancing an unconscious mover and resolve any victory.
+    const reactionKnockouts = applyStunKnockouts(state);
+    if (reactionKnockouts.length > 0) {
+      events.push(...reactionKnockouts);
+      const over = checkVictory(state);
+      if (over) events.push(over);
+      if (state.status !== "playing" || unit.unconscious) break;
+    }
     events.push(...checkObjectiveExtraction(state, unit));
     if (state.status !== "playing") break;
     events.push(...checkObjectiveRecovery(state, unit));
@@ -455,6 +529,8 @@ function detonateMinesForMover(state: BattleState, mover: Unit): GameEvent[] {
     state.mines.splice(spent[j]!, 1);
   }
   if (spent.length > 0) {
+    // Mine blasts can push a survivor's hp down to its accumulated stun.
+    events.push(...applyStunKnockouts(state));
     const over = checkVictory(state);
     if (over) events.push(over);
   }
@@ -517,10 +593,18 @@ export function executeShoot(
     events.push({ type: "died", unitId: result.targetId });
     events.push(...dropObjectiveIfCarrierDown(state, result.targetId));
     events.push(...moraleEventsForCasualty(state, result.targetId, true));
-    const over = checkVictory(state);
-    if (over) events.push(over);
   } else if (result.targetId !== null && result.rounds.some((r) => r.damage > 0)) {
     events.push(...moraleEventsForCasualty(state, result.targetId, false));
+  }
+
+  // A shot that drove the target's hp down to or below its accumulated stun
+  // knocks it out (captured on victory) instead of killing it.
+  const knockouts = applyStunKnockouts(state);
+  events.push(...knockouts);
+
+  if (result.killed || knockouts.length > 0) {
+    const over = checkVictory(state);
+    if (over) events.push(over);
   }
 
   return events;
@@ -728,6 +812,9 @@ function performThrow(state: BattleState, unit: Unit, target: Vec2, itemId: stri
     }
   }
 
+  // Survivors of the blast whose stun now meets their hp are knocked out.
+  events.push(...applyStunKnockouts(state));
+
   const over = checkVictory(state);
   if (over) events.push(over);
 
@@ -750,6 +837,11 @@ function executeUseItem(
   if (def?.kind === "scanner") {
     if (!inst) return [{ type: "blocked", reason: "no scanner" }];
     return activateScanner(state, unit, inst, def);
+  }
+
+  // Stun rod: a reusable melee tool. Strike an in-reach hostile to build STUN.
+  if (def?.kind === "stunRod") {
+    return executeStunStrike(state, unit, targetId, inst, def);
   }
 
   // Medkit: heal an adjacent ally.
@@ -777,6 +869,62 @@ function executeUseItem(
       tuLeft: unit.tu,
     },
   ];
+}
+
+/**
+ * Resolve a stun-rod melee strike from `unit` onto the hostile `targetId`. The
+ * rod is REUSABLE (no charge is spent): it just needs to be carried. A strike
+ * costs the item's `tuPercent` of max TU, requires the target within the rod's
+ * `reach` (Chebyshev, default 1), and adds `stunPower` to the target's STUN pool
+ * (never hp — stun cannot kill). When accumulated stun reaches the target's
+ * current hp the target falls {@link Unit.unconscious}; if that KO's the last
+ * active hostile the battle is won (unconscious enemies count as neutralized).
+ */
+function executeStunStrike(
+  state: BattleState,
+  unit: Unit,
+  targetId: UnitId,
+  inst: ItemInstance | undefined,
+  def: Item,
+): GameEvent[] {
+  const target = unitById(state, targetId);
+  if (!target || !target.alive) return [{ type: "blocked", reason: "no target" }];
+  if (!inst) return [{ type: "blocked", reason: "no stun rod" }];
+  if (target.faction === unit.faction) return [{ type: "blocked", reason: "not a hostile" }];
+  const reach = def.reach ?? 1;
+  if (chebyshev(unit.pos, target.pos) > reach) return [{ type: "blocked", reason: "too far" }];
+  const cost = Math.ceil((unit.stats.timeUnits * def.tuPercent) / 100);
+  if (unit.tu < cost) return [{ type: "blocked", reason: "not enough TU" }];
+
+  unit.tu -= cost;
+  const power = def.stunPower ?? 0;
+  target.stun = (target.stun ?? 0) + power;
+  const knockedOut = !target.unconscious && target.stun >= target.hp;
+  if (knockedOut) target.unconscious = true;
+
+  state.log.push(
+    `${unit.name} strikes ${target.name} with a ${def.name}` +
+      (knockedOut ? `, knocking it out.` : `.`),
+  );
+
+  const events: GameEvent[] = [
+    {
+      type: "stunStrike",
+      unitId: unit.id,
+      targetId: target.id,
+      itemId: def.id,
+      stun: power,
+      targetStun: target.stun,
+      knockedOut,
+      tuLeft: unit.tu,
+    },
+  ];
+
+  if (knockedOut) {
+    const over = checkVictory(state);
+    if (over) events.push(over);
+  }
+  return events;
 }
 
 /**
@@ -990,6 +1138,8 @@ function detonatePrimedGrenades(state: BattleState, faction: Faction): GameEvent
     }
   }
 
+  // Primed-grenade blasts can knock out survivors whose stun now meets their hp.
+  events.push(...applyStunKnockouts(state));
   const over = checkVictory(state);
   if (over) events.push(over);
   return events;
@@ -999,7 +1149,7 @@ function detonatePrimedGrenades(state: BattleState, faction: Faction): GameEvent
 function recoverMorale(state: BattleState, faction: Faction): GameEvent[] {
   const events: GameEvent[] = [];
   for (const u of state.units) {
-    if (u.faction !== faction || !u.alive || u.morale === undefined) continue;
+    if (u.faction !== faction || !u.alive || u.unconscious || u.morale === undefined) continue;
     const before = u.morale;
     const after = Math.min(MORALE.MAX, before + moraleRecoveryFor(u));
     if (after !== before) {
@@ -1015,7 +1165,7 @@ function nearestLivingEnemy(state: BattleState, unit: Unit): Unit | undefined {
   let best: Unit | undefined;
   let bestD = Infinity;
   for (const o of state.units) {
-    if (!o.alive || o.faction === unit.faction) continue;
+    if (!o.alive || o.unconscious || o.faction === unit.faction) continue;
     const d = chebyshev(unit.pos, o.pos);
     // Units are spawned in ascending id order, so strict `<` keeps the lowest id.
     if (d < bestD) {
@@ -1031,7 +1181,7 @@ function nearestVisibleHostile(state: BattleState, unit: Unit): Unit | undefined
   let best: Unit | undefined;
   let bestD = Infinity;
   for (const o of state.units) {
-    if (!o.alive || o.faction === unit.faction) continue;
+    if (!o.alive || o.unconscious || o.faction === unit.faction) continue;
     if (!canSee(state.grid, unit, o.pos, state.smokeClouds)) continue;
     const d = chebyshev(unit.pos, o.pos);
     if (d < bestD) {
@@ -1102,6 +1252,14 @@ function fleeOneTile(state: BattleState, unit: Unit, events: GameEvent[]): boole
     events.push(...dropObjectiveIfCarrierDown(state, unit.id));
     const over = checkVictory(state);
     if (over) events.push(over);
+  } else {
+    // Mine/reaction fire during the panic flee can knock the mover out.
+    const knockouts = applyStunKnockouts(state);
+    if (knockouts.length > 0) {
+      events.push(...knockouts);
+      const over = checkVictory(state);
+      if (over) events.push(over);
+    }
   }
   return true;
 }
@@ -1143,11 +1301,11 @@ function resolvePanic(state: BattleState, unit: Unit): GameEvent[] {
 function resolvePanicPhase(state: BattleState, faction: Faction): GameEvent[] {
   const events: GameEvent[] = [];
   const units = state.units
-    .filter((u) => u.faction === faction && u.alive)
+    .filter((u) => u.faction === faction && u.alive && !u.unconscious)
     .sort((a, b) => a.id - b.id);
   for (const u of units) {
     if (state.status !== "playing") break;
-    if (!u.alive) continue; // a prior berserk shot may have turned the battle.
+    if (!u.alive || u.unconscious) continue; // a prior berserk shot may have turned the battle.
     const morale = u.morale ?? MORALE.MAX;
     if (morale >= MORALE.PANIC_THRESHOLD) continue;
     events.push(...resolvePanic(state, u));
@@ -1170,8 +1328,32 @@ function startFactionTurn(state: BattleState, faction: Faction): GameEvent[] {
   const events: GameEvent[] = [];
   events.push(...detonatePrimedGrenades(state, faction));
   if (state.status !== "playing") return events;
+  events.push(...decayStunAndWake(state, faction));
   events.push(...recoverMorale(state, faction));
   events.push(...resolvePanicPhase(state, faction));
+  return events;
+}
+
+/**
+ * Shed STUN at the start of `faction`'s turn: every living unit of `faction`
+ * loses {@link STUN.DECAY_PER_TURN} stun (floored at 0). An {@link Unit.unconscious}
+ * unit whose stun drops back below its current hp WAKES — the marker clears and it
+ * spends its waking turn with 0 TU (so it cannot act the round it comes to). A
+ * no-op (no events, no rng) for units at 0 stun, so legacy stun-free battles are
+ * byte-for-byte unchanged. Deterministic: iterates units in spawn order.
+ */
+function decayStunAndWake(state: BattleState, faction: Faction): GameEvent[] {
+  const events: GameEvent[] = [];
+  for (const u of state.units) {
+    if (u.faction !== faction || !u.alive) continue;
+    if (u.stun === undefined || u.stun <= 0) continue;
+    u.stun = Math.max(0, u.stun - STUN.DECAY_PER_TURN);
+    if (u.unconscious && u.stun < u.hp) {
+      u.unconscious = false;
+      u.tu = 0;
+      events.push({ type: "woke", unitId: u.id });
+    }
+  }
   return events;
 }
 

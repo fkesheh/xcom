@@ -115,7 +115,7 @@ function isLowHp(unit: Unit): boolean {
 
 /** Living players, sorted nearest-first with a deterministic id tie-break. */
 function playersByProximity(state: BattleState, from: Vec2): Unit[] {
-  const players = state.units.filter((u) => u.faction === "player" && u.alive);
+  const players = state.units.filter((u) => u.faction === "player" && u.alive && !u.unconscious);
   players.sort((a, b) => {
     const da = tileDistance(from, a.pos);
     const db = tileDistance(from, b.pos);
@@ -149,7 +149,7 @@ function reactionDangerAt(
   const moverScore = reactionScoreOf(unit, tuAtPos);
   let worst = 0;
   const players = state.units
-    .filter((u) => u.faction === "player" && u.alive)
+    .filter((u) => u.faction === "player" && u.alive && !u.unconscious)
     .sort((a, b) => a.id - b.id);
   for (const p of players) {
     const weapon = state.weapons[p.weaponId];
@@ -177,7 +177,9 @@ function reactionDangerAt(
 /** Living players the unit can currently see, nearest first. */
 function visiblePlayers(state: BattleState, unit: Unit): Unit[] {
   return state.units
-    .filter((t) => t.faction === "player" && t.alive && canSee(state.grid, unit, t.pos))
+    .filter(
+      (t) => t.faction === "player" && t.alive && !t.unconscious && canSee(state.grid, unit, t.pos),
+    )
     .sort((a, b) => {
       const da = tileDistance(unit.pos, a.pos);
       const db = tileDistance(unit.pos, b.pos);
@@ -248,6 +250,7 @@ function choosePsiTarget(state: BattleState, unit: Unit): Unit | undefined {
   const targets = state.units.filter(
     (t) =>
       t.alive &&
+      !t.unconscious &&
       t.faction !== unit.faction &&
       t.controlledByFaction === undefined &&
       canSee(state.grid, unit, t.pos) &&
@@ -315,7 +318,9 @@ function chooseGrenadeThrow(
 
   const radius = grenadeDef.blastRadius ?? 2;
   const maxRange = grenadeDef.throwRange ?? 6;
-  const livingPlayers = state.units.filter((u) => u.faction === "player" && u.alive);
+  const livingPlayers = state.units.filter(
+    (u) => u.faction === "player" && u.alive && !u.unconscious,
+  );
 
   const candidates: Vec2[] = [];
   for (const p of visiblePlayers) {
@@ -685,7 +690,7 @@ function tryMove(
 export function runEnemyTurn(state: BattleState, exec: AiExecutor): GameEvent[] {
   const events: GameEvent[] = [];
   const enemyIds: UnitId[] = state.units
-    .filter((u) => u.faction === "enemy" && u.alive)
+    .filter((u) => u.faction === "enemy" && u.alive && !u.unconscious)
     .map((u) => u.id)
     .sort((a, b) => a - b);
   // A psi-capable unit casts at most one psi attack per turn (the rest of its
@@ -697,7 +702,7 @@ export function runEnemyTurn(state: BattleState, exec: AiExecutor): GameEvent[] 
       if (state.status !== "playing") return events;
 
       const unit = state.units.find((u) => u.id === id);
-      if (!unit || !unit.alive || unit.tu <= 0) break;
+      if (!unit || !unit.alive || unit.unconscious || unit.tu <= 0) break;
 
       // Psionics: a psi-capable unit (the alien commander) leads with one psi
       // attack per turn — mind control when the hard cap allows, else a panic —
@@ -716,6 +721,7 @@ export function runEnemyTurn(state: BattleState, exec: AiExecutor): GameEvent[] 
         (t) =>
           (t.faction === "player" || t.faction === "civilian") &&
           t.alive &&
+          !t.unconscious &&
           canSee(state.grid, unit, t.pos),
       );
 

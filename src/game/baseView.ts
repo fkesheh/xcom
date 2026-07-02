@@ -34,6 +34,7 @@ import {
 } from "three";
 
 import {
+  CONTAINMENT_CAPACITY,
   findBaseFacility,
   facilityCost,
   STARTER_BASE_GRID,
@@ -55,6 +56,7 @@ import {
   canPurchaseWeapon,
   canRecruitSoldier,
   canStartResearch,
+  CAPTIVE_RANK_ORDER,
   campaignObjectiveProgress,
   campaignSoldierStatBonus,
   constructedFacilities,
@@ -62,6 +64,7 @@ import {
   deploymentSoldiers,
   difficultyConfig,
   facilityConstructionDuration,
+  hasContainment,
   hasResearch,
   RECRUIT_COST,
   type ManufacturingProject,
@@ -81,6 +84,7 @@ import {
 } from "../campaign/storage";
 import { generateOperation } from "../campaign/operations";
 import type {
+  CampaignCaptive,
   CampaignSoldier,
   CampaignState,
   CampaignWeaponId,
@@ -129,9 +133,20 @@ const BASE_VIEW_YAW = -0.56;
 /** Consumable item ids rendered in the barracks backpack, in display order. */
 const ITEM_IDS: readonly string[] = Object.keys(ITEMS);
 /** Per-item glyph shown beside the label (label always present — never color alone). */
-const ITEM_ICON: Record<string, string> = { grenade: "◆", medkit: "✚" };
+const ITEM_ICON: Record<string, string> = { grenade: "◆", medkit: "✚", stunRod: "⚡" };
 /** Max copies of a single item type one soldier may carry. */
 const MAX_ITEM_CARRY = 3;
+
+/** Display name for a captive's sim template id (mirrors sim/content.ts
+ *  TEMPLATES names — hardcoded here rather than importing sim content, matching
+ *  how ITEM_ICON labels items above). */
+const CAPTIVE_SPECIES: Record<string, string> = {
+  drone: "Drone",
+  stalker: "Stalker",
+  sentinel: "Sentinel",
+  heavy: "Heavy",
+  commander: "Commander",
+};
 
 interface BaseCorridor {
   id: string;
@@ -1511,7 +1526,14 @@ function disposeObject(obj: Group | Scene): void {
   });
 }
 
-type RoomId = "overview" | "research" | "engineering" | "barracks" | "hangar" | "construction";
+type RoomId =
+  | "overview"
+  | "research"
+  | "engineering"
+  | "barracks"
+  | "hangar"
+  | "construction"
+  | "containment";
 
 interface RoomDef {
   id: RoomId;
@@ -1557,6 +1579,12 @@ const ROOM_META: Record<RoomId, RoomDef> = {
     icon: "▣",
     blurb: "Expand the base — new facilities, power, and capacity.",
   },
+  containment: {
+    id: "containment",
+    label: "Alien Containment",
+    icon: "⛓",
+    blurb: "Hold live alien captives for interrogation and HQ intel.",
+  },
 };
 
 /** Rooms reachable from the overview hub's facility list. */
@@ -1566,6 +1594,7 @@ const ROOM_NAV: readonly RoomId[] = [
   "barracks",
   "hangar",
   "construction",
+  "containment",
 ];
 
 /** Map a constructed facility's kind to the dedicated room that manages it.
@@ -1581,6 +1610,8 @@ function roomForFacilityKind(kind: FacilityKind): RoomId {
       return "barracks";
     case "hangar":
       return "hangar";
+    case "containment":
+      return "containment";
     case "command":
     case "stores":
     case "medbay":
@@ -1614,6 +1645,8 @@ function roleForFacilityKind(kind: FacilityKind): FacilityRole {
       return "radar";
     case "power":
       return "reactor";
+    case "containment":
+      return "containment";
     case "access":
     case "medbay":
     case "stores":
@@ -2761,6 +2794,9 @@ export class BaseView {
       case "construction":
         body.append(this.renderConstructionRoom(campaign));
         break;
+      case "containment":
+        body.append(this.renderContainmentRoom(campaign));
+        break;
       case "overview":
       default:
         body.append(this.renderOverview(campaign));
@@ -3223,6 +3259,58 @@ export class BaseView {
     this.refreshHud();
   }
 
+  /** Containment room: a capacity readout, the held-captive roster (or an
+   *  empty-state directing the player to bring specimens back alive), and a
+   *  hint that interrogation research consumes captives for HQ intel. Reuses
+   *  the hangar's craft-list layout — a captive roster shares the same shape
+   *  (icon + heading + status copy). */
+  private renderContainmentRoom(campaign: CampaignState): HTMLElement {
+    const wrap = el("div");
+    const captives = campaign.captives ?? [];
+    const capacity = hasContainment(campaign) ? CONTAINMENT_CAPACITY : 0;
+    const head = el("div", "panel-head");
+    const title = el("span", "panel-title");
+    title.textContent = `Held ${captives.length}/${capacity}`;
+    head.append(title);
+    wrap.appendChild(head);
+
+    if (captives.length === 0) {
+      const empty = el("div", "empty-state");
+      empty.textContent =
+        "No live specimens held. Stun aliens with a stun rod and win the mission to bring them back — a built containment cell secures them.";
+      wrap.appendChild(empty);
+    } else {
+      const list = el("div", "craft-list");
+      for (const captive of captives) list.appendChild(this.renderCaptiveRow(campaign, captive));
+      wrap.appendChild(list);
+    }
+
+    const hint = el("p", "card-copy");
+    hint.textContent =
+      "Interrogation research (alien / leader / commander) consumes a qualifying captive to unlock intel and, eventually, reveal the alien HQ.";
+    wrap.appendChild(hint);
+    return wrap;
+  }
+
+  private renderCaptiveRow(campaign: CampaignState, captive: CampaignCaptive): HTMLElement {
+    const row = el("div", "craft-row");
+    const icon = el("span", "craft-icon");
+    icon.textContent = "⛓";
+    const body = el("div", "craft-body");
+    const heading = el("div", "craft-heading");
+    const kind = el("span", "craft-kind");
+    kind.textContent = captive.rank;
+    const name = el("strong");
+    name.textContent = CAPTIVE_SPECIES[captive.templateId] ?? captive.templateId;
+    heading.append(kind, name);
+    const copy = el("p", "card-copy");
+    const hoursAgo = Math.max(0, campaign.clock.elapsedHours - captive.capturedAtHour);
+    copy.textContent = `Captured ${hoursAgo}h ago.`;
+    body.append(heading, copy);
+    row.append(icon, body);
+    return row;
+  }
+
   /** Research room rendered as a prerequisite tech tree. Projects are grouped
    *  into tier columns (tier = longest prerequisite chain depth; tier-0 roots in
    *  the first column) with a connector rail linking each tier to the one before
@@ -3354,6 +3442,19 @@ export class BaseView {
     desc.textContent = project.description;
     node.appendChild(desc);
 
+    // Captive-gated nodes (the interrogation chain) get a small requirement
+    // annotation. When the node is otherwise startable but no qualifying
+    // captive is held, the annotation explains WHY instead of the generic
+    // "Need resources" button label.
+    const captiveLabel = this.captiveRequirementLabel(project);
+    const captiveQualified = captiveLabel === null || this.hasQualifyingCaptiveFor(campaign, project);
+    if (captiveLabel && status !== "completed") {
+      const note = el("div", "tech-node-req");
+      note.textContent =
+        status === "available" && !captiveQualified ? this.captiveBlockedNote(project) : captiveLabel;
+      node.appendChild(note);
+    }
+
     if (status === "active" && activeRes) {
       const remaining = Math.max(0, activeRes.completesAtHour - campaign.clock.elapsedHours);
       const duration = activeRes.completesAtHour - activeRes.startedAtHour;
@@ -3399,11 +3500,45 @@ export class BaseView {
     const labBusy = !!campaign.activeResearch;
     const canStart = canStartResearch(campaign, project.id);
     const button = el("button");
-    button.textContent = labBusy ? "Lab busy" : canStart ? "Start research" : "Need resources";
+    button.textContent = labBusy
+      ? "Lab busy"
+      : canStart
+        ? "Start research"
+        : !captiveQualified
+          ? "Need captive"
+          : "Need resources";
     button.disabled = labBusy || !canStart;
     button.addEventListener("click", () => this.opts.onStartResearch(project.id));
     node.appendChild(button);
     return node;
+  }
+
+  /** Requirement label for a captive-gated research node ("Requires live
+   *  captive", optionally rank-floored), or null when the project has no
+   *  captive requirement. */
+  private captiveRequirementLabel(project: ResearchProject): string | null {
+    if (project.requiresCaptiveRank === "commander") return "Requires live captive (commander)";
+    if (project.requiresCaptiveRank === "leader") return "Requires live captive (leader+)";
+    if (project.requiresCaptive) return "Requires live captive";
+    return null;
+  }
+
+  /** Explains why a captive-gated node can't start: the rank floor is unmet or
+   *  no captive is held at all. Mirrors storage.ts's private
+   *  captiveQualifies/hasQualifyingCaptive so the research room can surface the
+   *  reason without exposing that internal helper. */
+  private captiveBlockedNote(project: ResearchProject): string {
+    return project.requiresCaptiveRank
+      ? `Blocked — no ${project.requiresCaptiveRank}-rank captive in containment`
+      : "Blocked — no live captive in containment";
+  }
+
+  private hasQualifyingCaptiveFor(campaign: CampaignState, project: ResearchProject): boolean {
+    if (!project.requiresCaptive && !project.requiresCaptiveRank) return true;
+    const captives = campaign.captives ?? [];
+    if (!project.requiresCaptiveRank) return captives.length > 0;
+    const floor = CAPTIVE_RANK_ORDER.indexOf(project.requiresCaptiveRank);
+    return captives.some((captive) => CAPTIVE_RANK_ORDER.indexOf(captive.rank) >= floor);
   }
 
   /** Engineering room: active manufacturing with a progress bar, then buildable

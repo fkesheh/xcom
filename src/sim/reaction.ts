@@ -33,6 +33,8 @@ export function reactionScore(unit: Unit): number {
  */
 export function triggerReactions(state: BattleState, mover: Unit): GameEvent[] {
   const events: GameEvent[] = [];
+  // An unconscious mover is out of the fight: it never draws reaction fire.
+  if (mover.unconscious) return events;
   const moverScore = reactionScore(mover);
 
   const candidates = state.units.filter(
@@ -43,7 +45,7 @@ export function triggerReactions(state: BattleState, mover: Unit): GameEvent[] {
 
   while (mover.alive && shotsFired < maxShots) {
     const eligible = candidates.filter((reactor) => {
-      if (!reactor.alive) return false;
+      if (!reactor.alive || reactor.unconscious) return false;
       const weapon = state.weapons[reactor.weaponId];
       if (!weapon) return false;
       const snap = findMode(weapon, "snap");

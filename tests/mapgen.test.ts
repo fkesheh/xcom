@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { generateMap } from "../src/sim/mapgen";
 import type { GeneratedMap } from "../src/sim/mapgen";
+import { getTheme, themeIds } from "../src/sim/terrain";
 import { Rng } from "../src/sim/rng";
 import { blocksMove, cellIndex, inBounds, tileTypeAt } from "../src/sim/grid";
 import type { Grid, Vec2 } from "../src/sim/types";
@@ -73,6 +74,28 @@ describe("generateMap", () => {
     for (const seed of SEEDS) {
       expect(["farmland", "urban", "desert"]).toContain(gen(seed).themeId);
     }
+  });
+
+  it("resolves the special 'alienBase' theme for every caller, aliasing urban (finding 10)", () => {
+    // alienBase is registered so it resolves deterministically for ALL callers.
+    expect(getTheme("alienBase")).toBeDefined();
+    // It is excluded from the RANDOM-pick pool so a normal mission never rolls it.
+    expect(themeIds()).not.toContain("alienBase");
+    for (const seed of SEEDS) {
+      expect(gen(seed).themeId).not.toBe("alienBase");
+    }
+    // An explicit alienBase request yields the alienBase-labelled map...
+    const alien = gen(12345, { themeId: "alienBase" });
+    expect(alien.themeId).toBe("alienBase");
+    // ...and aliases the urban layout: same seed => byte-identical grid to urban.
+    const urban = gen(12345, { themeId: "urban" });
+    expect(alien.grid.cells).toEqual(urban.grid.cells);
+    expect(alien.playerSpawns).toEqual(urban.playerSpawns);
+    expect(alien.enemySpawns).toEqual(urban.enemySpawns);
+  });
+
+  it("throws LOUDLY on an unknown explicit theme instead of a silent random fallback (finding 10)", () => {
+    expect(() => gen(1, { themeId: "nonexistent-theme" })).toThrow(/unknown terrain theme/i);
   });
 
   it("returns walkable, in-bounds, non-overlapping spawns", () => {

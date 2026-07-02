@@ -270,6 +270,37 @@ export class Sfx {
     });
   }
 
+  /** Stun-rod strike: a short crackling electric zap — a bright buzzy sawtooth
+   *  over a filtered noise crackle, quick decay. Distinct from the impact thud so
+   *  a non-lethal takedown reads differently from a bullet hit. */
+  stun(knockedOut = false): void {
+    this.play((ctx, out) => {
+      this.noiseBurst(ctx, out, {
+        filterType: "highpass",
+        f0: 2600,
+        f1: 4200,
+        q: 1.2,
+        dur: 0.12,
+        peak: 0.5,
+        attack: 0.001,
+      });
+      this.tone(ctx, out, { type: "sawtooth", f0: 1500, f1: 260, dur: 0.14, peak: 0.32 });
+      this.tone(ctx, out, { type: "square", f0: 60, f1: 40, dur: 0.1, peak: 0.22, when: 0.01 });
+      // A knockout adds a low descending "lights-out" tail.
+      if (knockedOut) {
+        this.tone(ctx, out, { type: "sine", f0: 420, f1: 90, dur: 0.34, peak: 0.3, when: 0.1 });
+      }
+    });
+  }
+
+  /** Woke: a soft rising two-tick chime (a stunned enemy came back to its feet). */
+  woke(): void {
+    this.play((ctx, out) => {
+      this.tone(ctx, out, { type: "triangle", f0: 300, f1: 520, dur: 0.1, peak: 0.22 });
+      this.tone(ctx, out, { type: "triangle", f0: 520, f1: 700, dur: 0.12, peak: 0.2, when: 0.09 });
+    });
+  }
+
   /** Panic alarm: a sharp two-tone warbling blip (unit lost control). */
   panic(): void {
     this.play((ctx, out) => {

@@ -55,7 +55,7 @@ import {
   isInterceptorReady,
   ufoTypeInfo,
 } from "../campaign/geoscape";
-import { campaignObjectiveProgress, canBuildNewBase, DIFFICULTY_CONFIGS, highestRegionalPanic, MAX_EXTRA_BASES, NEW_BASE_COST, transportCraft } from "../campaign/storage";
+import { campaignObjectiveProgress, canBuildNewBase, canLaunchFinalAssault, DIFFICULTY_CONFIGS, highestRegionalPanic, MAX_EXTRA_BASES, NEW_BASE_COST, transportCraft } from "../campaign/storage";
 import {
   WORLD_CITY_POINTS,
   WORLD_LAND_RINGS,
@@ -73,6 +73,8 @@ interface GeoscapeOptions {
   onInterceptionAction?: (action: InterceptionAction) => void;
   /** Designate a new radar base on the globe (multi-base campaign). */
   onBuildNewBase?: (location: BaseLocation) => void;
+  /** Launch the endgame final assault on the revealed alien HQ. */
+  onLaunchAssault?: () => void;
 }
 
 export interface GeoscapeTimeAction {
@@ -361,6 +363,17 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
 #geoscape .geo-actions {
   display: flex;
   gap: 8px;
+}
+/* .geo-assault-cta — overrides .ui-cta's cyan gradient with a blood-red one for
+   the endgame's single highest-priority action (launch the final assault). */
+#geoscape .geo-assault-cta {
+  background: linear-gradient(180deg, var(--ui-red), #b91c1c);
+  border-color: var(--ui-red);
+  animation: geo-assault-pulse 1.6s ease-in-out infinite;
+}
+@keyframes geo-assault-pulse {
+  0%, 100% { box-shadow: var(--ui-shadow-glow); }
+  50% { box-shadow: 0 0 0 4px rgba(251,113,133,.35), var(--ui-shadow-glow); }
 }
 #geoscape button {
   min-height: 42px;
@@ -1247,6 +1260,8 @@ export class GeoscapeView {
   private readonly earthMesh: Mesh;
   private readonly baseMarker = new Group();
   private readonly ufoMarker = new Group();
+  /** Blood-red endgame beacon marking the revealed alien HQ; hidden until then. */
+  private readonly hqMarker = new Group();
   private readonly interceptorMarker = new Group();
   private readonly trajectoryLine: Line;
   /** Faint great-circle trail of the UFO's recent positions while it flies. */
@@ -1600,6 +1615,10 @@ export class GeoscapeView {
     this.earthGroup.add(this.ufoMarker);
     if (this.opts.campaign?.ufoContact) this.placeUfoMarker(this.opts.campaign.ufoContact);
     else this.ufoMarker.visible = false;
+    this.buildHqMarker();
+    this.earthGroup.add(this.hqMarker);
+    if (this.opts.campaign?.alienHq?.revealed) this.placeHqMarker(this.opts.campaign.alienHq.location);
+    else this.hqMarker.visible = false;
     this.buildInterceptorMarker();
     this.interceptorMarker.visible = false;
     this.trajectoryLine.visible = false;
@@ -1936,6 +1955,70 @@ export class GeoscapeView {
     );
     group.add(pulse, cone, ring);
     return group;
+  }
+
+  /** Blood-red endgame beacon for the revealed alien HQ — a menacing spike
+   *  distinct from the amber base cone and mission-colored UFO marker, so its
+   *  reveal reads unmistakably as the campaign's final objective. */
+  private buildHqMarker(): void {
+    const pulse = new Mesh(
+      new SphereGeometry(0.09, 16, 10),
+      new MeshBasicMaterial({
+        color: 0xdc2626,
+        transparent: true,
+        opacity: 0.95,
+        blending: AdditiveBlending,
+      }),
+    );
+    const spike = new Mesh(
+      new ConeGeometry(0.08, 0.32, 6),
+      new MeshStandardMaterial({
+        color: 0x450a0a,
+        emissive: new Color(0xdc2626),
+        emissiveIntensity: 2.2,
+        roughness: 0.25,
+        metalness: 0.55,
+      }),
+    );
+    spike.position.y = 0.16;
+    // A second inverted spike below the pulse core makes the silhouette read
+    // as an alien spire rather than a friendly cone from any camera angle.
+    const undercut = new Mesh(
+      new ConeGeometry(0.05, 0.14, 6),
+      new MeshStandardMaterial({
+        color: 0x450a0a,
+        emissive: new Color(0xdc2626),
+        emissiveIntensity: 1.6,
+        roughness: 0.25,
+        metalness: 0.55,
+      }),
+    );
+    undercut.rotation.x = Math.PI;
+    undercut.position.y = -0.07;
+    const ring = new Mesh(
+      new SphereGeometry(0.15, 18, 8, 0, Math.PI * 2, 0, Math.PI * 0.42),
+      new MeshBasicMaterial({
+        color: 0xdc2626,
+        transparent: true,
+        opacity: 0.3,
+        wireframe: true,
+        side: DoubleSide,
+      }),
+    );
+    // Outer halo, same treatment as the UFO marker's urgent halo — the HQ is
+    // always the highest-priority object on the globe once revealed.
+    const halo = new Mesh(
+      new RingGeometry(0.19, 0.24, 28),
+      new MeshBasicMaterial({
+        color: 0xef4444,
+        transparent: true,
+        opacity: 0.42,
+        side: DoubleSide,
+        blending: AdditiveBlending,
+      }),
+    );
+    halo.rotation.x = -Math.PI / 2;
+    this.hqMarker.add(pulse, spike, undercut, ring, halo);
   }
 
   private buildUfoMarker(missionType: MissionType | undefined, ufoType: UfoType | undefined): void {
@@ -2365,6 +2448,16 @@ export class GeoscapeView {
       this.refresh();
     });
     this.actionsSlot.append(build);
+    // The endgame's one urgent action: once the alien HQ is revealed and the
+    // assault is unlocked, this takes priority over every other action — placed
+    // first so it is unmissable the moment it becomes available.
+    if (canLaunchFinalAssault(c)) {
+      const assault = el("button", "primary ui-cta geo-assault-cta");
+      assault.textContent = "ASSAULT ALIEN HQ";
+      assault.title = "Launch the final decapitating strike on the alien homeworld base — victory ends the war.";
+      assault.addEventListener("click", () => this.opts.onLaunchAssault?.());
+      this.actionsSlot.prepend(assault);
+    }
     if (this.loitering) {
       // A Skyranger is on station: deploy on demand instead of offering a fresh
       // launch/intercept (the squad is already inbound to this site).
@@ -2430,6 +2523,8 @@ export class GeoscapeView {
       this.ufoMarker.visible = false;
       this.clearUfoTrail();
     }
+    if (c?.alienHq?.revealed) this.placeHqMarker(c.alienHq.location);
+    else this.hqMarker.visible = false;
     this.refreshFlightMarkers();
   }
 
@@ -3798,6 +3893,13 @@ export class GeoscapeView {
     this.ufoMarker.quaternion.setFromUnitVectors(UP, normal);
   }
 
+  private placeHqMarker(location: BaseLocation): void {
+    const normal = latLonToVector(location.lat, location.lon, 1).normalize();
+    this.hqMarker.visible = true;
+    this.hqMarker.position.copy(normal).multiplyScalar(EARTH_RADIUS + 0.15);
+    this.hqMarker.quaternion.setFromUnitVectors(UP, normal);
+  }
+
   private resize = (): void => {
     const rect = this.canvasWrap.getBoundingClientRect();
     const width = Math.max(1, rect.width);
@@ -3888,6 +3990,11 @@ export class GeoscapeView {
     this.ufoMarker.scale.setScalar(
       1 + (this.reducedMotion ? 0 : Math.sin(now * (urgent ? 0.012 : 0.006)) * (urgent ? 0.2 : 0.18)),
     );
+    // The HQ beacon pulses harder and faster than any other marker — it is the
+    // endgame's single most important object on the globe once revealed.
+    if (this.hqMarker.visible) {
+      this.hqMarker.scale.setScalar(1 + (this.reducedMotion ? 0 : Math.sin(now * 0.014) * 0.26));
+    }
     this.updateContactLabel(contact);
     this.animateInterceptor(now);
     this.advanceFlowingTime(now);

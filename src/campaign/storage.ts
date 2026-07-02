@@ -16,6 +16,7 @@ import type {
   CampaignState,
   CampaignWeaponId,
   CampaignCaptive,
+  CaptiveIntakeReport,
   CaptiveRank,
   AlienHq,
   CouncilRegion,
@@ -41,6 +42,7 @@ import type {
 import {
   BASE_FACILITIES,
   CONTAINMENT_FACILITY_ID,
+  CONTAINMENT_CAPACITY,
   facilitiesForIds,
   facilityCost,
   findBaseFacility,
@@ -48,15 +50,18 @@ import {
   summarizeBaseFacilities,
   type BaseFacility,
 } from "./base";
+import { isLand } from "./landMask";
 
 export const CAMPAIGN_STORAGE_KEY = "blacksite.campaign.v1";
-export const CAMPAIGN_VICTORY_OPERATIONS = 5;
+export const CAMPAIGN_VICTORY_OPERATIONS = 4;
 
 /**
  * Endgame arc constants. The true campaign victory is winning the alien-base
  * assault at the revealed HQ. CAMPAIGN_VICTORY_OPERATIONS remains a FALLBACK
  * milestone that auto-reveals the HQ (so a capture-free campaign stays winnable,
  * preserving the tuned difficulty curve). Losing the assault does NOT end the run.
+ * Set to 4 so the fallback path's total wins-to-victory (4 ops + the assault)
+ * matches the 5-operation campaign length the difficulty curve was tuned on.
  */
 export const ALIEN_HQ_CREW_SIZE = 12;
 /** Operation theme used for the alien-base assault map. */
@@ -327,6 +332,11 @@ export interface DifficultyConfig {
   // back by a fixed amount at every difficulty.
   threatGainMult: number;
   upkeepMult: number;
+  // Garrison size the final alien-base assault fields at this difficulty. Unlike a
+  // normal mission (whose count is enemyCountMult-scaled), the boss crew is set
+  // directly here so the climax stays retryable on rookie yet punishing on commander.
+  // The "always 1 commander + 1 leader" invariant holds at every size (min 2).
+  alienHqCrewSize: number;
 }
 
 export const DIFFICULTY_CONFIGS: Record<DifficultyLevel, DifficultyConfig> = {
@@ -342,6 +352,7 @@ export const DIFFICULTY_CONFIGS: Record<DifficultyLevel, DifficultyConfig> = {
     panicMult: 0.4,
     threatGainMult: 0.3,
     upkeepMult: 0.8,
+    alienHqCrewSize: 5,
   },
   veteran: {
     label: "Veteran",
@@ -355,6 +366,7 @@ export const DIFFICULTY_CONFIGS: Record<DifficultyLevel, DifficultyConfig> = {
     panicMult: 0.75,
     threatGainMult: 0.55,
     upkeepMult: 1.0,
+    alienHqCrewSize: 6,
   },
   commander: {
     label: "Commander",
@@ -368,6 +380,7 @@ export const DIFFICULTY_CONFIGS: Record<DifficultyLevel, DifficultyConfig> = {
     panicMult: 1.3,
     threatGainMult: 1.1,
     upkeepMult: 1.2,
+    alienHqCrewSize: 7,
   },
 };
 
@@ -790,7 +803,9 @@ export const STARTING_ARMORY: CampaignArmory = {
     plasma: 0,
     cannon: 0,
   },
-  items: { grenade: 8, medkit: 4, smoke: 4 },
+  // Stun rods ship from day one so a squad can take aliens alive for containment
+  // and interrogation without waiting on research — cheap, reusable capture gear.
+  items: { grenade: 8, medkit: 4, smoke: 4, stunRod: 4 },
 };
 
 const RANKS: readonly { rank: SoldierRank; minSurvived: number; bonus: SoldierStatBonus }[] = [
@@ -970,6 +985,59 @@ function startingDeployment(soldiers: readonly CampaignSoldier[]): string[] {
   return soldiers.slice(0, DEPLOYMENT_SIZE).map((soldier) => soldier.id);
 }
 
+/**
+ * Council-region anchor points, used to resolve a free lat/lon (e.g. the seeded
+ * alien HQ) to a region string. Kept local to storage so the module stays free of
+ * a reverse dependency on the geoscape (which owns the same CONTACT_ZONES table).
+ */
+const REGION_ANCHORS: readonly { region: string; lat: number; lon: number }[] = [
+  { region: "North America", lat: 44.6, lon: -97.3 },
+  { region: "South America", lat: -14.2, lon: -52.8 },
+  { region: "Europe", lat: 48.2, lon: 14.6 },
+  { region: "Africa", lat: 4.8, lon: 22.1 },
+  { region: "Middle East", lat: 31.4, lon: 47.6 },
+  { region: "South Asia", lat: 21.6, lon: 77.4 },
+  { region: "East Asia", lat: 35.9, lon: 116.3 },
+  { region: "Oceania", lat: -24.8, lon: 133.7 },
+];
+
+/** Nearest council-region anchor to a lat/lon (great-circle-ish, cos-lat weighted). */
+function regionForLocation(lat: number, lon: number): string {
+  let best = REGION_ANCHORS[0]!;
+  let bestD = Infinity;
+  for (const anchor of REGION_ANCHORS) {
+    const dLat = anchor.lat - lat;
+    const dLon = (anchor.lon - lon) * Math.cos((lat * Math.PI) / 180);
+    const d = dLat * dLat + dLon * dLon;
+    if (d < bestD) {
+      best = anchor;
+      bestD = d;
+    }
+  }
+  return best.region;
+}
+
+/** Salt so the HQ location stream never overlaps the stat-growth / bio streams. */
+const ALIEN_HQ_SEED_SALT = 0x5f356495;
+
+/**
+ * Deterministically seed the alien HQ on a LAND location. Samples lat/lon from a
+ * seeded rng inside the plausible detection band and retries until it lands on
+ * land (isLand). Hidden until an interrogation or the fallback milestone reveals it.
+ */
+function seedAlienHq(seed: number): AlienHq {
+  const rng = mulberry32((seed ^ ALIEN_HQ_SEED_SALT) >>> 0);
+  let lat = 0;
+  let lon = 0;
+  for (let attempt = 0; attempt < 1000; attempt++) {
+    // Detection band matches the geoscape's contact clamp (-56..68).
+    lat = Math.round((rng() * 124 - 56) * 10) / 10;
+    lon = Math.round((rng() * 360 - 180) * 10) / 10;
+    if (isLand(lat, lon)) break;
+  }
+  return { location: { lat, lon, region: regionForLocation(lat, lon) }, revealed: false };
+}
+
 export function createCampaign(
   base: BaseLocation,
   seed: number,
@@ -1013,6 +1081,7 @@ export function createCampaign(
     missionsCompleted: 0,
     missionsAttempted: 0,
     projectReports: [],
+    alienHq: seedAlienHq(seed),
   };
 }
 
@@ -1029,7 +1098,7 @@ export function campaignObjectiveProgress(campaign: CampaignState): CampaignObje
   const completed = Math.max(0, Math.min(required, Math.floor(campaign.missionsCompleted)));
   const remaining = Math.max(0, required - completed);
   const percent = Math.round((completed / required) * 100);
-  if (campaign.strategic.status === "won" || remaining === 0) {
+  if (campaign.strategic.status === "won") {
     return {
       completed,
       required,
@@ -1037,8 +1106,41 @@ export function campaignObjectiveProgress(campaign: CampaignState): CampaignObje
       percent,
       status: campaign.strategic.status,
       title: "Containment achieved",
-      summary: `Recovered ${required}/${required} UFO cores. Alien command cell is broken.`,
+      summary: "The alien headquarters has fallen. The invasion's command cell is broken.",
     };
+  }
+  if (campaign.strategic.status === "active") {
+    const region = campaign.alienHq?.location.region;
+    // READY: the HQ is revealed AND the assault is unlocked (commander interrogation
+    // or the CAMPAIGN_VICTORY_OPERATIONS fallback). Launching it is the true victory.
+    if (canLaunchFinalAssault(campaign)) {
+      return {
+        completed,
+        required,
+        remaining,
+        percent,
+        status: campaign.strategic.status,
+        title: "Final assault ready",
+        summary: region
+          ? `Alien HQ located in ${region}. Launch the final assault to end the invasion.`
+          : "Alien HQ located. Launch the final assault to end the invasion.",
+      };
+    }
+    // REVEALED-BUT-LOCKED: a leader interrogation exposes the HQ location WITHOUT
+    // unlocking the assault — the player still needs a commander interrogation or
+    // enough operations to plan the strike.
+    if (campaign.alienHq?.revealed) {
+      const opsClause = `complete ${remaining} more operation${remaining === 1 ? "" : "s"}`;
+      return {
+        completed,
+        required,
+        remaining,
+        percent,
+        status: campaign.strategic.status,
+        title: "Alien HQ located",
+        summary: `Alien HQ located in ${region}. Interrogate an alien commander — or ${opsClause} — to plan the final assault.`,
+      };
+    }
   }
   if (campaign.strategic.status === "lost") {
     return {
@@ -1743,6 +1845,82 @@ export interface MissionCapture {
   rank: CaptiveRank;
 }
 
+interface CaptiveIntake {
+  /** Full captive list after intake (existing + newly secured). */
+  captives: CampaignCaptive[];
+  /** The debrief-facing outcome, computed now so later captive consumption can't skew it. */
+  report: CaptiveIntakeReport;
+}
+
+/**
+ * Turn a mission's captures into stored captives at debrief. Requires a built
+ * Alien Containment facility; without it every capture is lost. Stored captives
+ * are capped at CONTAINMENT_CAPACITY across all bases — excess captures are lost.
+ * Ids are minted deterministically from the mission number + capture index. The
+ * returned `report` records whether a facility existed (from hasContainment at
+ * intake time) so the debrief can tell "no facility" from "facility full" rather
+ * than inferring it from a zero secured count.
+ */
+function intakeCaptives(
+  campaign: CampaignState,
+  captures: readonly MissionCapture[] | undefined,
+  missionNumber: number,
+  capturedAtHour: number,
+): CaptiveIntake {
+  const existing = campaign.captives ?? [];
+  const hadContainment = hasContainment(campaign);
+  const capacity = CONTAINMENT_CAPACITY;
+  if (!captures || captures.length === 0) {
+    return {
+      captives: existing,
+      report: { secured: [], lost: 0, hadContainment, held: existing.length, capacity },
+    };
+  }
+  if (!hadContainment) {
+    return {
+      captives: existing,
+      report: { secured: [], lost: captures.length, hadContainment: false, held: existing.length, capacity },
+    };
+  }
+  const room = Math.max(0, capacity - existing.length);
+  const securedCount = Math.min(room, captures.length);
+  const added: CampaignCaptive[] = captures.slice(0, securedCount).map((capture, index) => ({
+    id: `captive-${missionNumber}-${index + 1}`,
+    templateId: capture.templateId,
+    rank: capture.rank,
+    capturedAtHour,
+  }));
+  const captivesAfter = [...existing, ...added];
+  return {
+    captives: captivesAfter,
+    report: {
+      secured: added.map((c) => ({ rank: c.rank, templateId: c.templateId })),
+      lost: captures.length - securedCount,
+      hadContainment: true,
+      held: captivesAfter.length,
+      capacity,
+    },
+  };
+}
+
+/** Debrief clause reporting the captive intake, appended to the mission summary. */
+function captiveIntakeSummary(report: CaptiveIntakeReport): string {
+  const parts: string[] = [];
+  const securedCount = report.secured.length;
+  if (securedCount > 0) {
+    parts.push(securedCount === 1 ? " One alien was taken alive." : ` ${securedCount} aliens were taken alive.`);
+  }
+  if (report.lost > 0) {
+    const noun = report.lost === 1 ? "captive was" : "captives were";
+    parts.push(
+      report.hadContainment
+        ? ` ${report.lost} ${noun} lost (containment full ${report.held}/${report.capacity}).`
+        : ` ${report.lost} ${noun} lost (no containment facility).`,
+    );
+  }
+  return parts.join("");
+}
+
 export function recordMissionResult(
   campaign: CampaignState,
   result: MissionResult,
@@ -1778,6 +1956,22 @@ export function recordMissionResult(
     operation.missionNumber,
   );
   const terrorRescue = terrorRescueBonus(operation, result, rosterOutcome);
+  // Captures are only recovered from a victory (the squad held the field).
+  const captiveIntake = intakeCaptives(
+    campaign,
+    result === "success" ? rosterOutcome?.captures : undefined,
+    operation.missionNumber,
+    completedHour,
+  );
+  const baseSummary =
+    result === "success"
+      ? missionSuccessSummary(
+          operation.codename,
+          kiaSoldierIds.length,
+          woundedSoldierIds.length,
+          promotionSummary(campaign.soldiers, updatedSoldiers, deployedSoldierIds),
+        )
+      : missionFailureSummary(kiaSoldierIds.length, deployedSoldierIds.length - kiaSoldierIds.length);
   const report: MissionReport = {
     missionNumber: operation.missionNumber,
     missionSeed: operation.missionSeed,
@@ -1796,15 +1990,7 @@ export function recordMissionResult(
     kiaSoldierIds,
     woundedSoldierIds,
     completedAt,
-    summary:
-      result === "success"
-        ? missionSuccessSummary(
-            operation.codename,
-            kiaSoldierIds.length,
-            woundedSoldierIds.length,
-            promotionSummary(campaign.soldiers, updatedSoldiers, deployedSoldierIds),
-          )
-        : missionFailureSummary(kiaSoldierIds.length, deployedSoldierIds.length - kiaSoldierIds.length),
+    summary: baseSummary + captiveIntakeSummary(captiveIntake.report),
   };
   const missionsCompleted = campaign.missionsCompleted + (result === "success" ? 1 : 0);
   const baseResources = awardMissionResources(campaign.resources, report.reward);
@@ -1813,13 +1999,39 @@ export function recordMissionResult(
     : baseResources;
   const regionalPanic = updateRegionalPanicForMission(campaign, operation, result, rosterOutcome);
   const strategic = applyTerrorRescueBonus(
-    updateStrategic(campaign, result, operation, missionsCompleted, resources, updatedSoldiers, regionalPanic),
+    updateStrategic(campaign, result, operation, resources, updatedSoldiers, regionalPanic),
     terrorRescue,
   );
+
+  // Fallback endgame unlock: reaching CAMPAIGN_VICTORY_OPERATIONS reveals the HQ
+  // and (via canLaunchFinalAssault) unlocks the assault — keeping a capture-free
+  // campaign winnable. It does NOT set "won"; only winning the assault does.
+  let nextAlienHq = campaign.alienHq;
+  let projectReports = campaign.projectReports;
+  if (
+    strategic.status === "active" &&
+    missionsCompleted >= CAMPAIGN_VICTORY_OPERATIONS &&
+    nextAlienHq &&
+    !nextAlienHq.revealed
+  ) {
+    nextAlienHq = { ...nextAlienHq, revealed: true };
+    const revealReport: ProjectReport = {
+      kind: "research",
+      id: "alienHqRevealed",
+      title: "Alien HQ located",
+      summary: `Intel from ${missionsCompleted} operations pinpoints the alien headquarters in ${nextAlienHq.location.region}. Launch the final assault.`,
+      completedAtHour: completedHour,
+    };
+    projectReports = [revealReport, ...projectReports].slice(0, PROJECT_REPORT_LIMIT);
+  }
+
   return completeStrategicProgress({
     ...campaign,
     clock: completedClock,
-    ufoContact: undefined,
+    // A final alien-base assault launches from the revealed HQ, NOT from a UFO
+    // contact — completing it must not erase an unrelated live contact. Every
+    // other operation consumes the contact it was launched against.
+    ufoContact: operation.missionType === "alienBaseAssault" ? campaign.ufoContact : undefined,
     strategic,
     regionalPanic,
     resources,
@@ -1828,6 +2040,12 @@ export function recordMissionResult(
     missionsAttempted: operation.missionNumber,
     missionsCompleted,
     lastMission: report,
+    captives: captiveIntake.captives,
+    // Expose the intake outcome for the debrief BEFORE completeStrategicProgress
+    // may run an interrogation that consumes a just-secured captive.
+    lastCaptiveIntake: captiveIntake.report,
+    alienHq: nextAlienHq,
+    projectReports,
   });
 }
 
@@ -1839,6 +2057,13 @@ function updateRegionalPanicForMission(
 ): Record<CouncilRegion, number> {
   const panicMult = difficultyConfig(campaign).panicMult;
   const region = operation.region;
+  // The final HQ assault is the retryable climax: the world already knows the base
+  // is located, so a failed assault does not spike global panic (mirrors the frozen
+  // doom clock in updateStrategic). Without this, repeated big-boss attempts would
+  // silently panic-collapse a campaign that is otherwise winning the war.
+  if (result === "failure" && operation.missionType === "alienBaseAssault") {
+    return campaign.regionalPanic;
+  }
   const regionalPanic =
     result === "success"
       ? adjustRegionalPanic(campaign.regionalPanic, region, -18, 0, panicMult)
@@ -1995,7 +2220,6 @@ function updateStrategic(
   campaign: CampaignState,
   result: MissionResult,
   operation: OperationPlan,
-  missionsCompleted: number,
   resources: CampaignResources,
   soldiers: readonly CampaignSoldier[],
   regionalPanic: Record<CouncilRegion, number>,
@@ -2005,24 +2229,34 @@ function updateStrategic(
 
   const success = result === "success";
   const trackingUplink = hasBaseFacility(campaign, "radar-2");
+  // The final HQ assault is the retryable climax: once the base is located the
+  // invasion can't escalate FURTHER, so a failed assault does not advance the doom
+  // clock and only lightly dents funding. This keeps "retry on loss" a real option
+  // (regroup and hit the HQ again) instead of a hidden death spiral, without
+  // touching the pacing of the normal-mission war that precedes it.
+  const failedAssault = !success && operation.missionType === "alienBaseAssault";
   // Relief (success) stays flat; only penalties are eased on easier difficulties.
   // Success relief is deliberately large so a player who wins missions outruns the
   // doom clock — that positive feedback is the intended X-COM survival loop.
-  const rawThreatDelta = success ? (trackingUplink ? -28 : -25) : trackingUplink ? 12 : 16;
+  const rawThreatDelta = success ? (trackingUplink ? -28 : -25) : failedAssault ? 0 : trackingUplink ? 12 : 16;
   const threatDelta = rawThreatDelta > 0 ? Math.round(rawThreatDelta * difficultyConfig(campaign).threatGainMult) : rawThreatDelta;
   const threat = Math.max(0, Math.min(THREAT_LOSS_THRESHOLD, strategic.threat + threatDelta));
-  const funding = Math.max(0, strategic.funding + (success ? 100 : -75));
+  const funding = Math.max(0, strategic.funding + (success ? 100 : failedAssault ? -25 : -75));
   const score = strategic.score + (success ? 100 + operation.enemyCount * 10 : -50);
   const canFieldSquad =
     soldiers.some((soldier) => soldier.status !== "kia") ||
     resources.credits >= RECRUIT_COST;
   const panicCollapse = Math.max(...Object.values(regionalPanic)) >= PANIC_LOSS_THRESHOLD;
-  const status =
-    missionsCompleted >= CAMPAIGN_VICTORY_OPERATIONS
-      ? "won"
-      : threat >= THREAT_LOSS_THRESHOLD || funding <= 0 || !canFieldSquad || panicCollapse
-        ? "lost"
-        : "active";
+  // Victory is ONLY winning the alien-base assault. Reaching
+  // CAMPAIGN_VICTORY_OPERATIONS no longer wins — recordMissionResult instead
+  // reveals the HQ and unlocks the assault (the fallback path). A LOST assault
+  // never forces "lost"; the normal loss conditions below still apply.
+  const wonAssault = operation.missionType === "alienBaseAssault" && success;
+  const status = wonAssault
+    ? "won"
+    : threat >= THREAT_LOSS_THRESHOLD || funding <= 0 || !canFieldSquad || panicCollapse
+      ? "lost"
+      : "active";
 
   return { status, threat, funding, score };
 }
@@ -2058,6 +2292,62 @@ function spend(resources: CampaignResources, cost: CampaignResources): CampaignR
   };
 }
 
+/** Ordinal of a captive rank in CAPTIVE_RANK_ORDER (soldier=0 … commander=3). */
+function captiveRankIndex(rank: CaptiveRank): number {
+  return CAPTIVE_RANK_ORDER.indexOf(rank);
+}
+
+/** Whether a captive satisfies a project's captive requirement (rank floor is "at least"). */
+function captiveQualifies(captive: CampaignCaptive, project: ResearchProject): boolean {
+  if (project.requiresCaptiveRank) {
+    return captiveRankIndex(captive.rank) >= captiveRankIndex(project.requiresCaptiveRank);
+  }
+  return true;
+}
+
+/** True when the project has no captive requirement or a qualifying captive is held. */
+function hasQualifyingCaptive(campaign: CampaignState, project: ResearchProject): boolean {
+  if (!project.requiresCaptive && !project.requiresCaptiveRank) return true;
+  return (campaign.captives ?? []).some((captive) => captiveQualifies(captive, project));
+}
+
+/**
+ * Remove exactly one qualifying captive for a consumesCaptive project, preferring
+ * the LOWEST qualifying rank (and earliest captured on a tie) so more valuable
+ * captives are preserved for later interrogations.
+ */
+function consumeQualifyingCaptive(campaign: CampaignState, project: ResearchProject): CampaignState {
+  const captives = campaign.captives ?? [];
+  let chosen = -1;
+  let chosenRank = Infinity;
+  for (let i = 0; i < captives.length; i++) {
+    const captive = captives[i]!;
+    if (!captiveQualifies(captive, project)) continue;
+    const rankIndex = captiveRankIndex(captive.rank);
+    if (rankIndex < chosenRank) {
+      chosenRank = rankIndex;
+      chosen = i;
+    }
+  }
+  if (chosen < 0) return campaign;
+  return { ...campaign, captives: captives.filter((_, i) => i !== chosen) };
+}
+
+/**
+ * Whether the final alien-base assault can be launched. Requires the HQ to be
+ * REVEALED and the campaign to be unlocked — either by completing
+ * commanderInterrogation (the research path) OR by reaching the
+ * CAMPAIGN_VICTORY_OPERATIONS fallback milestone (which also reveals the HQ).
+ */
+export function canLaunchFinalAssault(campaign: CampaignState): boolean {
+  if (campaign.strategic.status !== "active") return false;
+  if (!campaign.alienHq?.revealed) return false;
+  return (
+    campaign.completedResearch.includes("commanderInterrogation") ||
+    campaign.missionsCompleted >= CAMPAIGN_VICTORY_OPERATIONS
+  );
+}
+
 export function canStartResearch(campaign: CampaignState, id: ResearchId): boolean {
   const project = RESEARCH_PROJECTS.find((candidate) => candidate.id === id);
   if (!project) return false;
@@ -2066,6 +2356,7 @@ export function canStartResearch(campaign: CampaignState, id: ResearchId): boole
     !campaign.activeResearch &&
     !campaign.completedResearch.includes(id) &&
     project.requires.every((required) => campaign.completedResearch.includes(required)) &&
+    hasQualifyingCaptive(campaign, project) &&
     canAfford(campaign.resources, researchCost(campaign, id))
   );
 }
@@ -2255,7 +2546,16 @@ function addUnlockedItems(armory: CampaignArmory, itemIds: readonly string[]): C
 function completeResearchProject(campaign: CampaignState, id: ResearchId): CampaignState {
   const project = RESEARCH_PROJECTS.find((candidate) => candidate.id === id);
   if (!project) return campaign;
-  return addProjectReport(applyResearchReward(campaign, id), researchReport(project, campaign.clock.elapsedHours));
+  let next = addProjectReport(applyResearchReward(campaign, id), researchReport(project, campaign.clock.elapsedHours));
+  if (project.consumesCaptive) {
+    next = consumeQualifyingCaptive(next, project);
+  }
+  if (project.revealsAlienHq && next.alienHq && !next.alienHq.revealed) {
+    next = { ...next, alienHq: { ...next.alienHq, revealed: true } };
+  }
+  // unlocksFinalAssault needs no state change: canLaunchFinalAssault reads
+  // completedResearch (commanderInterrogation) directly.
+  return next;
 }
 
 export function loadCampaign(): CampaignState | null {
@@ -2333,7 +2633,11 @@ export function loadCampaign(): CampaignState | null {
           : undefined,
       projectReports: normalizeProjectReports(parsed.projectReports),
       captives: normalizeCaptives(parsed.captives),
-      alienHq: normalizeAlienHq(parsed.alienHq),
+      // Legacy pre-endgame saves have no alienHq. With the ops-milestone win
+      // removed, such a campaign is unwinnable unless the HQ is backfilled:
+      // re-seed it deterministically from the campaign seed (hidden), and mark it
+      // revealed when the save already qualifies for the fallback unlock.
+      alienHq: normalizeAlienHq(parsed.alienHq) ?? backfillAlienHq(parsed.seed, parsed.missionsCompleted),
     };
     return completeFinishedBaseConstruction(completeFinishedConstruction(completeFinishedManufacturing(recoverWoundedSoldiers(completeFinishedResearch(normalized)))));
   } catch {
@@ -2767,6 +3071,19 @@ function normalizeCaptives(value: unknown): CampaignCaptive[] | undefined {
 }
 
 /** Reconstruct the alien HQ record. Returns undefined when absent or malformed. */
+/**
+ * Deterministically re-seed the alien HQ for a legacy save that predates the
+ * endgame arc. Mirrors createCampaign's seeding (hidden by default) and reveals
+ * it when the campaign has already reached the CAMPAIGN_VICTORY_OPERATIONS
+ * fallback threshold, so an old advanced campaign stays winnable.
+ */
+function backfillAlienHq(seed: number, missionsCompleted: number): AlienHq {
+  return {
+    ...seedAlienHq(seed >>> 0),
+    revealed: missionsCompleted >= CAMPAIGN_VICTORY_OPERATIONS,
+  };
+}
+
 function normalizeAlienHq(value: unknown): AlienHq | undefined {
   if (!value || typeof value !== "object") return undefined;
   const maybe = value as Partial<AlienHq>;

@@ -62,9 +62,9 @@ describe("soldier loadout items", () => {
   });
 
   it("stocks the starting armory with grenades, medkits, and smoke", () => {
-    expect(STARTING_ARMORY.items).toEqual({ grenade: 8, medkit: 4, smoke: 4 });
+    expect(STARTING_ARMORY.items).toEqual({ grenade: 8, medkit: 4, smoke: 4, stunRod: 4 });
     const campaign = freshCampaign();
-    expect(campaign.armory.items).toEqual({ grenade: 8, medkit: 4, smoke: 4 });
+    expect(campaign.armory.items).toEqual({ grenade: 8, medkit: 4, smoke: 4, stunRod: 4 });
   });
 
   it("reports the full starting stock as available before any assignment", () => {
@@ -207,7 +207,7 @@ describe("soldier loadout items", () => {
     const loaded = loadCampaign();
 
     expect(loaded).not.toBeNull();
-    expect(loaded!.armory.items).toEqual({ grenade: 8, medkit: 4, smoke: 4 });
+    expect(loaded!.armory.items).toEqual({ grenade: 8, medkit: 4, smoke: 4, stunRod: 4 });
     expect(loaded!.soldiers[0]!.loadoutItems).toEqual([]);
   });
 

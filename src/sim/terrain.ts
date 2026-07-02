@@ -229,6 +229,13 @@ export interface TerrainTheme {
   name: string;
   palette: TileType[];
   blocks: TerrainBlock[];
+  /**
+   * Special themes are resolvable by {@link getTheme} (explicit request) but
+   * excluded from {@link themeIds}' random-pick pool, so a normal mission never
+   * rolls them by chance. Used by the alien-base assault, whose tileset is an
+   * explicit story beat rather than a natural terrain.
+   */
+  special?: boolean;
 }
 
 /** Palette index of the dominant walkable ground in every theme palette. */
@@ -610,16 +617,35 @@ export const DESERT: TerrainTheme = {
 // Theme registry
 // ---------------------------------------------------------------------------
 
+/**
+ * The alien-base assault tileset. Currently aliases the urban layout (enclosed
+ * blocks read well for an interior HQ); the game layer forces deep-night lighting
+ * and the HUD labels it "Alien Base". Marked `special` so it is only used when
+ * explicitly requested by the assault operation — never a random mission theme.
+ */
+export const ALIEN_BASE: TerrainTheme = {
+  id: "alienBase",
+  name: "Alien Base",
+  palette: URBAN_PALETTE,
+  blocks: URBAN_BLOCKS,
+  special: true,
+};
+
 /** All terrain themes, keyed by id. */
 export const THEMES: Record<string, TerrainTheme> = {
   farmland: FARMLAND,
   urban: URBAN,
   desert: DESERT,
+  alienBase: ALIEN_BASE,
 };
 
-/** Stable list of available theme ids (deterministic insertion order). */
+/**
+ * Stable list of the terrain ids eligible for the generator's RANDOM theme pick
+ * (deterministic insertion order). Special themes (e.g. the alien base) are
+ * excluded — they resolve only through an explicit {@link getTheme} request.
+ */
 export function themeIds(): string[] {
-  return Object.keys(THEMES);
+  return Object.keys(THEMES).filter((id) => THEMES[id]?.special !== true);
 }
 
 /** Look up a theme by id, or undefined when unknown. */

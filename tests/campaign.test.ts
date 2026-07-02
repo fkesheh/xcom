@@ -756,8 +756,15 @@ describe("campaign state", () => {
     for (let i = 0; i < CAMPAIGN_VICTORY_OPERATIONS; i++) {
       winning = recordMissionResult(winning, "success", generateOperation(winning), `2026-06-${15 + i}T00:00:00.000Z`);
     }
-    expect(winning.strategic.status).toBe("won");
+    // Reaching the operations milestone no longer wins: it reveals the alien HQ
+    // and unlocks the final assault (the fallback path). Victory requires winning
+    // that assault.
+    expect(winning.strategic.status).toBe("active");
     expect(winning.missionsCompleted).toBe(CAMPAIGN_VICTORY_OPERATIONS);
+    expect(winning.alienHq?.revealed).toBe(true);
+    const finalAssault = generateOperation(winning, "alienBaseAssault");
+    winning = recordMissionResult(winning, "success", finalAssault, "2026-06-25T00:00:00.000Z");
+    expect(winning.strategic.status).toBe("won");
     expect(campaignObjectiveProgress(winning)).toMatchObject({
       completed: CAMPAIGN_VICTORY_OPERATIONS,
       remaining: 0,

@@ -16,6 +16,7 @@ import {
   canExtractObjective,
   canRecoverObjective,
   canSee,
+  collectCaptures,
   createSkirmish,
   dir8Towards,
   findPath,
@@ -57,7 +58,7 @@ import {
   executeInterceptionAction,
   type InterceptionAction,
 } from "../campaign/geoscape";
-import { generateOperation } from "../campaign/operations";
+import { alienBaseCrewRanks, canDeployToOperationSite, generateOperation, launchFinalAssault, ufoCrewRanks } from "../campaign/operations";
 import {
   assignSoldierItem,
   assignSoldierWeapon,
@@ -313,6 +314,19 @@ window.addEventListener("pointerdown", () => { void sfx.resume(); }, { once: tru
  */
 let currentCampaign: CampaignState | null = null;
 
+/** Human-readable species label for a captured alien's sim template id, used in
+ *  the debrief + containment readouts (falls back to the raw id if unknown). */
+const CAPTIVE_SPECIES_LABELS: Record<string, string> = {
+  drone: "Drone",
+  stalker: "Stalker",
+  sentinel: "Sentinel",
+  heavy: "Heavy",
+  commander: "Commander",
+};
+function captiveSpeciesLabel(templateId: string): string {
+  return CAPTIVE_SPECIES_LABELS[templateId] ?? templateId;
+}
+
 /** Chebyshev (8-way) distance between two tiles — mirrors the sim's adjacency rule. */
 function chebyshev(a: Vec2, b: Vec2): number {
   return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
@@ -419,6 +433,19 @@ function buildGeoscapeCallbacks(campaign: CampaignState | null) {
         return;
       }
       void mountPlaneCombat(currentCampaign);
+    },
+    onLaunchAssault: () => {
+      // Final decapitating strike on the revealed alien HQ. Build the assault
+      // operation (guarded by canLaunchFinalAssault inside launchFinalAssault) and
+      // hand straight to the tactical controller — there is no UFO contact/flight
+      // for the HQ; startTactical bypasses the contact requirement for the assault.
+      const current = currentCampaign ?? campaign;
+      if (!current || current.strategic.status !== "active") return;
+      const plan = launchFinalAssault(current);
+      if (!plan) return;
+      flushSave();
+      currentCampaign = current;
+      void startTactical(current, plan);
     },
     onBuildNewBase: (location: BaseLocation) => {
       if (!currentCampaign) return;
@@ -654,16 +681,17 @@ async function showBase(campaign: CampaignState): Promise<void> {
 async function startTactical(campaign: CampaignState, operation: OperationPlan = generateOperation(campaign)): Promise<void> {
   flushSave();
   const deployment = deploymentSoldiers(campaign);
-  const contactStatus = campaign.ufoContact?.status;
-  // Launch for both "crashed" (classic shoot-down) and "landed" (terror, landed
-  // UFO, base defense) contacts — generateOperation already branches on
-  // missionType to produce the right enemies, theme, and context. A crash over
-  // ocean is lost at sea — no assault site to deploy to, so refuse to launch.
+  // The final alien-base assault has NO UFO contact — its site is the revealed HQ
+  // location, so it bypasses the contact guards (see canDeployToOperationSite).
+  const isAssaultOp = operation.missionType === "alienBaseAssault";
+  // Bail unless the campaign is active, a squad is deployed, and the operation has
+  // a reachable deploy site. canDeployToOperationSite centralizes the contact rules
+  // (crashed-over-land / landed for regular ops; unconditional for the assault) so
+  // a stale over-ocean contact can never silently swallow the assault launch.
   if (
     campaign.strategic.status !== "active" ||
     deployment.length === 0 ||
-    (contactStatus !== "crashed" && contactStatus !== "landed") ||
-    (contactStatus === "crashed" && campaign.ufoContact?.overOcean === true)
+    !canDeployToOperationSite(campaign, operation)
   ) {
     return;
   }
@@ -680,6 +708,7 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
   // objective with civilians to protect, a crashed/landed UFO builds the classic
   // "recover the power source" objective, and a base defense has no objective.
   const missionType = operation.missionType;
+  const isAssault = isAssaultOp;
   const missionObjective =
     missionType === "terror"
       ? {
@@ -689,14 +718,31 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
       : missionType === "crashSite" || missionType === "landedUfo"
         ? { objectiveKind: "recover" as const }
         : {};
+  // Rank channel: the alien-base assault fields its fixed elite garrison (always a
+  // commander + leader); a UFO-crew mission fields the composition its ufoType
+  // rolls. Passing enemyRanks makes those ranks land on the spawned hostiles so
+  // captures carry the ranks that gate interrogation research. Deterministic in
+  // the mission seed; omitted (legacy spawn) when no ufoType is known.
+  const enemyRanks = isAssault
+    ? alienBaseCrewRanks(SEED, operation.enemyCount)
+    : campaign.ufoContact?.ufoType
+      ? ufoCrewRanks(campaign.ufoContact.ufoType, SEED, operation.enemyCount)
+      : undefined;
+  // "alienBase" is a registered (special) sim theme aliasing the urban layout, so
+  // it resolves deterministically for every createSkirmish caller. The assault
+  // additionally forces deep-night lighting so the HQ reads distinctly dark/alien
+  // via the existing time-of-day tint hook.
+  const themeId = operation.themeId;
+  const hourOfDay = isAssault ? 0 : campaign.clock.hour;
   let state: BattleState = createSkirmish({
     seed: SEED,
     width: operation.width,
     height: operation.height,
     players: deployment.length,
     enemies: operation.enemyCount,
-    themeId: operation.themeId,
-    hourOfDay: campaign.clock.hour,
+    ...(enemyRanks ? { enemyRanks } : {}),
+    themeId,
+    hourOfDay,
     playerWeaponIds: deploymentWeaponIds(campaign),
     playerItems: deploymentItemIds(campaign),
     playerNames: deployment.map((soldier) => soldier.name),
@@ -718,8 +764,8 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
   /** id of the unit whose directional cover indicators are shown (dedupe; null = cleared). */
   let coverFocusId: number | null = null;
 
-  /** Active item-targeting mode (throw a grenade / heal an ally), or null. */
-  let itemTargeting: { kind: "throw" | "heal"; itemId: string } | null = null;
+  /** Active item-targeting mode (throw a grenade / heal an ally / stun an enemy), or null. */
+  let itemTargeting: { kind: "throw" | "heal" | "stun"; itemId: string } | null = null;
 
   /** Active psi-targeting mode (panic / mind control), or null. The next enemy
    *  click resolves into a `psiAttack` command; right-click / ESC cancels. */
@@ -770,6 +816,8 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
       // of entering ally-targeting (which is the medkit flow).
       const def = state.items?.[itemId];
       if (def?.kind === "scanner") activateScanner(itemId);
+      // The stun rod strikes an adjacent HOSTILE (capture tool), not an ally.
+      else if (def?.kind === "stunRod") beginTargeting("stun", itemId);
       else beginTargeting("heal", itemId);
     },
     onPrimeItem: (itemId) => primeSelected(itemId),
@@ -923,6 +971,7 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
       ...(report.civilianCasualties !== undefined
         ? { civilianCasualties: report.civilianCasualties }
         : {}),
+      ...(missionCaptures ? { captures: missionCaptures } : {}),
     };
   }
 
@@ -975,13 +1024,17 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
   // Item targeting mode
   // -------------------------------------------------------------------------
 
-  function beginTargeting(kind: "throw" | "heal", itemId: string): void {
+  function beginTargeting(kind: "throw" | "heal" | "stun", itemId: string): void {
     if (busy || state.status !== "playing") return;
     itemTargeting = { kind, itemId };
     const def = state.items?.[itemId];
     const label = def?.name ?? itemId;
     hud.notify(
-      kind === "throw" ? `CLICK A TILE TO THROW ${label.toUpperCase()}` : `CLICK AN ADJACENT ALLY TO USE ${label.toUpperCase()}`,
+      kind === "throw"
+        ? `CLICK A TILE TO THROW ${label.toUpperCase()}`
+        : kind === "stun"
+          ? `CLICK AN ADJACENT ENEMY TO STUN WITH ${label.toUpperCase()}`
+          : `CLICK AN ADJACENT ALLY TO USE ${label.toUpperCase()}`,
       "info",
     );
     renderer.clearPreview();
@@ -1031,6 +1084,29 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
       return;
     }
 
+    // stun: strike an adjacent (in-reach) hostile with the stun rod.
+    if (itemTargeting.kind === "stun") {
+      const def = state.items?.[itemTargeting.itemId];
+      const reach = def?.reach ?? 1;
+      const hoveredUnitId = renderer.raycastUnit(clientX, clientY);
+      if (hoveredUnitId !== null) {
+        const target = unitById(state, hoveredUnitId);
+        if (
+          target &&
+          target.alive &&
+          !target.unconscious &&
+          target.faction === "enemy" &&
+          chebyshev(sel.pos, target.pos) <= reach
+        ) {
+          void dispatch({ type: "useItem", unitId: sel.id, targetId: target.id, itemId: itemTargeting.itemId });
+          clearTargeting();
+        } else {
+          hud.notify("TARGET MUST BE AN ADJACENT ENEMY", "danger");
+        }
+      }
+      return;
+    }
+
     // heal: click an adjacent ally
     const hoveredUnitId = renderer.raycastUnit(clientX, clientY);
     if (hoveredUnitId !== null) {
@@ -1076,6 +1152,34 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
         renderer.showPathPreview([]);
         currentHover = null;
       }
+      refreshHud();
+      return;
+    }
+
+    // stun: highlight whether the hovered unit is a valid in-reach hostile
+    if (itemTargeting.kind === "stun") {
+      const reach = def?.reach ?? 1;
+      const hoveredUnitId = renderer.raycastUnit(clientX, clientY);
+      const target = hoveredUnitId !== null ? unitById(state, hoveredUnitId) : undefined;
+      const valid =
+        !!target &&
+        target.alive &&
+        !target.unconscious &&
+        target.faction === "enemy" &&
+        chebyshev(sel.pos, target.pos) <= reach;
+      renderer.setHoverTile(null);
+      renderer.showPathPreview([]);
+      currentHover = valid
+        ? {
+            kind: "target",
+            label: target!.name,
+            detail: `Click to strike with ${name} (+${def?.stunPower ?? 0} stun, ${target!.stun}/${target!.hp}). ${sel.tu} TU left.`,
+          }
+        : {
+            kind: "blocked",
+            label: `Stun ${name}`,
+            detail: "Click an adjacent enemy to build stun.",
+          };
       refreshHud();
       return;
     }
@@ -1487,6 +1591,18 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
     soldiers: Map<string, { rank: SoldierRank; statGrowth?: SoldierStatGrowth }>;
   } | null = null;
 
+  /** Live-capture tally for the debrief: aliens secured into containment this
+   *  mission (by rank/species) vs lost, with the intake's containment context so
+   *  the readout can tell "no facility" from "facility full". Read from the intake
+   *  report recordMissionResult exposes; null when none taken. */
+  let missionCaptures: {
+    secured: { rank: string; species: string }[];
+    lostCount: number;
+    hadContainment: boolean;
+    held: number;
+    capacity: number;
+  } | null = null;
+
   function completeMission(result: "success" | "failure"): void {
     if (completedCampaign) return;
     const latest = currentCampaign ?? campaign;
@@ -1528,6 +1644,10 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
       ? state.units.filter((unit) => unit.faction === "civilian")
       : [];
     const civiliansRescued = civilians.filter((unit) => unit.alive).length;
+    // Capture bridge: on a player victory every hostile still unconscious on the
+    // field is taken alive. The debrief/recordMissionResult turns these into
+    // stored captives IF a base has containment (capacity-capped; excess lost).
+    const captures = result === "success" ? collectCaptures(state) : [];
     completedCampaign = recordMissionResult(
       latest,
       result,
@@ -1536,6 +1656,7 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
         deployedSoldierIds: deployed,
         survivingSoldierIds: survivors,
         survivorHealth,
+        ...(captures.length > 0 ? { captures } : {}),
         ...(isTerror
           ? {
               civilianCount: civilians.length,
@@ -1545,6 +1666,25 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
           : {}),
       },
     );
+    // Debrief capture tally: read the intake outcome recorded by
+    // recordMissionResult (computed BEFORE any interrogation research consumed a
+    // just-secured captive) rather than diffing the roster — so a captive secured
+    // this mission and immediately spent on research still counts as secured.
+    const intake = completedCampaign.lastCaptiveIntake;
+    if (intake && (intake.secured.length > 0 || intake.lost > 0)) {
+      missionCaptures = {
+        secured: intake.secured.map((c) => ({
+          rank: c.rank as string,
+          species: captiveSpeciesLabel(c.templateId),
+        })),
+        lostCount: intake.lost,
+        hadContainment: intake.hadContainment,
+        held: intake.held,
+        capacity: intake.capacity,
+      };
+    } else {
+      missionCaptures = null;
+    }
     currentCampaign = completedCampaign;
     saveCampaign(completedCampaign);
   }
@@ -1618,6 +1758,39 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
           if (ev.kind === "panic" && ev.success) sfx.panic();
           else if (!ev.success) sfx.select();
           if (!ev.success) hud.notify("PSI ATTACK RESISTED", "danger");
+          refreshHud();
+          break;
+        }
+        case "stunStrike": {
+          // Non-lethal takedown: electric FX + zap SFX + a floating stun number.
+          const target = unitById(state, ev.targetId);
+          if (target) renderer.focusOn(target.pos);
+          sfx.stun(ev.knockedOut === true);
+          await renderer.playStunStrike(ev);
+          if (ev.knockedOut) hud.notify("HOSTILE KNOCKED OUT — CAPTURED ON VICTORY", "success");
+          refreshHud();
+          break;
+        }
+        case "woke": {
+          // A stunned hostile shook it off and is back in the fight.
+          sfx.woke();
+          hud.notify("STUNNED HOSTILE REVIVED", "danger");
+          refreshHud();
+          break;
+        }
+        case "knockedOut": {
+          // Damage (gunfire/blast/reaction) drove a stunned unit's hp down to its
+          // stun pool — it falls unconscious. A hostile is captured on victory; a
+          // downed soldier is out of the fight. The pose lands on the post-loop sync.
+          const target = unitById(state, ev.unitId);
+          if (target) renderer.focusOn(target.pos);
+          sfx.stun(true);
+          hud.notify(
+            target?.faction === "enemy"
+              ? "HOSTILE KNOCKED OUT — CAPTURED ON VICTORY"
+              : "SOLDIER KNOCKED OUT",
+            target?.faction === "enemy" ? "success" : "danger",
+          );
           refreshHud();
           break;
         }
@@ -1755,7 +1928,8 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
 
     if (sel && hoveredUnitId !== null) {
       const target = unitById(state, hoveredUnitId);
-      if (target && target.faction === "enemy" && target.alive) {
+      // An unconscious (captured) hostile is neutralized — never a shoot target.
+      if (target && target.faction === "enemy" && target.alive && !target.unconscious) {
         renderer.showAimLine(sel.pos, target.pos);
         renderer.setHoverTile(null);
         const previews: HudHover["previews"] = {};
@@ -1870,7 +2044,7 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
         select(u.id);
         return;
       }
-      if (u && u.alive && u.faction === "enemy") {
+      if (u && u.alive && u.faction === "enemy" && !u.unconscious) {
         const sel = selectedUnit();
         if (sel) void dispatch({ type: "shoot", unitId: sel.id, target: u.pos, mode: currentMode });
         return;
@@ -1885,7 +2059,7 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
       select(occupant.id);
       return;
     }
-    if (occupant && occupant.alive && occupant.faction === "enemy") {
+    if (occupant && occupant.alive && occupant.faction === "enemy" && !occupant.unconscious) {
       const sel = selectedUnit();
       if (sel) void dispatch({ type: "shoot", unitId: sel.id, target: occupant.pos, mode: currentMode });
       return;

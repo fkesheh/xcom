@@ -40,9 +40,10 @@ import {
   RESEARCH_PROJECTS,
   DEPLOYMENT_SIZE,
   CAMPAIGN_VICTORY_OPERATIONS,
+  canLaunchFinalAssault,
 } from "../src/campaign/storage";
 import { advanceGeoscape, interceptUfo, canLaunchInterceptor } from "../src/campaign/geoscape";
-import { generateOperation } from "../src/campaign/operations";
+import { alienBaseCrewRanks, generateOperation, launchFinalAssault } from "../src/campaign/operations";
 import type {
   BaseLocation,
   CampaignState,
@@ -428,16 +429,30 @@ interface AssaultOutcome {
   civiliansTotal: number;
 }
 
-function assaultContact(campaign: CampaignState): AssaultOutcome | undefined {
+function assaultContact(
+  campaign: CampaignState,
+  operation: OperationPlan = generateOperation(campaign),
+): AssaultOutcome | undefined {
   const deployedSoldiers = deploymentSoldiers(campaign);
   if (deployedSoldiers.length === 0) return undefined;
 
-  const operation: OperationPlan = generateOperation(campaign);
   const deployedIds = deployedSoldiers.map((s) => s.id);
   const weaponIds = deploymentWeaponIds(campaign);
   const statBonuses = deployedSoldiers.map((s) => campaignSoldierStatBonus(campaign, s));
   const isTerror = operation.missionType === "terror";
+  const isAssault = operation.missionType === "alienBaseAssault";
   const civiliansTotal = operation.missionContext?.civilianCount ?? 0;
+
+  // Mirror main.ts's startTactical exactly for the final assault: the elite HQ
+  // garrison (commander + leader) via alienBaseCrewRanks, NO recover objective
+  // (pure elimination — no extra win path), the alien-base theme, and deep-night
+  // lighting. Anything else here simulates a softer boss than the real game.
+  const enemyRanks = isAssault ? alienBaseCrewRanks(operation.missionSeed, operation.enemyCount) : undefined;
+  const objectiveKind = isTerror
+    ? ("rescue" as const)
+    : operation.missionType === "crashSite" || operation.missionType === "landedUfo"
+      ? ("recover" as const)
+      : undefined;
 
   const state = createSkirmish({
     seed: operation.missionSeed,
@@ -445,13 +460,14 @@ function assaultContact(campaign: CampaignState): AssaultOutcome | undefined {
     height: operation.height,
     players: deployedIds.length,
     enemies: operation.enemyCount,
+    ...(enemyRanks ? { enemyRanks } : {}),
     themeId: operation.themeId,
     playerWeaponIds: weaponIds,
     playerSoldierIds: deployedIds,
     playerStatBonuses: statBonuses,
-    objectiveKind: isTerror ? "rescue" : "recover",
+    ...(objectiveKind ? { objectiveKind } : {}),
     civilianCount: civiliansTotal,
-    hourOfDay: campaign.clock.hour,
+    hourOfDay: isAssault ? 0 : campaign.clock.hour,
   });
 
   autoPlayToCompletion(state);
@@ -549,6 +565,26 @@ function runCampaign(seed: number, difficulty: DifficultyLevel): CampaignMetrics
     if (campaign.clock.elapsedHours >= MAX_HOURS || counters.advances >= MAX_ADVANCES) {
       stalled = true;
       break;
+    }
+
+    // Endgame: once the HQ is revealed and the final assault is unlocked (via
+    // interrogation research OR the CAMPAIGN_VICTORY_OPERATIONS fallback milestone),
+    // launch the alien-base assault and treat it like any other mission. Winning it
+    // is now the only path to "won"; a loss leaves the campaign active for a retry.
+    if (canLaunchFinalAssault(campaign)) {
+      const assaultOp = launchFinalAssault(campaign);
+      if (assaultOp && deploymentSoldiers(campaign).length > 0) {
+        const outcome = assaultContact(campaign, assaultOp);
+        if (outcome) {
+          campaign = outcome.campaign;
+          counters.missionsPlayed++;
+          counters.kia += outcome.kia;
+          counters.wounded += outcome.wounded;
+          if (outcome.result === "success") counters.missionsWon++;
+          campaign = economyStep(campaign);
+          continue;
+        }
+      }
     }
 
     const prevContactId = campaign.ufoContact?.id;

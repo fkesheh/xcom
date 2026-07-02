@@ -10,6 +10,7 @@
 import type {
   BattleState,
   Dir8,
+  EnemyRank,
   ItemInstance,
   Unit,
   UnitStats,
@@ -53,6 +54,34 @@ export interface SkirmishOptions {
   objectiveKind?: "recover" | "rescue";
   /** "rescue" objectives: civilians to scatter through the strike zone. */
   civilianCount?: number;
+  /**
+   * Explicit hostile crew composition by rank (endgame rank channel). Each rank
+   * maps to an enemy template that fields it (soldier→drone/stalker, navigator→
+   * sentinel, leader→heavy, commander→commander) so campaign-driven crews —
+   * captured for containment/interrogation — spawn with the right ranks. When
+   * omitted the legacy drone/sentinel rotation is used unchanged. Length drives
+   * the enemy count in place of `enemies` when present.
+   */
+  enemyRanks?: readonly EnemyRank[];
+}
+
+/**
+ * Enemy template that fields a given crew rank. Soldiers alternate drone/stalker
+ * for variety without consuming the map rng (index parity keeps the seed stream
+ * identical to legacy spawns); the other ranks each have a single carrier.
+ */
+function templateIdForRank(rank: EnemyRank, index: number): string {
+  switch (rank) {
+    case "navigator":
+      return "sentinel";
+    case "leader":
+      return "heavy";
+    case "commander":
+      return "commander";
+    case "soldier":
+    default:
+      return index % 2 === 0 ? "drone" : "stalker";
+  }
 }
 
 /** Build a carried item instance: grenades are single-use, medkits hold 3 charges. */
@@ -93,6 +122,9 @@ function spawnUnit(
     items: itemInstancesFor(template),
     weaponId: template.weaponId,
     ammo: weapon?.magazineSize ?? 0,
+    stun: 0,
+    unconscious: false,
+    rank: template.rank,
     alive: true,
     reserve: "none",
     stance: "stand",
@@ -174,7 +206,10 @@ export function createSkirmish(opts: SkirmishOptions): BattleState {
   const width = opts.width ?? DEFAULT_WIDTH;
   const height = opts.height ?? DEFAULT_HEIGHT;
   const requestedPlayers = opts.players ?? DEFAULT_PLAYERS;
-  const requestedEnemies = opts.enemies ?? DEFAULT_ENEMIES;
+  // An explicit rank composition (endgame rank channel) drives the hostile count;
+  // otherwise fall back to the requested/legacy enemy count.
+  const enemyRanks = opts.enemyRanks;
+  const requestedEnemies = enemyRanks?.length ?? opts.enemies ?? DEFAULT_ENEMIES;
 
   const rng = new Rng(opts.seed);
   const map = generateMap(rng, {
@@ -234,7 +269,11 @@ export function createSkirmish(opts: SkirmishOptions): BattleState {
 
   for (let i = 0; i < enemyCount; i++) {
     const tile = enemySpawns[i]!;
-    const tplId = enemyTemplateIds[i % enemyTemplateIds.length]!;
+    // Rank channel: map the requested rank to its carrier template when a crew
+    // composition was supplied; otherwise keep the legacy drone/sentinel rotation.
+    const tplId = enemyRanks
+      ? templateIdForRank(enemyRanks[i]!, i)
+      : enemyTemplateIds[i % enemyTemplateIds.length]!;
     const tpl = requireTemplate(tplId);
     const name = enemyNames.shift() ?? `Hostile-${nextId}`;
     units.push(spawnUnit(nextId, tpl, name, tile, dir8Towards(tile, enemyFocus)));

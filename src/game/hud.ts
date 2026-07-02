@@ -126,6 +126,16 @@ export interface HudDebrief {
   /** Civilians saved on a terror mission, when applicable. */
   civiliansRescued?: number;
   civilianCasualties?: number;
+  /** Live aliens taken (stunned) this mission: secured into containment vs lost.
+   *  `hadContainment` distinguishes a full facility (held/capacity) from an absent
+   *  one. Present only when at least one capture was made. */
+  captures?: {
+    secured: { rank: string; species: string }[];
+    lostCount: number;
+    hadContainment: boolean;
+    held: number;
+    capacity: number;
+  };
 }
 
 export interface HudCallbacks {
@@ -1847,9 +1857,11 @@ export class Hud {
     const isSmoke = def.kind === "smoke";
     const isProxMine = def.kind === "proxMine";
     const isScanner = def.kind === "scanner";
+    const isStunRod = def.kind === "stunRod";
     const isThrowable = isGrenade || isSmoke || isProxMine;
     const action: ItemActionKind = isThrowable ? "throw" : "use";
-    const verb = isThrowable ? "Throw" : "Use";
+    // The stun rod is a melee capture tool, not a heal — read its verb as "Stun".
+    const verb = isThrowable ? "Throw" : isStunRod ? "Stun" : "Use";
     const cost = itemActionTuCost(maxTu, def.tuPercent, action);
     const outOfUses = inst.uses <= 0;
     const cantAfford = selected.tu < cost;
@@ -1866,12 +1878,16 @@ export class Hud {
           ? `Throw ${def.name} (mine, blast ${def.blastRadius ?? 2}, ${def.throwRange ?? 6} range) - ${cost} TU`
           : isScanner
             ? `Use ${def.name} (reveals enemies within ${def.scanRadius ?? 8} tiles through walls) - ${cost} TU`
-            : `Use ${def.name} on an adjacent ally (heals ${def.healAmount ?? 0}) - ${cost} TU`;
+            : isStunRod
+              ? `Strike an adjacent enemy with ${def.name} (+${def.stunPower ?? 0} stun; enough drops it unconscious for capture) - ${cost} TU`
+              : `Use ${def.name} on an adjacent ally (heals ${def.healAmount ?? 0}) - ${cost} TU`;
     const label = el("span", "item-label");
     const name = el("b");
     name.textContent = def.name;
     const meta = el("small");
-    const charge = `x${inst.uses} - ${cost} TU`;
+    // The stun rod is reusable (no charge is spent), so read it as such instead
+    // of a consumable "x1" charge count.
+    const charge = isStunRod ? `reusable - ${cost} TU` : `x${inst.uses} - ${cost} TU`;
     meta.textContent = primed ? `${charge} - primed ${inst.fuseTurns ?? 1}t` : charge;
     label.append(name, meta);
     const verbSpan = el("span", "item-verb");
@@ -2099,10 +2115,47 @@ export class Hud {
       root.appendChild(this.renderCampaignStrip(status));
     }
     root.appendChild(this.renderLootRow(debrief.reward));
+    if (debrief.captures) root.appendChild(this.renderCapturesSection(debrief.captures));
     root.appendChild(this.renderDebriefMeta(debrief));
     root.appendChild(this.renderCasualtySection(debrief));
     root.appendChild(this.renderSurvivorSection(debrief));
     return root;
+  }
+
+  /** Live-capture readout: how many aliens were taken alive and secured into
+   *  containment (by rank/species), plus any lost to full/absent containment. */
+  private renderCapturesSection(captures: NonNullable<HudDebrief["captures"]>): HTMLElement {
+    const wrap = el("div", "debrief-section");
+    const head = el("div", "debrief-section-head");
+    const secured = captures.secured.length;
+    const total = secured + captures.lostCount;
+    const label = el("span", "eyebrow");
+    label.textContent = "Live specimens";
+    const count = el("span", "debrief-count");
+    count.textContent = `${secured}/${total} secured`;
+    head.append(label, count);
+    wrap.appendChild(head);
+
+    if (secured > 0) {
+      const line = el("div", "debrief-campaign-line");
+      const names = captures.secured
+        .map((c) => `${c.rank.charAt(0).toUpperCase()}${c.rank.slice(1)} (${c.species})`)
+        .join(", ");
+      line.textContent = `${secured === 1 ? "One alien" : `${secured} aliens`} taken alive: ${names}.`;
+      wrap.appendChild(line);
+    }
+    if (captures.lostCount > 0) {
+      const lost = el("div", "debrief-campaign-line");
+      lost.style.color = "var(--hud-red)";
+      // Distinguish a FULL facility (the player owns one — it's just at capacity)
+      // from an ABSENT one (build the facility). Keyed off the intake's real
+      // containment flag, not the secured count.
+      lost.textContent = captures.hadContainment
+        ? `${captures.lostCount} lost — containment full (${captures.held}/${captures.capacity}).`
+        : `${captures.lostCount} taken alive but lost — no containment facility. Build Alien Containment to hold captives.`;
+      wrap.appendChild(lost);
+    }
+    return wrap;
   }
 
   private renderCampaignStrip(status: "won" | "lost"): HTMLElement {

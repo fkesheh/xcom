@@ -14,6 +14,7 @@ export {
   applyCommand,
   canExtractObjective,
   canRecoverObjective,
+  collectCaptures,
   previewPlayerShot,
   unitById,
   unitAt,
