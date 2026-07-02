@@ -1,7 +1,6 @@
 import {
   AdditiveBlending,
   AmbientLight,
-  BackSide,
   BoxGeometry,
   BufferGeometry,
   Color,
@@ -25,6 +24,7 @@ import {
   Raycaster,
   RingGeometry,
   Scene,
+  ShaderMaterial,
   SphereGeometry,
   SRGBColorSpace,
   type Texture,
@@ -56,12 +56,14 @@ import { campaignObjectiveProgress, canBuildNewBase, canLaunchFinalAssault, DIFF
 import {
   animateBeaconPulse,
   createEarthShaderMaterial,
+  createGraticuleMaterial,
   createRimAtmosphere,
   makeCloudTexture,
   makeEarthTexture,
   makeGraticuleLatLine,
   makeGraticuleLonLine,
   populateBaseBeacon,
+  populateCrashBeacon,
   populateExtraBaseBeacon,
   populateHqBeacon,
   populateUfoBeacon,
@@ -223,18 +225,14 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + `
   letter-spacing: .02em;
 }
 #geoscape canvas { width: 100%; height: 100%; cursor: grab; }
+/* No grid over space — just an edge vignette so the starfield reads as depth. */
 #geoscape::before {
   content: "";
   position: absolute;
   inset: 0;
   z-index: 2;
   pointer-events: none;
-  background:
-    linear-gradient(90deg, rgba(103,232,249,.045) 1px, transparent 1px),
-    linear-gradient(rgba(103,232,249,.035) 1px, transparent 1px),
-    radial-gradient(circle at 50% 50%, transparent 43%, rgba(0,0,0,.42) 100%);
-  background-size: 42px 42px, 42px 42px, auto;
-  mix-blend-mode: screen;
+  background: radial-gradient(circle at 50% 50%, transparent 43%, rgba(0,0,0,.42) 100%);
 }
 #geoscape .geo-canvas {
   position: absolute;
@@ -1097,6 +1095,15 @@ function disposeMaterial(material: Material): void {
   ];
   const withMaps = material as Material & Record<string, Texture | null | undefined>;
   for (const key of maps) withMaps[key]?.dispose();
+  // ShaderMaterials keep their textures in `uniforms` (e.g. the earth's `uMap`
+  // 2048×1024 CanvasTexture), not in the standard map slots above, so free any
+  // texture-valued uniform here or it leaks on every view teardown.
+  if (material instanceof ShaderMaterial) {
+    for (const uniform of Object.values(material.uniforms)) {
+      const value = uniform?.value as Texture | undefined;
+      if (value && (value as { isTexture?: boolean }).isTexture) value.dispose();
+    }
+  }
   material.dispose();
 }
 
@@ -1151,6 +1158,8 @@ export class GeoscapeView {
   private ufoMissionType: MissionType | undefined;
   /** UFO variety the marker was last built for (rebuilt only on change). */
   private ufoType: UfoType | undefined;
+  /** Whether the UFO marker was last built as a crashed (amber cross) beacon. */
+  private ufoCrashed: boolean | undefined;
   /** Contact id the current trail belongs to; reset whenever the UFO changes. */
   private ufoTrailContactId: string | null = null;
   /** Recent airborne UFO positions (lat/lon, oldest first); capped at UFO_TRAIL_MAX. */
@@ -1243,6 +1252,8 @@ export class GeoscapeView {
   private earthSunUniform: { value: Vector3 } | null = null;
   /** Fresnel rim atmosphere sun-direction uniform (updated each frame). */
   private rimSunUniform: { value: Vector3 } | null = null;
+  /** Graticule day-side-fade sun-direction uniform (updated each frame). */
+  private gratSunUniform: { value: Vector3 } | null = null;
   /** Live clock readout node — rewritten each frame for smooth HH:MM flow. */
   private clockStatValue: HTMLElement | null = null;
   /** Expanding pulse rings on surface beacons (animated in the frame loop). */
@@ -1343,6 +1354,7 @@ export class GeoscapeView {
     this.speedBar = panels.speedBar;
     this.ufoMissionType = opts.campaign?.ufoContact?.missionType;
     this.ufoType = opts.campaign?.ufoContact?.ufoType;
+    this.ufoCrashed = opts.campaign?.ufoContact?.status === "crashed";
     this.updateSelectionHud();
     // First render populates every panel/marker and seeds the event snapshot
     // (without firing an auto-pause toast for the already-known campaign).
@@ -1427,18 +1439,8 @@ export class GeoscapeView {
     const ocean = new Mesh(new SphereGeometry(EARTH_RADIUS, 64, 36), earthShader.material);
     this.earthGroup.add(ocean);
 
-    const atmosphere = new Mesh(
-      new SphereGeometry(EARTH_RADIUS + 0.1, 64, 32),
-      new MeshBasicMaterial({
-        color: 0x67e8f9,
-        transparent: true,
-        opacity: 0.08,
-        side: BackSide,
-        blending: AdditiveBlending,
-        depthWrite: false,
-      }),
-    );
-    this.earthGroup.add(atmosphere);
+    // Single tight fresnel rim only — no secondary haze sphere (it muddied the
+    // silhouette). See createRimAtmosphere.
     const rim = createRimAtmosphere(EARTH_RADIUS);
     this.rimSunUniform = rim.uniforms.uSunDir;
     this.earthGroup.add(rim.mesh);
@@ -1449,7 +1451,7 @@ export class GeoscapeView {
       new MeshStandardMaterial({
         map: cloudTexture,
         transparent: true,
-        opacity: 0.5,
+        opacity: 0.32,
         depthWrite: false,
         roughness: 1,
         metalness: 0,
@@ -1462,8 +1464,16 @@ export class GeoscapeView {
 
     this.cityLights = this.makeSignalNodes();
     this.earthGroup.add(this.cityLights);
-    for (let lat = -60; lat <= 60; lat += 30) this.earthGroup.add(makeGraticuleLatLine(lat, EARTH_RADIUS));
-    for (let lon = -150; lon <= 180; lon += 30) this.earthGroup.add(makeGraticuleLonLine(lon, EARTH_RADIUS));
+    // Whisper-faint graticule that fades out on the night side (one shared
+    // day-side-fade material for every line; disposed once via disposeObject).
+    const graticule = createGraticuleMaterial();
+    this.gratSunUniform = graticule.uniforms.uSunDir;
+    for (let lat = -60; lat <= 60; lat += 30) {
+      this.earthGroup.add(makeGraticuleLatLine(lat, EARTH_RADIUS, graticule.material));
+    }
+    for (let lon = -150; lon <= 180; lon += 30) {
+      this.earthGroup.add(makeGraticuleLonLine(lon, EARTH_RADIUS, graticule.material));
+    }
     this.buildBaseMarker();
     this.earthGroup.add(this.baseMarker);
     if (this.selectedBase) this.placeMarker(this.selectedBase);
@@ -1474,7 +1484,11 @@ export class GeoscapeView {
       this.extraBaseMarkers.add(marker);
     }
     this.earthGroup.add(this.extraBaseMarkers);
-    this.buildUfoMarker(this.opts.campaign?.ufoContact?.missionType, this.opts.campaign?.ufoContact?.ufoType);
+    this.buildUfoMarker(
+      this.opts.campaign?.ufoContact?.missionType,
+      this.opts.campaign?.ufoContact?.ufoType,
+      this.opts.campaign?.ufoContact?.status === "crashed",
+    );
     this.earthGroup.add(this.ufoMarker);
     if (this.opts.campaign?.ufoContact) this.placeUfoMarker(this.opts.campaign.ufoContact);
     else this.ufoMarker.visible = false;
@@ -1531,68 +1545,55 @@ export class GeoscapeView {
   }
 
   /**
-   * Cyan interceptor craft built as a recognizable plane silhouette — fuselage
-   * with a tapered nose, two swept main wings, a vertical tail fin, and a dark
-   * canopy — distinct from the amber base cone and the UFO's mission-colored
-   * marker. The marker's +Y is forward (oriented toward the UFO in
-   * animateInterceptor), so the nose points along the travel tangent. Color is
-   * always paired with the "INTERCEPTOR" label in the encounter overlay, so the
-   * craft is identifiable without color alone.
+   * Small teal interceptor dart: a slim elongated body (nose + tail cone joined
+   * base-to-base) with two short swept fins, plus a subtle selection ring. The
+   * marker's +Y is forward (oriented toward the UFO in animateInterceptor), so
+   * the dart's nose points along the travel tangent. Teal is always paired with
+   * the "INTERCEPTOR" label in the encounter overlay, so the craft is
+   * identifiable without color alone.
    */
   private buildInterceptorMarker(): void {
     const body = new MeshStandardMaterial({
-      color: 0x22d3ee,
-      emissive: new Color(0x06b6d4),
-      emissiveIntensity: 1.4,
+      color: 0x38e8d2,
+      emissive: new Color(0x38e8d2),
+      emissiveIntensity: 1.6,
       roughness: 0.3,
-      metalness: 0.45,
+      metalness: 0.4,
     });
-    // Fuselage along +Y (forward axis), tapering toward the tail.
-    const fuselage = new Mesh(new CylinderGeometry(0.011, 0.019, 0.15, 8), body);
-    // Nose cone pointing forward.
-    const nose = new Mesh(new ConeGeometry(0.011, 0.04, 8), body);
-    nose.position.y = 0.095;
-    // Swept main wings extending in ±X, swept back via Z rotation.
-    const wingGeo = new BoxGeometry(0.062, 0.034, 0.006);
-    const wingR = new Mesh(wingGeo, body);
-    wingR.position.set(0.04, -0.012, 0);
-    wingR.rotation.z = -0.4;
-    const wingL = new Mesh(wingGeo, body);
-    wingL.position.set(-0.04, -0.012, 0);
-    wingL.rotation.z = 0.4;
-    // Vertical tail fin at the rear, extending +Z (away from the globe surface).
-    const tail = new Mesh(new BoxGeometry(0.006, 0.03, 0.02), body);
-    tail.position.set(0, -0.055, 0.011);
-    // Cockpit canopy — a dark glowing sliver near the nose.
-    const canopy = new Mesh(
-      new SphereGeometry(0.008, 8, 6),
-      new MeshStandardMaterial({
-        color: 0x0e7490,
-        emissive: new Color(0x0891b2),
-        emissiveIntensity: 0.9,
-        roughness: 0.2,
-        metalness: 0.6,
-      }),
-    );
-    canopy.position.set(0, 0.045, 0.004);
-    canopy.scale.set(1, 1.5, 0.75);
+    // Long tapered nose pointing forward (+Y).
+    const nose = new Mesh(new ConeGeometry(0.016, 0.11, 10), body);
+    nose.position.y = 0.03;
+    // Short tail cone flared back so the two cones read as a dart lozenge.
+    const tail = new Mesh(new ConeGeometry(0.016, 0.05, 10), body);
+    tail.position.y = -0.05;
+    tail.rotation.x = Math.PI;
+    // Two short swept fins in ±X.
+    const finGeo = new BoxGeometry(0.05, 0.02, 0.004);
+    const finR = new Mesh(finGeo, body);
+    finR.position.set(0.026, -0.028, 0);
+    finR.rotation.z = -0.5;
+    const finL = new Mesh(finGeo, body);
+    finL.position.set(-0.026, -0.028, 0);
+    finL.rotation.z = 0.5;
     const ring = new Mesh(
-      new RingGeometry(0.07, 0.1, 20),
+      new RingGeometry(0.05, 0.064, 24),
       new MeshBasicMaterial({
-        color: 0x67e8f9,
+        color: 0x38e8d2,
         transparent: true,
-        opacity: 0.5,
+        opacity: 0.4,
         side: DoubleSide,
         blending: AdditiveBlending,
+        depthWrite: false,
       }),
     );
     ring.rotation.x = -Math.PI / 2;
-    this.interceptorMarker.add(fuselage, nose, wingR, wingL, tail, canopy, ring);
+    this.interceptorMarker.add(nose, tail, finR, finL, ring);
   }
 
+  /** Very sparse, dim, deterministic starfield behind the globe (no grid). */
   private makeStars(): Points {
     const positions: number[] = [];
-    for (let i = 0; i < 520; i++) {
+    for (let i = 0; i < 150; i++) {
       const a = Math.sin(i * 12.9898) * 43758.5453;
       const b = Math.sin(i * 78.233) * 24634.6345;
       const c = Math.sin(i * 37.719) * 13579.1234;
@@ -1606,10 +1607,10 @@ export class GeoscapeView {
     return new Points(
       geometry,
       new PointsMaterial({
-        color: 0xbfefff,
-        size: 0.018,
+        color: 0x9fb8cc,
+        size: 0.013,
         transparent: true,
-        opacity: 0.82,
+        opacity: 0.5,
         sizeAttenuation: true,
       }),
     );
@@ -1638,7 +1639,7 @@ export class GeoscapeView {
       geometry,
       new PointsMaterial({
         color: 0xffffff,
-        size: 0.022,
+        size: 0.016,
         transparent: true,
         opacity: 0.95,
         sizeAttenuation: true,
@@ -1685,6 +1686,7 @@ export class GeoscapeView {
     const sun = this.scratchA.copy(this.sunLight.position).normalize();
     if (this.earthSunUniform) this.earthSunUniform.value.copy(sun);
     if (this.rimSunUniform) this.rimSunUniform.value.copy(sun);
+    if (this.gratSunUniform) this.gratSunUniform.value.copy(sun);
   }
 
   private buildBaseMarker(): void {
@@ -1703,7 +1705,16 @@ export class GeoscapeView {
     this.trackBeacon(populateHqBeacon(this.hqMarker, EARTH_RADIUS));
   }
 
-  private buildUfoMarker(missionType: MissionType | undefined, ufoType: UfoType | undefined): void {
+  private buildUfoMarker(
+    missionType: MissionType | undefined,
+    ufoType: UfoType | undefined,
+    crashed: boolean,
+  ): void {
+    if (crashed) {
+      // A downed contact reads as an amber crash cross regardless of type.
+      this.trackBeacon(populateCrashBeacon(this.ufoMarker, EARTH_RADIUS));
+      return;
+    }
     const info = missionTypeInfo(missionType);
     const ufoColor = ufoTypeInfo(ufoType).color;
     this.trackBeacon(populateUfoBeacon(this.ufoMarker, EARTH_RADIUS, info.color, ufoColor, info.urgent));
@@ -2137,7 +2148,7 @@ export class GeoscapeView {
     }
     const contact = c?.ufoContact;
     if (contact) {
-      this.refreshUfoMarkerType(contact.missionType, contact.ufoType);
+      this.refreshUfoMarkerType(contact.missionType, contact.ufoType, contact.status === "crashed");
       this.placeUfoMarker(contact);
       this.refreshUfoTrail(contact);
     } else {
@@ -2365,10 +2376,21 @@ export class GeoscapeView {
     trail.visible = count >= 2;
   }
 
-  private refreshUfoMarkerType(missionType: MissionType | undefined, ufoType: UfoType | undefined): void {
-    if (this.ufoMissionType === missionType && this.ufoType === ufoType) return;
+  private refreshUfoMarkerType(
+    missionType: MissionType | undefined,
+    ufoType: UfoType | undefined,
+    crashed: boolean,
+  ): void {
+    if (
+      this.ufoMissionType === missionType &&
+      this.ufoType === ufoType &&
+      this.ufoCrashed === crashed
+    ) {
+      return;
+    }
     this.ufoMissionType = missionType;
     this.ufoType = ufoType;
+    this.ufoCrashed = crashed;
     for (const child of [...this.ufoMarker.children]) {
       this.ufoMarker.remove(child);
       if (child instanceof Mesh || child instanceof Line) {
@@ -2378,7 +2400,12 @@ export class GeoscapeView {
         else material.dispose();
       }
     }
-    this.buildUfoMarker(missionType, ufoType);
+    // Drop now-detached pulse rings (their geometry/material were just disposed)
+    // so the animated set doesn't accumulate stale entries across rebuilds.
+    for (let i = this.beaconPulseRings.length - 1; i >= 0; i--) {
+      if (this.beaconPulseRings[i]!.parent === null) this.beaconPulseRings.splice(i, 1);
+    }
+    this.buildUfoMarker(missionType, ufoType, crashed);
   }
 
   /**

@@ -8,16 +8,14 @@
 import {
   AdditiveBlending,
   BackSide,
+  BoxGeometry,
   BufferGeometry,
   CanvasTexture,
   Color,
   ConeGeometry,
-  CylinderGeometry,
   DoubleSide,
-  Float32BufferAttribute,
   Group,
   Line,
-  LineBasicMaterial,
   LineLoop,
   Mesh,
   MeshBasicMaterial,
@@ -26,6 +24,7 @@ import {
   ShaderMaterial,
   SphereGeometry,
   SRGBColorSpace,
+  Vector2,
   Vector3,
 } from "three";
 
@@ -125,14 +124,24 @@ export interface EarthShader {
   uniforms: {
     uMap: { value: CanvasTexture };
     uSunDir: { value: Vector3 };
+    uTexel: { value: Vector2 };
   };
 }
 
-/** Day/night earth material with soft twilight band, night floor, and ocean glint. */
+/**
+ * Day/night earth material.
+ *
+ * Night readability: land and ocean get DISTINCT dark floors (land `#18261f`,
+ * ocean `#0a1526`) so continents never vanish into the sea on the dark side, and
+ * a faint cool coastline emissive (one-texel land/ocean edge, night side only)
+ * traces the continent outlines. Twilight is a smooth ~12° band with a warm
+ * `#c97b3e` dusk tint that fades both ways. Ocean keeps a subtle sun glint.
+ */
 export function createEarthShaderMaterial(map: CanvasTexture): EarthShader {
   const uniforms = {
     uMap: { value: map },
     uSunDir: { value: new Vector3(1, 0, 0) },
+    uTexel: { value: new Vector2(1 / GLOBE_MAP_WIDTH, 1 / GLOBE_MAP_HEIGHT) },
   };
   const material = new ShaderMaterial({
     uniforms,
@@ -154,10 +163,17 @@ export function createEarthShaderMaterial(map: CanvasTexture): EarthShader {
       varying vec3 vViewDir;
       uniform sampler2D uMap;
       uniform vec3 uSunDir;
+      uniform vec2 uTexel;
 
       float smoothstepf(float e0, float e1, float x) {
         float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
         return t * t * (3.0 - 2.0 * t);
+      }
+
+      // 1.0 where the sampled texel reads as ocean (blue-dominant), else 0.0.
+      float oceanAt(vec2 uv) {
+        vec3 t = texture2D(uMap, uv).rgb;
+        return step(t.g + 0.06, t.b);
       }
 
       void main() {
@@ -166,21 +182,38 @@ export function createEarthShaderMaterial(map: CanvasTexture): EarthShader {
         vec3 sun = normalize(uSunDir);
         float ndotl = dot(n, sun);
 
-        float twilight = 0.17;
+        // ~12° twilight half-band (sin 12° ≈ 0.21).
+        float twilight = 0.21;
         float day = smoothstepf(-twilight, twilight, ndotl);
 
+        float isOcean = oceanAt(vUv);
+
+        // Distinct night floors keep land visibly greener/lighter than ocean.
+        vec3 nightLand = vec3(0.094, 0.149, 0.122) + tex * 0.10;   // >= #18261f
+        vec3 nightOcean = vec3(0.039, 0.082, 0.149);               // #0a1526
+        vec3 night = mix(nightLand, nightOcean, isOcean);
+
         vec3 lit = tex * (0.42 + 0.58 * max(ndotl, 0.0));
-        vec3 night = tex * vec3(0.38, 0.48, 0.72) + vec3(0.05, 0.07, 0.11);
-        night = max(night, vec3(0.15, 0.18, 0.24));
 
-        float duskBand = smoothstepf(twilight * 1.4, 0.0, abs(ndotl));
-        vec3 dusk = vec3(1.0, 0.78, 0.52);
         vec3 color = mix(night, lit, day);
-        color = mix(color, color * dusk, duskBand * 0.32);
 
-        float isOcean = step(tex.g + 0.06, tex.b);
+        // Warm dusk band, symmetric around the terminator, fading both ways.
+        float duskBand = smoothstepf(twilight * 1.4, 0.0, abs(ndotl));
+        vec3 dusk = vec3(0.788, 0.482, 0.243); // #c97b3e
+        color = mix(color, color * dusk + dusk * 0.12, duskBand * 0.34);
+
+        // Cool coastline emissive: land/ocean edge, night side only.
+        float edge = 0.0;
+        edge += abs(isOcean - oceanAt(vUv + vec2(uTexel.x, 0.0)));
+        edge += abs(isOcean - oceanAt(vUv - vec2(uTexel.x, 0.0)));
+        edge += abs(isOcean - oceanAt(vUv + vec2(0.0, uTexel.y)));
+        edge += abs(isOcean - oceanAt(vUv - vec2(0.0, uTexel.y)));
+        float coast = clamp(edge, 0.0, 1.0);
+        color += vec3(0.29, 0.55, 0.63) * coast * (1.0 - day) * 0.55;
+
+        // Subtle ocean sun glint on the day side only.
         vec3 halfV = normalize(sun + normalize(vViewDir));
-        float spec = pow(max(dot(n, halfV), 0.0), 52.0) * isOcean * day * 0.28;
+        float spec = pow(max(dot(n, halfV), 0.0), 52.0) * isOcean * day * 0.22;
         color += vec3(spec);
 
         gl_FragColor = vec4(color, 1.0);
@@ -195,12 +228,12 @@ export interface RimAtmosphere {
   uniforms: { uSunDir: { value: Vector3 }; uColor: { value: Color }; uPower: { value: number } };
 }
 
-/** Fresnel rim glow on the day-side limb. */
+/** Single tight fresnel rim glow on the day-side limb. */
 export function createRimAtmosphere(earthRadius: number): RimAtmosphere {
   const uniforms = {
     uSunDir: { value: new Vector3(1, 0, 0) },
     uColor: { value: new Color(0x67e8f9) },
-    uPower: { value: 3.2 },
+    uPower: { value: 4.6 },
   };
   const material = new ShaderMaterial({
     transparent: true,
@@ -227,32 +260,73 @@ export function createRimAtmosphere(earthRadius: number): RimAtmosphere {
       void main() {
         float rim = pow(1.0 - abs(dot(vViewDir, vNormalW)), uPower);
         float day = max(0.0, dot(normalize(vNormalW), normalize(uSunDir)));
-        float a = rim * (0.12 + 0.65 * day);
+        float a = rim * (0.08 + 0.6 * day);
         gl_FragColor = vec4(uColor, a);
       }
     `,
   });
-  const mesh = new Mesh(new SphereGeometry(earthRadius + 0.17, 64, 32), material);
+  const mesh = new Mesh(new SphereGeometry(earthRadius + 0.12, 64, 32), material);
   return { mesh, uniforms };
 }
 
-export function makeGraticuleLatLine(lat: number, earthRadius: number): LineLoop {
+export interface GraticuleMaterial {
+  material: ShaderMaterial;
+  uniforms: { uSunDir: { value: Vector3 } };
+}
+
+/**
+ * Shared whisper-faint graticule material that fades to nothing on the night
+ * side (day-side only). `uSunDir` is refreshed each frame from the live sun.
+ * One material is shared by every lat/lon line so it is created + disposed once.
+ */
+export function createGraticuleMaterial(): GraticuleMaterial {
+  const uniforms = { uSunDir: { value: new Vector3(1, 0, 0) } };
+  const material = new ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    uniforms,
+    vertexShader: `
+      varying float vDay;
+      uniform vec3 uSunDir;
+      void main() {
+        vec3 nW = normalize(mat3(modelMatrix) * normalize(position));
+        vDay = smoothstep(0.0, 0.28, dot(nW, normalize(uSunDir)));
+        gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      varying float vDay;
+      void main() {
+        gl_FragColor = vec4(vec3(0.404, 0.910, 0.976), 0.05 * vDay);
+      }
+    `,
+  });
+  return { material, uniforms };
+}
+
+export function makeGraticuleLatLine(
+  lat: number,
+  earthRadius: number,
+  material: ShaderMaterial,
+): LineLoop {
   const points: Vector3[] = [];
   for (let lon = -180; lon <= 180; lon += 6) {
     points.push(latLonToVector(lat, lon, earthRadius + 0.012));
   }
   const geometry = new BufferGeometry().setFromPoints(points);
-  const material = new LineBasicMaterial({ color: 0x67e8f9, transparent: true, opacity: 0.035 });
   return new LineLoop(geometry, material);
 }
 
-export function makeGraticuleLonLine(lon: number, earthRadius: number): Line {
+export function makeGraticuleLonLine(
+  lon: number,
+  earthRadius: number,
+  material: ShaderMaterial,
+): Line {
   const points: Vector3[] = [];
   for (let lat = -84; lat <= 84; lat += 4) {
     points.push(latLonToVector(lat, lon, earthRadius + 0.014));
   }
   const geometry = new BufferGeometry().setFromPoints(points);
-  const material = new LineBasicMaterial({ color: 0x67e8f9, transparent: true, opacity: 0.03 });
   return new Line(geometry, material);
 }
 
@@ -270,6 +344,12 @@ export interface SurfaceBeacon {
   pulseRing: Mesh;
 }
 
+/**
+ * ONE thin pulse ring flat on the surface — the single glow per beacon class.
+ * `inner`/`outer` are kept close so the stroke reads as a crisp ~2px line; the
+ * frame loop expands it 1→1.6× and fades it (or holds it static under
+ * reducedMotion) via animateBeaconPulse.
+ */
 function addPulseRing(
   group: Group,
   color: number,
@@ -277,11 +357,11 @@ function addPulseRing(
   outer: number,
 ): SurfaceBeacon {
   const pulseRing = new Mesh(
-    new RingGeometry(inner, outer, 24),
+    new RingGeometry(inner, outer, 40),
     new MeshBasicMaterial({
       color,
       transparent: true,
-      opacity: 0.42,
+      opacity: 0.5,
       side: DoubleSide,
       blending: AdditiveBlending,
       depthWrite: false,
@@ -292,192 +372,130 @@ function addPulseRing(
   return { pulseRing };
 }
 
-/** Crisp amber emissive beacon for the primary command base. */
+/** Crisp small amber pin + one thin pulse ring for the primary command base. */
 export function populateBaseBeacon(group: Group, earthRadius: number): SurfaceBeacon {
-  const s = earthRadius * 0.04;
+  const s = earthRadius * 0.03;
   const core = new Mesh(
-    new SphereGeometry(s * 0.55, 12, 8),
-    new MeshStandardMaterial({
-      color: 0xfbbf24,
-      emissive: new Color(0xf59e0b),
-      emissiveIntensity: 2.2,
-      roughness: 0.25,
-      metalness: 0.2,
-    }),
+    new SphereGeometry(s * 0.34, 12, 8),
+    new MeshBasicMaterial({ color: 0xffce6a, transparent: true, opacity: 0.95 }),
   );
   const pin = new Mesh(
-    new ConeGeometry(s * 0.45, s * 1.4, 14),
+    new ConeGeometry(s * 0.34, s * 1.15, 16),
     new MeshStandardMaterial({
-      color: 0xfbbf24,
-      emissive: new Color(0xf59e0b),
-      emissiveIntensity: 1.6,
+      color: 0xffb02e,
+      emissive: new Color(0xffb02e),
+      emissiveIntensity: 1.8,
       roughness: 0.3,
-      metalness: 0.25,
+      metalness: 0.2,
     }),
   );
   pin.position.y = s * 0.75;
-  const dome = new Mesh(
-    new SphereGeometry(s * 0.7, 14, 10, 0, Math.PI * 2, 0, Math.PI * 0.5),
-    new MeshBasicMaterial({
-      color: 0xfbbf24,
-      transparent: true,
-      opacity: 0.35,
-      blending: AdditiveBlending,
-      depthWrite: false,
-    }),
-  );
-  group.add(core, pin, dome);
-  return addPulseRing(group, 0xfbbf24, s * 1.1, s * 1.55);
+  group.add(core, pin);
+  return addPulseRing(group, 0xffb02e, s * 0.82, s * 0.98);
 }
 
-/** Slim cyan beacon for secondary radar bases. */
+/** Slim cyan pin + one thin pulse ring for secondary radar bases. */
 export function populateExtraBaseBeacon(group: Group, earthRadius: number): SurfaceBeacon {
-  const s = earthRadius * 0.032;
+  const s = earthRadius * 0.026;
   const core = new Mesh(
-    new SphereGeometry(s * 0.5, 10, 8),
-    new MeshStandardMaterial({
-      color: 0x67e8f9,
-      emissive: new Color(0x22d3ee),
-      emissiveIntensity: 2.0,
-      roughness: 0.25,
-      metalness: 0.2,
-    }),
+    new SphereGeometry(s * 0.32, 10, 8),
+    new MeshBasicMaterial({ color: 0x9fe8f5, transparent: true, opacity: 0.9 }),
   );
   const pin = new Mesh(
-    new ConeGeometry(s * 0.4, s * 1.1, 12),
+    new ConeGeometry(s * 0.32, s * 0.95, 12),
     new MeshStandardMaterial({
-      color: 0x67e8f9,
-      emissive: new Color(0x22d3ee),
-      emissiveIntensity: 1.4,
+      color: 0x38e8d2,
+      emissive: new Color(0x38e8d2),
+      emissiveIntensity: 1.6,
       roughness: 0.3,
-      metalness: 0.25,
+      metalness: 0.2,
     }),
   );
   pin.position.y = s * 0.6;
   group.add(core, pin);
-  return addPulseRing(group, 0x67e8f9, s * 0.95, s * 1.35);
+  return addPulseRing(group, 0x38e8d2, s * 0.8, s * 0.96);
 }
 
-/** Menacing violet/magenta endgame HQ spire. */
+/** Violet pulsing hex + one thin pulse ring for the revealed endgame alien HQ. */
 export function populateHqBeacon(group: Group, earthRadius: number): SurfaceBeacon {
-  const s = earthRadius * 0.042;
-  const core = new Mesh(
-    new SphereGeometry(s * 0.65, 14, 10),
+  const s = earthRadius * 0.036;
+  // Flat hexagon plate lying tangent to the surface (6-segment ring annulus).
+  const hex = new Mesh(
+    new RingGeometry(s * 0.5, s * 0.95, 6),
     new MeshBasicMaterial({
-      color: 0xc060ff,
+      color: 0xc86bff,
       transparent: true,
-      opacity: 0.95,
-      blending: AdditiveBlending,
-    }),
-  );
-  const spike = new Mesh(
-    new ConeGeometry(s * 0.55, s * 2.0, 6),
-    new MeshStandardMaterial({
-      color: 0x3b0764,
-      emissive: new Color(0xc060ff),
-      emissiveIntensity: 2.4,
-      roughness: 0.22,
-      metalness: 0.5,
-    }),
-  );
-  spike.position.y = s * 1.05;
-  const under = new Mesh(
-    new ConeGeometry(s * 0.35, s * 0.85, 6),
-    new MeshStandardMaterial({
-      color: 0x3b0764,
-      emissive: new Color(0xa855f7),
-      emissiveIntensity: 1.8,
-      roughness: 0.22,
-      metalness: 0.5,
-    }),
-  );
-  under.rotation.x = Math.PI;
-  under.position.y = -s * 0.45;
-  const halo = new Mesh(
-    new RingGeometry(s * 1.35, s * 1.65, 28),
-    new MeshBasicMaterial({
-      color: 0xe879f9,
-      transparent: true,
-      opacity: 0.38,
+      opacity: 0.85,
       side: DoubleSide,
       blending: AdditiveBlending,
       depthWrite: false,
     }),
   );
-  halo.rotation.x = -Math.PI / 2;
-  group.add(core, spike, under, halo);
-  return addPulseRing(group, 0xc060ff, s * 1.2, s * 1.75);
+  hex.rotation.x = -Math.PI / 2;
+  // Bright violet core dot at the hex centre.
+  const core = new Mesh(
+    new SphereGeometry(s * 0.28, 12, 10),
+    new MeshBasicMaterial({ color: 0xe0a6ff, transparent: true, opacity: 0.95 }),
+  );
+  core.position.y = s * 0.12;
+  group.add(hex, core);
+  return addPulseRing(group, 0xc86bff, s * 1.02, s * 1.2);
 }
 
-/** Mission-colored UFO beacon with optional urgent halo. */
+/**
+ * Signal-red UFO delta (flat triangular marker) + one thin pulse ring. A tiny
+ * `ufoColor` core pip keeps UFO-type variety readable up close while the
+ * silhouette always reads red. The airborne trail is drawn separately by the
+ * geoscape (the UFO's recent great-circle path).
+ */
 export function populateUfoBeacon(
   group: Group,
   earthRadius: number,
-  missionColor: number,
+  _missionColor: number,
   ufoColor: number,
-  urgent: boolean,
+  _urgent: boolean,
 ): SurfaceBeacon {
-  const s = earthRadius * 0.038;
-  const core = new Mesh(
-    new SphereGeometry(s * 0.55, 14, 10),
-    new MeshBasicMaterial({
-      color: missionColor,
-      transparent: true,
-      opacity: 0.95,
-      blending: AdditiveBlending,
-    }),
-  );
-  const disc = new Mesh(
-    new CylinderGeometry(s * 0.85, s * 0.85, s * 0.22, 18),
+  const s = earthRadius * 0.034;
+  // Delta: a low 3-sided pyramid (reads as a triangle marker over the surface).
+  const delta = new Mesh(
+    new ConeGeometry(s * 0.95, s * 0.5, 3),
     new MeshStandardMaterial({
-      color: missionColor,
-      emissive: new Color(missionColor),
-      emissiveIntensity: 1.6,
-      roughness: 0.35,
-      metalness: 0.4,
+      color: 0xff4a3a,
+      emissive: new Color(0xff4a3a),
+      emissiveIntensity: 1.9,
+      roughness: 0.3,
+      metalness: 0.25,
     }),
   );
-  disc.position.y = s * 0.35;
-  const beam = new Mesh(
-    new ConeGeometry(s * 0.35, s * 1.0, 14),
-    new MeshBasicMaterial({
-      color: missionColor,
-      transparent: true,
-      opacity: 0.5,
-      blending: AdditiveBlending,
-      depthWrite: false,
-    }),
+  delta.position.y = s * 0.4;
+  const pip = new Mesh(
+    new SphereGeometry(s * 0.2, 10, 8),
+    new MeshBasicMaterial({ color: ufoColor, transparent: true, opacity: 0.95 }),
   );
-  beam.position.y = s * 0.75;
-  const typeRing = new Mesh(
-    new RingGeometry(s * 1.45, s * 1.65, 24),
-    new MeshBasicMaterial({
-      color: ufoColor,
-      transparent: true,
-      opacity: 0.45,
-      side: DoubleSide,
-      blending: AdditiveBlending,
-      depthWrite: false,
-    }),
-  );
-  typeRing.rotation.x = -Math.PI / 2;
-  group.add(core, disc, beam, typeRing);
-  if (urgent) {
-    const halo = new Mesh(
-      new RingGeometry(s * 1.05, s * 1.25, 24),
-      new MeshBasicMaterial({
-        color: missionColor,
-        transparent: true,
-        opacity: 0.4,
-        side: DoubleSide,
-        blending: AdditiveBlending,
-        depthWrite: false,
-      }),
-    );
-    halo.rotation.x = -Math.PI / 2;
-    group.add(halo);
-  }
-  return addPulseRing(group, missionColor, s * 1.0, s * 1.4);
+  pip.position.y = s * 0.4;
+  group.add(delta, pip);
+  return addPulseRing(group, 0xff4a3a, s * 0.86, s * 1.02);
+}
+
+/** Amber downed cross + one thin pulse ring for a crashed UFO (assault site). */
+export function populateCrashBeacon(group: Group, earthRadius: number): SurfaceBeacon {
+  const s = earthRadius * 0.032;
+  const bar = new MeshStandardMaterial({
+    color: 0xffb02e,
+    emissive: new Color(0xffb02e),
+    emissiveIntensity: 1.7,
+    roughness: 0.35,
+    metalness: 0.2,
+  });
+  // Two thin crossed bars lying tangent to the surface (an "X" downed marker).
+  const barA = new Mesh(new BoxGeometry(s * 1.5, s * 0.12, s * 0.28), bar);
+  const barB = new Mesh(new BoxGeometry(s * 1.5, s * 0.12, s * 0.28), bar);
+  barA.position.y = s * 0.12;
+  barB.position.y = s * 0.12;
+  barA.rotation.y = Math.PI / 4;
+  barB.rotation.y = -Math.PI / 4;
+  group.add(barA, barB);
+  return addPulseRing(group, 0xffb02e, s * 0.86, s * 1.02);
 }
 
 /** Faint procedural cloud wisps for the translucent shell. */
@@ -506,14 +524,25 @@ export function makeCloudTexture(): CanvasTexture {
   return texture;
 }
 
-/** Animate expanding surface pulse rings (respect reducedMotion). */
-export function animateBeaconPulse(ring: Mesh, now: number, reducedMotion: boolean, speed = 0.005): void {
+/**
+ * Animate a surface pulse ring: expand 1→1.6× while fading, then repeat
+ * (a single emitted ring per period). Under reducedMotion the ring holds
+ * static at rest scale + a steady opacity.
+ */
+export function animateBeaconPulse(
+  ring: Mesh,
+  now: number,
+  reducedMotion: boolean,
+  periodMs = 2400,
+): void {
+  const mat = ring.material as MeshBasicMaterial;
   if (reducedMotion) {
     ring.scale.set(1, 1, 1);
+    mat.opacity = 0.5;
     return;
   }
-  const phase = (Math.sin(now * speed) + 1) * 0.5;
-  const scale = 1 + phase * 0.55;
+  const phase = (now % periodMs) / periodMs; // 0 → 1 sawtooth
+  const scale = 1 + phase * 0.6;
   ring.scale.set(scale, scale, 1);
-  (ring.material as MeshBasicMaterial).opacity = 0.48 * (1 - phase * 0.72);
+  mat.opacity = 0.55 * (1 - phase);
 }
