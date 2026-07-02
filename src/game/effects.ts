@@ -52,23 +52,46 @@ export interface FireVolleyOptions {
 // ---------------------------------------------------------------------------
 
 const STAGGER_MS = 40; // gap between successive rounds (burst feel)
-const MUZZLE_FLASH_MS = 70;
-const IMPACT_FLASH_MS = 140;
+// Muzzle flash is a hard 2-frame pop (bright frame -> dimmer frame -> gone),
+// not a smooth swell: a stylised "flash" reads punchier than an eased fade.
+const MUZZLE_FLASH_MS = 56;
+const MUZZLE_FRAME_MS = MUZZLE_FLASH_MS / 2; // duration of each of the 2 frames
+const IMPACT_FLASH_MS = 130;
 const MISS_EXTRA = 4.5; // tiles a miss continues past the target
 const MAX_TRAVEL = 28; // hard cap so strays never shoot to infinity
 const EPS = 1e-6;
 
+// Impact sparks: a small fan of embers thrown back off the surface a round hits.
+const IMPACT_SPARKS = 5;
+const IMPACT_SPARK_MS = 200; // sparks outlive the flash, then the round ends
+const IMPACT_SPARK_GRAVITY = 7.5;
+
 // Blast (grenade detonation) tuning — radius comes from the sim's blastRadius.
-const BLAST_MS = 620; // total effect lifetime
+const BLAST_MS = 760; // total effect lifetime (extended so the smoke can linger)
 const BLAST_CORE_COLOR = 0xffe9b0; // hot white-yellow centre
 const BLAST_SHOCK_COLOR = 0xff7a2a; // ground shockwave ring
 const BLAST_SPARK_COLOR = 0xffd070; // ballistic embers
 const BLAST_SPARKS = 12;
+// Slow smoke: cool-dark puffs that rise, swell and fade after the flash. Drawn
+// with normal (not additive) blending so they READ as dark against the field.
+const BLAST_SMOKE = 4;
+const BLAST_SMOKE_COLOR = 0x23272e;
 
 // Throw-arc indicator tuning (a thrown grenade's travel cue).
 const THROW_COLOR = 0xffd479;
 const THROW_MS_MIN = 280;
 const THROW_MS_MAX = 720;
+
+// Psi attack: a violet ripple cone projected from the caster onto the target.
+const PSI_COLOR = 0xc86bff; // violet-magenta (psi/HQ/endgame per the Style Bible)
+const PSI_MS = 620;
+const PSI_RINGS = 3;
+
+// Stun strike: a short amber-white electric arc burst at the struck unit.
+const STUN_ARC_COLOR = 0xffe0a0; // amber-white (retunes the old electric-cyan)
+const STUN_ARC_MS = 240;
+const STUN_ARCS = 7;
+const STUN_ARC_VERTS = 4; // 2 line segments (origin->mid->tip) per arc
 
 // Enhanced muzzle flash: a forward cone burst + ballistic sparks.
 const MUZZLE_CONE_H = 0.42;
@@ -106,30 +129,31 @@ interface KindConfig {
 }
 
 const CONFIG: Record<ProjectileKind, KindConfig> = {
+  // Kinetic rounds are thin, fast streaks; plasma stays a slower, fatter bolt.
   rifle: {
     color: 0xfff070,
     flashColor: 0xfff7c0,
-    radius: 0.035,
-    length: 0.9,
-    speedUPerS: 120,
-    minMs: 120,
-    maxMs: 200,
+    radius: 0.022,
+    length: 0.72,
+    speedUPerS: 190,
+    minMs: 80,
+    maxMs: 140,
     tracerOpacity: 0.95,
-    muzzleRadius: 0.16,
-    impactRadius: 0.12,
+    muzzleRadius: 0.15,
+    impactRadius: 0.11,
     impactGrow: 1.8,
   },
   pistol: {
     color: 0xff9b54,
     flashColor: 0xffe0a8,
-    radius: 0.026,
-    length: 0.55,
-    speedUPerS: 105,
-    minMs: 110,
-    maxMs: 190,
+    radius: 0.017,
+    length: 0.48,
+    speedUPerS: 170,
+    minMs: 72,
+    maxMs: 130,
     tracerOpacity: 0.95,
-    muzzleRadius: 0.12,
-    impactRadius: 0.09,
+    muzzleRadius: 0.11,
+    impactRadius: 0.085,
     impactGrow: 1.6,
   },
   plasma: {
@@ -137,15 +161,42 @@ const CONFIG: Record<ProjectileKind, KindConfig> = {
     flashColor: 0x77e6ff,
     radius: 0.1,
     length: 0.7,
-    speedUPerS: 55,
-    minMs: 160,
-    maxMs: 280,
+    speedUPerS: 78,
+    minMs: 130,
+    maxMs: 220,
     tracerOpacity: 0.9,
     muzzleRadius: 0.24,
     impactRadius: 0.2,
     impactGrow: 2.6,
   },
 };
+
+// ---------------------------------------------------------------------------
+// Pooled geometry: the spark/smoke fans upload byte-identical GPU buffers on
+// every shot/blast. Sharing one geometry per shape (radius derives only from the
+// kind's cfg, not per-round state; smoke is scaled per-mesh) uploads each buffer
+// ONCE for the module's lifetime instead of dozens per trigger pull. These are
+// never disposed with an individual mesh — {@link disposeMesh} skips any geometry
+// in this set — so the churn becomes cheap material-only allocation.
+// ---------------------------------------------------------------------------
+
+const POOLED_GEOMETRIES = new Set<BufferGeometry>();
+
+/** Muzzle-spark ember: the same tiny sphere for every weapon kind. */
+const MUZZLE_SPARK_GEOMETRY = new SphereGeometry(0.03, 5, 4);
+POOLED_GEOMETRIES.add(MUZZLE_SPARK_GEOMETRY);
+
+/** Impact-spark ember: one sphere per kind (radius is a pure function of cfg). */
+const IMPACT_SPARK_GEOMETRIES: Record<ProjectileKind, SphereGeometry> = {
+  rifle: new SphereGeometry(Math.max(0.02, CONFIG.rifle.impactRadius * 0.28), 5, 4),
+  pistol: new SphereGeometry(Math.max(0.02, CONFIG.pistol.impactRadius * 0.28), 5, 4),
+  plasma: new SphereGeometry(Math.max(0.02, CONFIG.plasma.impactRadius * 0.28), 5, 4),
+};
+for (const g of Object.values(IMPACT_SPARK_GEOMETRIES)) POOLED_GEOMETRIES.add(g);
+
+/** Blast smoke puff: one identical sphere per detonation, scaled per mesh. */
+const BLAST_SMOKE_GEOMETRY = new SphereGeometry(0.4, 10, 8);
+POOLED_GEOMETRIES.add(BLAST_SMOKE_GEOMETRY);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -200,7 +251,9 @@ function additiveLineMaterial(color: number, opacity: number): LineBasicMaterial
 function disposeMesh(parent: Object3D, m: Object3D): void {
   parent.remove(m);
   const geo = (m as { geometry?: BufferGeometry }).geometry;
-  if (geo) geo.dispose();
+  // Pooled geometries are shared across many meshes and live for the module's
+  // lifetime — disposing one here would free a buffer other live meshes use.
+  if (geo && !POOLED_GEOMETRIES.has(geo)) geo.dispose();
   const mat = (m as { material?: { dispose(): void } | { dispose(): void }[] }).material;
   if (mat) {
     if (Array.isArray(mat)) for (const x of mat) x.dispose();
@@ -247,7 +300,7 @@ export class Effects {
     for (let i = 0; i < opts.rounds.length; i++) {
       const round = opts.rounds[i];
       if (!round) continue;
-      const anim = this.buildRound(cfg, muzzle, target, round, i * STAGGER_MS);
+      const anim = this.buildRound(cfg, opts.kind, muzzle, target, round, i * STAGGER_MS);
       anims.push(anim);
       for (const m of anim.meshes) {
         this.parent.add(m);
@@ -376,11 +429,41 @@ export class Effects {
       meshes.push(chunk);
     }
 
+    // Slow smoke: cool-dark puffs that rise, swell and fade well after the
+    // flash. Normal (not additive) blending so they read DARK against the field
+    // — the lingering aftermath of the blast. Deterministic offsets per index.
+    const smoke: { mesh: Mesh; vy: number; ox: number; oz: number; grow: number }[] = [];
+    for (let i = 0; i < BLAST_SMOKE; i++) {
+      // Shared geometry (pooled); only the material is per-puff because its
+      // opacity is animated independently as the puff fades.
+      const puff = new Mesh(
+        BLAST_SMOKE_GEOMETRY,
+        new MeshBasicMaterial({
+          color: BLAST_SMOKE_COLOR,
+          transparent: true,
+          opacity: 0,
+          depthWrite: false,
+        }),
+      );
+      const angle = (i / BLAST_SMOKE) * Math.PI * 2 + 0.9;
+      const spread = 0.25 + ((i * 7) % 3) * 0.18;
+      puff.position.set(cx + Math.cos(angle) * spread, groundY + 0.2, cz + Math.sin(angle) * spread);
+      smoke.push({
+        mesh: puff,
+        vy: 0.55 + ((i * 5) % 4) * 0.12,
+        ox: Math.cos(angle) * 0.35,
+        oz: Math.sin(angle) * 0.35,
+        grow: 1.6 + ((i * 11) % 5) * 0.25,
+      });
+      meshes.push(puff);
+    }
+
     for (const m of meshes) this.parent.add(m);
     const coreMat = core.material as MeshBasicMaterial;
     const shockMat = shock.material as MeshBasicMaterial;
     const shock2Mat = shock2.material as MeshBasicMaterial;
     const sparkMats = sparks.map((s) => s.mesh.material as MeshBasicMaterial);
+    const smokeMats = smoke.map((s) => s.mesh.material as MeshBasicMaterial);
 
     const maxR = Math.max(radius, 0.5);
 
@@ -455,6 +538,17 @@ export class Effects {
           d.mesh.rotation.z += d.rz * dt;
         }
 
+        // Smoke: rises + swells; opacity ramps in fast then eases out to nil.
+        for (let i = 0; i < smoke.length; i++) {
+          const s = smoke[i]!;
+          s.mesh.position.x += s.ox * dt;
+          s.mesh.position.z += s.oz * dt;
+          s.mesh.position.y += s.vy * dt;
+          s.mesh.scale.setScalar(0.6 + t * s.grow * maxR * 0.5);
+          const rampIn = clamp01(t / 0.25);
+          smokeMats[i]!.opacity = 0.42 * rampIn * (1 - t);
+        }
+
         handle.raf = requestAnimationFrame(tick);
       };
       handle.raf = requestAnimationFrame(tick);
@@ -484,7 +578,6 @@ export class Effects {
 
     const meshes: Mesh[] = [projectile, target];
     for (const m of meshes) this.parent.add(m);
-    const projMat = projectile.material as MeshBasicMaterial;
     const targetMat = target.material as MeshBasicMaterial;
 
     const duration = clamp(dist * 65, THROW_MS_MIN, THROW_MS_MAX);
@@ -524,8 +617,173 @@ export class Effects {
     });
   }
 
+  /**
+   * Psi-attack FX: a violet ripple cone projected from the caster (`from`) onto
+   * the target (`to`) — a soft cone that fades in/out plus staggered rings that
+   * travel the length of it and expand as they arrive. Resolves once the effect
+   * has fully played and every mesh has been disposed. Registered with the
+   * active-handle set so {@link dispose} can tear a live cast down cleanly.
+   *
+   * NOT yet wired: the renderer/controller must call this on a successful
+   * `psiUsed` event (see the integration note returned with this change).
+   */
+  playPsi(from: Vector3, to: Vector3): Promise<void> {
+    const dir = to.clone().sub(from);
+    const dist = Math.max(dir.length(), EPS);
+    dir.normalize();
+
+    // Cone: apex at the caster, widening toward the target. A cone's local +Y
+    // is its apex, so mapping +Y -> -dir puts the apex at `from`.
+    const cone = new Mesh(
+      new ConeGeometry(Math.min(0.9, dist * 0.32), dist, 20, 1, true),
+      additiveMaterial(PSI_COLOR, 0.28),
+    );
+    cone.quaternion.setFromUnitVectors(UP, dir.clone().negate());
+    cone.position.copy(from).addScaledVector(dir, dist * 0.5);
+
+    // Ripple rings: face down the axis (+Z -> dir) and slide caster -> target.
+    const ringOrient = new Quaternion().setFromUnitVectors(new Vector3(0, 0, 1), dir);
+    const rings: Mesh[] = [];
+    for (let i = 0; i < PSI_RINGS; i++) {
+      const ring = new Mesh(new RingGeometry(0.18, 0.3, 28), additiveMaterial(PSI_COLOR, 0.9));
+      ring.quaternion.copy(ringOrient);
+      rings.push(ring);
+    }
+
+    const meshes: Mesh[] = [cone, ...rings];
+    for (const m of meshes) this.parent.add(m);
+    const coneMat = cone.material as MeshBasicMaterial;
+    const ringMats = rings.map((r) => r.material as MeshBasicMaterial);
+    const scratch = new Vector3();
+
+    return new Promise<void>((resolve) => {
+      let finished = false;
+      const finish = (): void => {
+        if (finished) return;
+        finished = true;
+        for (const m of meshes) disposeMesh(this.parent, m);
+        this.active.delete(handle);
+        resolve();
+      };
+      const handle: VolleyHandle = { raf: 0, finish };
+      this.active.add(handle);
+
+      const start = performance.now();
+      const tick = (now: number): void => {
+        const t = (now - start) / PSI_MS;
+        if (t >= 1) {
+          finish();
+          return;
+        }
+        // Cone: subtle width pulse + a soft fade in then out (sin over the life).
+        const pulse = 1 + Math.sin(t * Math.PI * 4) * 0.06;
+        cone.scale.set(pulse, 1, pulse);
+        coneMat.opacity = 0.28 * Math.sin(t * Math.PI);
+        for (let i = 0; i < rings.length; i++) {
+          const rp = (t + i / rings.length) % 1; // staggered travel 0..1
+          scratch.copy(from).addScaledVector(dir, rp * dist);
+          rings[i]!.position.copy(scratch);
+          rings[i]!.scale.setScalar(0.4 + rp * 1.8);
+          ringMats[i]!.opacity = 0.9 * (1 - rp);
+        }
+        handle.raf = requestAnimationFrame(tick);
+      };
+      handle.raf = requestAnimationFrame(tick);
+    });
+  }
+
+  /**
+   * Stun-strike FX: a short amber-white electric arc burst at world point `at`
+   * — jagged line arcs that crackle outward and flicker out. This is the
+   * mesh-level arc the Style Bible calls for; it retunes the old electric-cyan
+   * cue to amber-white. Resolves once fully played and disposed.
+   *
+   * NOT yet wired: the renderer's `playStunStrike` should call this (and recolor
+   * its emissive flush + floating number to match) — see the integration note.
+   */
+  playStunArc(at: Vector3): Promise<void> {
+    const geo = new BufferGeometry();
+    geo.setAttribute(
+      "position",
+      new Float32BufferAttribute(new Array(STUN_ARCS * STUN_ARC_VERTS * 3).fill(0), 3),
+    );
+    const pos = geo.getAttribute("position") as Float32BufferAttribute;
+    const arcs = new LineSegments(geo, additiveLineMaterial(STUN_ARC_COLOR, 1));
+    arcs.position.copy(at);
+
+    // Deterministic outward directions: a fan around the unit, biased upward.
+    const dirs: Vector3[] = [];
+    for (let i = 0; i < STUN_ARCS; i++) {
+      const az = (i / STUN_ARCS) * Math.PI * 2;
+      const el = 0.4 + (((i * 7) % 5) / 5) * 0.7;
+      dirs.push(
+        new Vector3(
+          Math.cos(az) * Math.cos(el),
+          Math.sin(el),
+          Math.sin(az) * Math.cos(el),
+        ).normalize(),
+      );
+    }
+
+    this.parent.add(arcs);
+    const arcsMat = arcs.material as LineBasicMaterial;
+    const arr = pos.array as Float32Array;
+
+    return new Promise<void>((resolve) => {
+      let finished = false;
+      const finish = (): void => {
+        if (finished) return;
+        finished = true;
+        disposeMesh(this.parent, arcs);
+        this.active.delete(handle);
+        resolve();
+      };
+      const handle: VolleyHandle = { raf: 0, finish };
+      this.active.add(handle);
+
+      const start = performance.now();
+      const tick = (now: number): void => {
+        const el = now - start;
+        const t = el / STUN_ARC_MS;
+        if (t >= 1) {
+          finish();
+          return;
+        }
+        // Jitter each arc's mid + tip so it crackles; flicker the opacity out.
+        for (let i = 0; i < STUN_ARCS; i++) {
+          const d = dirs[i]!;
+          const len = 0.5 + ((i * 11) % 4) * 0.12;
+          const midR = len * 0.5;
+          const jx = Math.sin(el * 0.09 + i) * 0.12;
+          const jy = Math.cos(el * 0.08 + i * 1.7) * 0.12;
+          const jz = Math.sin(el * 0.1 + i * 2.3) * 0.12;
+          const base = i * STUN_ARC_VERTS * 3;
+          // seg 1: origin -> jittered mid.
+          arr[base] = 0;
+          arr[base + 1] = 0.1;
+          arr[base + 2] = 0;
+          arr[base + 3] = d.x * midR + jx;
+          arr[base + 4] = d.y * midR + 0.1 + jy;
+          arr[base + 5] = d.z * midR + jz;
+          // seg 2: jittered mid -> tip.
+          arr[base + 6] = d.x * midR + jx;
+          arr[base + 7] = d.y * midR + 0.1 + jy;
+          arr[base + 8] = d.z * midR + jz;
+          arr[base + 9] = d.x * len;
+          arr[base + 10] = d.y * len + 0.1;
+          arr[base + 11] = d.z * len;
+        }
+        pos.needsUpdate = true;
+        arcsMat.opacity = (1 - t) * (0.6 + 0.4 * Math.abs(Math.sin(el * 0.12)));
+        handle.raf = requestAnimationFrame(tick);
+      };
+      handle.raf = requestAnimationFrame(tick);
+    });
+  }
+
   /** Cancel every in-flight volley and dispose its meshes. No persistent state. */
-  dispose(): void {    for (const handle of [...this.active]) {
+  dispose(): void {
+    for (const handle of [...this.active]) {
       cancelAnimationFrame(handle.raf);
       handle.finish();
     }
@@ -536,6 +794,7 @@ export class Effects {
 
   private buildRound(
     cfg: KindConfig,
+    kind: ProjectileKind,
     muzzle: Vector3,
     target: Vector3,
     round: VolleyRound,
@@ -626,9 +885,13 @@ export class Effects {
     cone.position.copy(muzzle).addScaledVector(dir, MUZZLE_CONE_H * 0.5);
     cone.visible = false;
 
+    // All muzzle sparks of this round share one pooled geometry + one material
+    // (identical colour, and they fade on the same timeline), so the fan is a
+    // single material alloc instead of six, with zero geometry upload.
+    const muzzleSparkMat = additiveMaterial(cfg.flashColor, 1);
     const sparks: { mesh: Mesh; vx: number; vy: number; vz: number }[] = [];
     for (let i = 0; i < MUZZLE_SPARKS; i++) {
-      const spark = new Mesh(new SphereGeometry(0.03, 5, 4), additiveMaterial(cfg.flashColor, 1));
+      const spark = new Mesh(MUZZLE_SPARK_GEOMETRY, muzzleSparkMat);
       spark.position.copy(muzzle);
       const spreadA = (((i * 37) % 9) / 9 - 0.5) * 2; // deterministic -1..1
       const spreadB = (((i * 53) % 7) / 7 - 0.5) * 2;
@@ -649,6 +912,28 @@ export class Effects {
     impact.position.copy(endPoint);
     impact.visible = false;
 
+    // Impact embers: a small fan thrown BACK off the struck surface. Velocities
+    // are built from the shot's own basis (−dir back-splash + right/up spread)
+    // with a deterministic per-index jitter, so no randomness enters the frame.
+    // Same pooling as the muzzle fan: one pooled per-kind geometry + one shared
+    // material (all embers of a round are the same colour and fade together).
+    const impactSparkMat = additiveMaterial(round.hit ? cfg.flashColor : cfg.color, 1);
+    const impactSparkGeo = IMPACT_SPARK_GEOMETRIES[kind];
+    const impactSparks: { mesh: Mesh; vx: number; vy: number; vz: number }[] = [];
+    for (let i = 0; i < IMPACT_SPARKS; i++) {
+      const spark = new Mesh(impactSparkGeo, impactSparkMat);
+      spark.position.copy(endPoint);
+      const sA = (((i * 29) % 11) / 11 - 0.5) * 2; // deterministic -1..1
+      const sB = (((i * 47) % 9) / 9 - 0.5) * 2;
+      const back = 1.4 + ((i * 13) % 4) * 0.35; // back-splash off the surface
+      const v = new Vector3()
+        .addScaledVector(dir, -back)
+        .addScaledVector(right, sA * 2.0)
+        .addScaledVector(up, sB * 2.0 + 1.2);
+      impactSparks.push({ mesh: spark, vx: v.x, vy: v.y, vz: v.z });
+      spark.visible = false;
+    }
+
     const flashMat = muzzleFlash.material as MeshBasicMaterial;
     const coneMat = cone.material as MeshBasicMaterial;
     const tracerMat = tracer.material as MeshBasicMaterial;
@@ -656,6 +941,7 @@ export class Effects {
     const arcsMat = arcs ? (arcs.material as LineBasicMaterial) : null;
     const impactMat = impact.material as MeshBasicMaterial;
     const sparkMats = sparks.map((s) => s.mesh.material as MeshBasicMaterial);
+    const impactSparkMats = impactSparks.map((s) => s.mesh.material as MeshBasicMaterial);
     const scratch = new Vector3();
     let prevLocal = 0;
 
@@ -666,6 +952,7 @@ export class Effects {
       muzzleFlash.visible = false;
       cone.visible = false;
       for (const s of sparks) s.mesh.visible = false;
+      for (const s of impactSparks) s.mesh.visible = false;
       impact.visible = false;
     };
 
@@ -679,15 +966,17 @@ export class Effects {
       const dt = Math.min(0.05, Math.max(0, local - prevLocal) / 1000);
       prevLocal = local;
 
-      // MUZZLE: core sphere + forward cone (fade + swell together).
+      // MUZZLE: a hard 2-frame pop. Frame 0 = big hot flash + wide cone; frame
+      // 1 = a smaller, dimmer after-flash; then it's gone. No easing between —
+      // the discrete step is what sells the "flash".
       if (local <= MUZZLE_FLASH_MS) {
-        const f = clamp01(local / MUZZLE_FLASH_MS);
+        const frame0 = local < MUZZLE_FRAME_MS;
         muzzleFlash.visible = true;
-        flashMat.opacity = 1 - f;
-        muzzleFlash.scale.setScalar(0.6 + f * 0.9);
         cone.visible = true;
-        coneMat.opacity = 0.9 * (1 - f);
-        cone.scale.setScalar(0.7 + f * 0.6);
+        flashMat.opacity = frame0 ? 1 : 0.5;
+        muzzleFlash.scale.setScalar(frame0 ? 1.35 : 0.85);
+        coneMat.opacity = frame0 ? 0.9 : 0.4;
+        cone.scale.setScalar(frame0 ? 1.2 : 0.7);
       } else {
         muzzleFlash.visible = false;
         cone.visible = false;
@@ -760,24 +1049,48 @@ export class Effects {
       if (head) head.visible = false;
       if (arcs) arcs.visible = false;
 
-      // IMPACT: spark expands and fades.
+      // IMPACT: the core spark expands + fades while a fan of embers is thrown
+      // back off the surface (ballistic + gravity, integrated analytically from
+      // iLocal so nothing accumulates). The round finishes once both are done.
       const iLocal = local - travelMs;
-      if (iLocal <= IMPACT_FLASH_MS) {
+      const flashDone = iLocal > IMPACT_FLASH_MS;
+      if (!flashDone) {
         const f = clamp01(iLocal / IMPACT_FLASH_MS);
         impact.visible = true;
         impactMat.opacity = 1 - f;
         impact.scale.setScalar(0.5 + f * cfg.impactGrow);
-        return false;
+      } else {
+        impact.visible = false;
       }
 
-      impact.visible = false;
-      return true;
+      const sparksDone = iLocal > IMPACT_SPARK_MS;
+      if (!sparksDone) {
+        const sf = clamp01(iLocal / IMPACT_SPARK_MS);
+        const tS = iLocal / 1000;
+        for (let i = 0; i < impactSparks.length; i++) {
+          const s = impactSparks[i]!;
+          scratch.copy(endPoint);
+          scratch.x += s.vx * tS;
+          scratch.z += s.vz * tS;
+          scratch.y += s.vy * tS - 0.5 * IMPACT_SPARK_GRAVITY * tS * tS;
+          if (scratch.y < 0.05) scratch.y = 0.05;
+          s.mesh.position.copy(scratch);
+          s.mesh.visible = true;
+          impactSparkMats[i]!.opacity = 1 - sf;
+        }
+      } else {
+        for (const s of impactSparks) s.mesh.visible = false;
+      }
+
+      if (flashDone && sparksDone) return true;
+      return false;
     };
 
     const meshes: Object3D[] = [tracer, muzzleFlash, cone, impact];
     if (head) meshes.push(head);
     if (arcs) meshes.push(arcs);
     for (const s of sparks) meshes.push(s.mesh);
+    for (const s of impactSparks) meshes.push(s.mesh);
     return { update, meshes };
   }
 }

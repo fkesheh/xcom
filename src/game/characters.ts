@@ -43,6 +43,28 @@ import { createWeaponModel } from "./weapons";
 // Palette
 // ---------------------------------------------------------------------------
 
+/**
+ * Faction-read accent tokens (Style Bible, Layer 1 — do not drift). These are
+ * the single source of truth for the "who is this?" colour: the figure's
+ * emissive visor/eye is tinted from here, and the renderer imports the same
+ * tokens to tint the selection ring, the mind-control halo, the KO ground ring
+ * and the overhead HP/TU pips so every readability cue agrees on one hue per
+ * class. Friendly reads teal, hostile reads signal-red, a seized unit reads
+ * violet — never mixed.
+ */
+export const FACTION_ACCENT = {
+  /** Friendly / interactive — teal (Style Bible primary accent). */
+  player: 0x38e8d2,
+  /** Hostile / alien — signal red. */
+  enemy: 0xff4a3a,
+  /** Civilian — neutral warm. */
+  civilian: 0xf0c8a0,
+  /** Mind-controlled / psi — violet-magenta. */
+  mindControlled: 0xc86bff,
+  /** Unconscious (KO'd / captured) — desaturated steel for the ground ring. */
+  unconscious: 0x5a6472,
+} as const;
+
 /** Cosmetic colour set for one figure. */
 interface Palette {
   /** Main armour / shell colour. */
@@ -55,25 +77,31 @@ interface Palette {
   glow: number;
 }
 
+// Friendly: steel-blue armour trimmed with the teal team accent (visor / chest
+// light) so a trooper reads teal at a glance.
 const PLAYER_PALETTE: Palette = {
   primary: 0x3766a8,
   secondary: 0x16263d,
   metal: 0x9aa6b2,
-  glow: 0x5fe6ff,
+  glow: FACTION_ACCENT.player,
 };
 
+// Hostiles: distinct silhouettes (floating pod vs hunched biped) but both carry
+// the same signal-red eye/visor so "red = enemy" is unambiguous. Shell shades
+// stay distinct (crimson vs maroon) for per-template variety; magenta is
+// retired here so it can't be confused with the violet psi/MC cue.
 const DRONE_PALETTE: Palette = {
-  primary: 0x9c1f63,
-  secondary: 0x2c0a1c,
+  primary: 0x8f2230,
+  secondary: 0x260a0d,
   metal: 0x6a5560,
-  glow: 0xff3ea5,
+  glow: FACTION_ACCENT.enemy,
 };
 
 const SENTINEL_PALETTE: Palette = {
   primary: 0x96202b,
   secondary: 0x270a0d,
   metal: 0x595059,
-  glow: 0xff5a2a,
+  glow: FACTION_ACCENT.enemy,
 };
 
 function paletteFor(unit: Unit): Palette {

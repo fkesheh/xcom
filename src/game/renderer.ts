@@ -41,6 +41,7 @@ import {
   PCFShadowMap,
   PerspectiveCamera,
   PlaneGeometry,
+  PointLight,
   Raycaster,
   RingGeometry,
   CanvasTexture,
@@ -97,8 +98,10 @@ import {
 
 const COLORS = {
   background: 0x0a0d12,
-  groundVoid: 0x05070a,
-  selectRing: 0x6ee7ff,
+  // Unexplored / never-seen tone: near-black #05080f (mean luminance < 12) so
+  // fog reads as a true void, never a muddy grey (Track 4 item 4).
+  groundVoid: 0x05080f,
+  selectRing: 0x38e8d2, // teal friendly accent (Style Bible primary)
   pathOk: 0x39d98a,
   hover: 0xfacc15,
   aim: 0xff6b5a,
@@ -107,22 +110,46 @@ const COLORS = {
   // never colour alone. Amber = partial cover (caution); blue = full cover (safe).
   coverHalf: 0xf2b13a,
   coverFull: 0x4cc8f5,
+  // Map-wide cover-edge highlight (teal) drawn on the covered flank of a cover
+  // tile when a friendly stands adjacent (Track 4 item 2, visual only).
+  coverEdge: 0x38e8d2,
 } as const;
 
 /**
- * Fog dimming multipliers applied to a tile's lit colour when not visible.
- * Terrain (floor + walls/props) is ALWAYS rendered so structures read as
- * continuous; fog only DIMS it (and fully hides enemy units, handled
- * separately). Hidden = never seen, explored = seen before, visible = in LOS.
+ * Fog-of-war rendering (Track 4 item 4), three states:
+ *   hidden   = never seen -> painted the near-black void tone, features HIDDEN,
+ *              so unexplored ground reads as a true void (< 12 mean luminance).
+ *   explored = seen before -> desaturated toward grey (a "memory" look) and
+ *              dimmed, but kept LEGIBLE (mean ~18-70) so the ground still reads.
+ *   visible  = in a living friendly's line of sight -> full lit colour.
+ * Explored/visible terrain is drawn so known structure stays continuous; the
+ * fog only dims/desaturates it. Enemy UNITS are hidden by fog separately.
  */
-const HIDDEN_FLOOR_DIM = 0.22;
-const HIDDEN_FEATURE_DIM = 0.3;
-const EXPLORED_FLOOR_DIM = 0.5;
-const EXPLORED_FEATURE_DIM = 0.55;
+const EXPLORED_FLOOR_DIM = 0.34;
+const EXPLORED_FEATURE_DIM = 0.42;
+/** How far an explored tile is pulled toward its own luminance-grey (memory). */
+const EXPLORED_DESAT = 0.5;
 
-/** Reused colours: the never-seen void tone and a scratch for dimming maths. */
+/** Reused colours: the never-seen void tone and scratches for dimming maths. */
 const FOG_VOID = new Color(COLORS.groundVoid);
 const SCRATCH_COLOR = new Color();
+const SCRATCH_COLOR_B = new Color();
+
+/**
+ * Desaturate + dim a lit base colour into `out` for the explored ("remembered")
+ * fog state: pull each linear channel toward the colour's own luminance-grey by
+ * `desat`, then scale by `dim`. Luminance-grey desaturation keeps the tone
+ * readable (never a flat wash) while draining the vividness of live vision.
+ */
+function fogExplored(out: Color, base: Color, desat: number, dim: number): Color {
+  const l = 0.2126 * base.r + 0.7152 * base.g + 0.0722 * base.b;
+  out.setRGB(
+    (base.r + (l - base.r) * desat) * dim,
+    (base.g + (l - base.g) * desat) * dim,
+    (base.b + (l - base.b) * desat) * dim,
+  );
+  return out;
+}
 const BLACK = new Color(0, 0, 0);
 /** Reddened emissive tint blended over a hit figure for the damage flash. */
 const HIT_RED = new Color(1, 0.08, 0.08);
@@ -158,7 +185,18 @@ interface TimeOfDayLighting {
   /** Fog near/far as a multiple of the map's larger dimension. */
   fogNearMult: number;
   fogFarMult: number;
+  /** Intensity of the warm practical light pools over lit buildings (0 = off).
+   *  Off by day; lit at dusk/night so the cool grade gets warm pools (item 5). */
+  practical: number;
 }
+
+// Warm practical light pools (Track 4 item 5): a capped set of amber PointLights
+// parked over lit-building tiles, lit only at dusk/night.
+const PRACTICAL_MAX = 8;
+const PRACTICAL_COLOR = 0xffb066; // warm incandescent lamp / firelight
+const PRACTICAL_DISTANCE = 7.5; // fall-off radius of one pool
+/** Render categories that read as a warm practical light source (lit windows). */
+const PRACTICAL_LAMP_CATEGORIES: ReadonlySet<string> = new Set(["wall_building", "door"]);
 
 /**
  * Hour buckets: 6..18 = day, 18..20 / 5..6 = dusk, else night. An unset hour
@@ -189,6 +227,7 @@ const TIME_OF_DAY: Record<TimeOfDay, TimeOfDayLighting> = {
     bloomStrength: 0.35,
     fogNearMult: 1.4,
     fogFarMult: 3.4,
+    practical: 0, // daylight: no practicals
   },
   // DUSK = low warm sun, cooler fill, moderately pulled-in fog.
   dusk: {
@@ -205,6 +244,7 @@ const TIME_OF_DAY: Record<TimeOfDay, TimeOfDayLighting> = {
     bloomStrength: 0.42,
     fogNearMult: 1.15,
     fogFarMult: 2.85,
+    practical: 1.2, // dusk: soft warm pools begin to read
   },
   // NIGHT = dim cool moonlight, blue ambient, tight fog so the squad reads but
   // the field fades to dark. Emissive accents (UFO lights, tracers, visors) and
@@ -223,6 +263,7 @@ const TIME_OF_DAY: Record<TimeOfDay, TimeOfDayLighting> = {
     bloomStrength: 0.55,
     fogNearMult: 0.85,
     fogFarMult: 2.0,
+    practical: 2.4, // night: strong warm pools break up the cool blue grade
   },
 };
 
@@ -235,9 +276,14 @@ const DEATH_COLLAPSE_MS = 420;
 const STUN_REACT_MS = 240;
 /** How long a floating stun number rises and fades above the struck target. */
 const STUN_FLOAT_MS = 900;
-// Screen-shake envelope: impulses add to a decaying energy value (exp decay).
-const SHAKE_DECAY_RATE = 12; // ~150ms fade for a shot, ~300ms for a blast
-const SHAKE_MAX = 0.2;
+// Screen-shake envelope: an explosion adds an impulse to a decaying energy
+// value (exp decay). Only EXPLOSIONS shake (Track 4 item 6) — gunfire / stun no
+// longer do — and the decay is tuned so the perceptible motion is gone within
+// ~250ms. reducedMotion suppresses it entirely (a classic motion trigger).
+const SHAKE_DECAY_RATE = 20; // amplitude imperceptible (< 0.005) by ~180ms
+const SHAKE_MAX = 0.16;
+/** Explosion concussion impulse (world-unit amplitude). */
+const SHAKE_BLAST = 0.15;
 
 // ---------------------------------------------------------------------------
 // Floor tones — the per-tile colour painted onto the instanced floor quad (and
@@ -252,10 +298,10 @@ const GROUND_TONES: Record<string, number> = {
   soil: 0x6e4a2c,
   crop: 0x9ba83a,
   road: 0x3a3d42,
-  pavement: 0x888d94,
+  pavement: 0x767b82,
   sand: 0xc8ad6c,
   floor_wood: 0x8a5a30,
-  floor_concrete: 0x73777d,
+  floor_concrete: 0x64686f,
   ufo_floor: 0x2c8079,
   dropship_floor: 0x58646f,
   // Openings (floor-level thresholds).
@@ -338,6 +384,14 @@ function cloneFeatureMaterials(obj: Object3D): FeaturePart[] {
     }
   });
   return parts;
+}
+
+/** A flat ground quad (long axis on X, normal +Y): baked so only a world-Y yaw
+ *  is needed to orient it. Used for the cover-edge highlight bars. */
+function makeGroundBarGeometry(len: number, width: number): PlaneGeometry {
+  const g = new PlaneGeometry(len, width);
+  g.rotateX(-Math.PI / 2);
+  return g;
 }
 
 /** Promise-based tween: drives `onUpdate(t in [0,1])` for `ms`, then resolves. */
@@ -451,7 +505,9 @@ function buildSandbags(variant: number): Group {
  */
 function buildLowWall(_variant: number): Group {
   const group = new Group();
-  const mat = getTerrainMaterial("wall_interior"); // concrete; cloned per tile for fog
+  // Warm taupe concrete (its own category) so full cover reads distinctly from
+  // the cool architectural walls; cloned per tile for fog.
+  const mat = getTerrainMaterial("low_wall");
   const h = 1.3;
   const body = new Mesh(new BoxGeometry(0.88, h, 0.5), mat);
   body.castShadow = true;
@@ -653,8 +709,44 @@ export class Renderer {
   });
   private selectionRing: Mesh | null = null;
   private selectionHalo: Mesh | null = null;
+  /** Small teal wedge on the selection ring showing the selected unit's facing. */
+  private selectionTick: Mesh | null = null;
   private hoverMarker: Mesh | null = null;
   private coverIndicatorGroup: Group | null = null;
+  // Map-wide cover-edge highlight (Track 4 item 2): a thin teal bar drawn on the
+  // covered flank of a cover tile when a living friendly stands adjacent. The
+  // geometry + material are shared; syncFromState clears the group and rebuilds
+  // the per-edge meshes (mirroring the smoke/marker pattern), so the shared
+  // resources live for the renderer's lifetime and only the wrappers churn.
+  private readonly coverEdgeGroup = new Group();
+  // Pre-flattened to the ground plane (long axis on X, normal +Y) so a single
+  // clean rotation.y orients each bar along its edge — no Euler ambiguity.
+  private readonly coverEdgeGeometry = makeGroundBarGeometry(0.66, 0.12);
+  // Dual-coded by cover strength (matches the shield-glyph tint semantics):
+  // amber = half cover (caution), blue = full cover (safe). A single teal bar
+  // would collapse the sim's 1-vs-2 cover distinction the player relies on.
+  private readonly coverEdgeHalfMaterial = new MeshBasicMaterial({
+    color: COLORS.coverHalf,
+    transparent: true,
+    opacity: 0.5,
+    depthWrite: false,
+  });
+  private readonly coverEdgeFullMaterial = new MeshBasicMaterial({
+    color: COLORS.coverFull,
+    transparent: true,
+    opacity: 0.5,
+    depthWrite: false,
+  });
+  // Warm practical light pools for NIGHT/DUSK missions (Track 4 item 5): a
+  // small pooled set of amber PointLights parked over lit-building tiles so the
+  // cool blue night grade is broken up by warm pools where lamps exist. Created
+  // once in buildGrid from candidate tiles, toggled per time-of-day, disposed
+  // with the grid. Capped so the forward+shadow lighting cost stays bounded.
+  private readonly practicalLights: { light: PointLight; idx: number }[] = [];
+  /** Practical-light intensity for the current time-of-day (0 = off by day).
+   *  applyTimeOfDay caches it; updatePracticalLights gates each lamp on its own
+   *  tile being explored/visible so no warm pool bleeds out of unseen fog. */
+  private practicalBaseIntensity = 0;
   private objectiveBeacon: Group | null = null;
   private objectiveBeaconTarget: Vec2 | null = null;
   private carrierBeacon: Group | null = null;
@@ -679,6 +771,14 @@ export class Renderer {
   private shakeEnergy = 0;
   private readonly shakeOffset = new Vector3();
   private lastRenderSec = 0;
+
+  /**
+   * Honour prefers-reduced-motion: suppress screen shake and freeze the
+   * decorative selection/beacon pulses (motion that communicates nothing the
+   * static state doesn't). Read once at construction like the other views.
+   */
+  private readonly reducedMotion: boolean =
+    typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   constructor() {
     this.renderer = new WebGLRenderer({ antialias: true });
@@ -710,6 +810,7 @@ export class Renderer {
     this.scene.add(this.tileGroup, this.unitGroup, this.fxGroup, this.previewGroup);
     this.scene.add(this.smokeGroup);
     this.scene.add(this.markerGroup);
+    this.scene.add(this.coverEdgeGroup);
     this.addLights();
 
     // Post-processing: bloom only catches emissive accents / FX / bright glints.
@@ -818,6 +919,12 @@ export class Renderer {
     this.renderer.toneMappingExposure = cfg.exposure;
     this.bloomPass.strength = cfg.bloomStrength;
 
+    // Warm practical pools: dark by day, lit at dusk/night (item 5). Cache the
+    // base intensity here; updatePracticalLights (called from syncFromState once
+    // fog visibility is known) gates each lamp on its own tile being seen and
+    // toggles `visible` so day maps pay zero point-light shader cost.
+    this.practicalBaseIntensity = cfg.practical;
+
     if (this.scene.background instanceof Color) {
       this.scene.background.setHex(cfg.background);
     }
@@ -827,6 +934,50 @@ export class Renderer {
       this.scene.fog.color.setHex(cfg.background);
       this.scene.fog.near = size * cfg.fogNearMult;
       this.scene.fog.far = size * cfg.fogFarMult;
+    }
+  }
+
+  /**
+   * Build the warm practical light pool set (Track 4 item 5) from lit-building
+   * candidate tiles, capped at {@link PRACTICAL_MAX} and spread evenly so a big
+   * building doesn't hog the whole budget. Lights start dark; applyTimeOfDay
+   * lifts them at dusk/night. They cast no shadows (cheap fill). Disposed with
+   * the grid. A map with no buildings gets none — the cool grade stands alone.
+   */
+  private buildPracticalLights(
+    candidates: ReadonlyArray<{ x: number; z: number; idx: number }>,
+  ): void {
+    if (candidates.length === 0) return;
+    const stride = Math.max(1, Math.floor(candidates.length / PRACTICAL_MAX));
+    for (let i = 0; i < candidates.length && this.practicalLights.length < PRACTICAL_MAX; i += stride) {
+      const c = candidates[i]!;
+      const light = new PointLight(PRACTICAL_COLOR, 0, PRACTICAL_DISTANCE, 2);
+      light.position.set(c.x, 1.5, c.z);
+      light.castShadow = false;
+      // Start hidden: a day mission keeps practicals off, and a visible
+      // intensity-0 light still counts toward NUM_POINT_LIGHTS, making every lit
+      // material pay the point-light loop for lamps that contribute nothing.
+      // updatePracticalLights turns them on only at dusk/night for seen tiles.
+      light.visible = false;
+      this.scene.add(light);
+      this.practicalLights.push({ light, idx: c.idx });
+    }
+  }
+
+  /**
+   * Gate the warm practical pools by BOTH time-of-day and fog: a lamp is lit
+   * only when practicals are on for the hour (dusk/night) AND its own tile has
+   * been seen. This keeps two invariants: day maps pay zero point-light cost
+   * (all lamps hidden), and no warm pool bleeds out of never-explored fog to
+   * disclose a building the void is meant to hide. Runs each sync after
+   * visibility is computed; pure toggles, no allocation.
+   */
+  private updatePracticalLights(state: BattleState, visibleCells: ReadonlySet<number>): void {
+    const on = this.practicalBaseIntensity > 0;
+    for (const p of this.practicalLights) {
+      const seen = on && (visibleCells.has(p.idx) || state.explored.has(p.idx));
+      p.light.visible = seen;
+      p.light.intensity = seen ? this.practicalBaseIntensity : 0;
     }
   }
 
@@ -890,24 +1041,24 @@ export class Renderer {
     for (const view of this.unitViews.values()) {
       if (view.root.visible) view.hpBar.quaternion.copy(this.camera.quaternion);
     }
+    // Decorative pulses communicate nothing the static markers don't, so they
+    // are frozen under prefers-reduced-motion (Style Bible rule 2).
     if (this.selectionRing?.visible) {
-      const pulse = 0.92 + Math.sin(now * 4) * 0.08;
-      this.selectionRing.scale.setScalar(pulse);
-      (this.selectionRing.material as MeshBasicMaterial).opacity =
-        0.72 + Math.sin(now * 4) * 0.16;
+      const w = this.reducedMotion ? 0 : Math.sin(now * 4);
+      this.selectionRing.scale.setScalar(0.92 + w * 0.08);
+      (this.selectionRing.material as MeshBasicMaterial).opacity = 0.72 + w * 0.16;
     }
     if (this.selectionHalo?.visible) {
-      const pulse = 1.02 + Math.sin(now * 2.5) * 0.12;
-      this.selectionHalo.scale.setScalar(pulse);
-      (this.selectionHalo.material as MeshBasicMaterial).opacity =
-        0.18 + Math.sin(now * 2.5) * 0.07;
+      const w = this.reducedMotion ? 0 : Math.sin(now * 2.5);
+      this.selectionHalo.scale.setScalar(1.02 + w * 0.12);
+      (this.selectionHalo.material as MeshBasicMaterial).opacity = 0.18 + w * 0.07;
     }
     if (this.objectiveBeacon) {
-      const pulse = 1 + Math.sin(now * 1.8) * 0.08;
+      const pulse = 1 + (this.reducedMotion ? 0 : Math.sin(now * 1.8) * 0.08);
       this.objectiveBeacon.scale.set(pulse, 1, pulse);
     }
     if (this.carrierBeacon?.visible) {
-      const pulse = 1 + Math.sin(now * 3.2) * 0.08;
+      const pulse = 1 + (this.reducedMotion ? 0 : Math.sin(now * 3.2) * 0.08);
       this.carrierBeacon.scale.set(pulse, pulse, pulse);
     }
 
@@ -930,8 +1081,10 @@ export class Renderer {
     this.composer.render();
   }
 
-  /** Add a screen-shake impulse (world-unit amplitude; decays ~150-300ms). */
+  /** Add a screen-shake impulse (world-unit amplitude; decays within ~250ms).
+   *  Suppressed entirely under prefers-reduced-motion. */
   private addShake(amplitude: number): void {
+    if (this.reducedMotion) return;
     this.shakeEnergy = Math.min(this.shakeEnergy + amplitude, SHAKE_MAX);
   }
 
@@ -1007,6 +1160,7 @@ export class Renderer {
     floor.receiveShadow = true;
     const dummy = new Object3D();
     dummy.rotation.x = -Math.PI / 2;
+    const lampCandidates: { x: number; z: number; idx: number }[] = [];
     for (let y = 0; y < grid.height; y++) {
       for (let x = 0; x < grid.width; x++) {
         const idx = cellIndex(grid, x, y);
@@ -1025,12 +1179,17 @@ export class Renderer {
           this.tileGroup.add(feature.object);
           this.featureMeshes.set(idx, feature);
         }
+        if (category !== undefined && PRACTICAL_LAMP_CATEGORIES.has(category)) {
+          lampCandidates.push({ x: w.x, z: w.z, idx });
+        }
       }
     }
     floor.instanceMatrix.needsUpdate = true;
     if (floor.instanceColor) floor.instanceColor.needsUpdate = true;
     this.tileGroup.add(floor);
     this.floorMesh = floor;
+
+    this.buildPracticalLights(lampCandidates);
 
     this.buildHelpers();
     if (state.objective) {
@@ -1239,6 +1398,28 @@ export class Renderer {
     this.selectionHalo = halo;
     this.scene.add(halo);
 
+    // Facing tick: a small teal arrowhead sitting on the selection ring's
+    // forward edge, yawed to the selected unit's Dir8 so the player can read
+    // which way the soldier is looking at a glance. Flat on the ground; the
+    // geometry is pre-translated to the ring radius, pointing north at yaw 0.
+    const tickGeo = new ShapeGeometry(facingTickShape());
+    tickGeo.translate(0, 0.56, 0);
+    tickGeo.rotateX(-Math.PI / 2); // bake the flatten: shape +Y -> world -Z (north)
+    const tick = new Mesh(
+      tickGeo,
+      new MeshBasicMaterial({
+        color: COLORS.selectRing,
+        transparent: true,
+        opacity: 0.95,
+        side: DoubleSide,
+        depthWrite: false,
+      }),
+    );
+    tick.position.y = 0.045;
+    tick.visible = false;
+    this.selectionTick = tick;
+    this.scene.add(tick);
+
     const hover = new Mesh(
       new RingGeometry(0.38, 0.48, 32),
       new MeshBasicMaterial({ color: COLORS.hover, transparent: true, opacity: 0.58 }),
@@ -1248,6 +1429,18 @@ export class Renderer {
     hover.visible = false;
     this.hoverMarker = hover;
     this.scene.add(hover);
+  }
+
+  /** Point the selection facing tick at a unit's tile + Dir8 (or hide it). */
+  private placeSelectionTick(x: number, z: number, facing: number, visible: boolean): void {
+    if (!this.selectionTick) return;
+    this.selectionTick.visible = visible;
+    if (!visible) return;
+    this.selectionTick.position.set(x, 0.045, z);
+    // Glyph points world -Z at yaw 0; +PI aligns that base direction with the
+    // unit's facing vector via dir8ToAngleY.
+    this.selectionTick.rotation.y =
+      dir8ToAngleY(facing as Parameters<typeof dir8ToAngleY>[0]) + Math.PI;
   }
 
   /** Mark the known crash-site objective without revealing hostile units. */
@@ -1525,23 +1718,39 @@ export class Renderer {
     const base = this.floorBase[idx];
     if (!base || !this.floorMesh) return;
 
-    // Floor quad: always drawn, just dimmed by how well it's known. Terrain is
-    // never fully hidden, so walls/structures always read as continuous.
-    const floorDim =
-      vis === "visible" ? 1 : vis === "explored" ? EXPLORED_FLOOR_DIM : HIDDEN_FLOOR_DIM;
-    if (floorDim >= 1) this.floorMesh.setColorAt(idx, base);
-    else this.floorMesh.setColorAt(idx, SCRATCH_COLOR.copy(base).multiplyScalar(floorDim));
+    // Floor quad tone by fog state: full when visible, desaturated+dimmed (but
+    // legible) when explored, painted the near-black void when never seen.
+    if (vis === "visible") {
+      this.floorMesh.setColorAt(idx, base);
+    } else if (vis === "explored") {
+      this.floorMesh.setColorAt(idx, fogExplored(SCRATCH_COLOR, base, EXPLORED_DESAT, EXPLORED_FLOOR_DIM));
+    } else {
+      this.floorMesh.setColorAt(idx, FOG_VOID);
+    }
 
     const feature = this.featureMeshes.get(idx);
     if (!feature) return;
-    // Walls / props are always visible (continuous structures); fog only dims
-    // them. Enemy UNITS remain hidden by fog — that's handled separately.
+    // Never-seen structures stay hidden (unexplored ground must read as a true
+    // void); known structures are drawn so the map stays continuous, with fog
+    // desaturating/dimming the explored ones. Enemy UNITS are hidden separately.
+    if (vis === "hidden") {
+      feature.object.visible = false;
+      return;
+    }
     feature.object.visible = true;
-    const dim =
-      vis === "visible" ? 1 : vis === "explored" ? EXPLORED_FEATURE_DIM : HIDDEN_FEATURE_DIM;
-    for (const part of feature.parts) {
-      part.mat.color.copy(part.base).multiplyScalar(dim);
-      if (part.emissiveBase) part.mat.emissive.copy(part.emissiveBase).multiplyScalar(dim);
+    if (vis === "visible") {
+      for (const part of feature.parts) {
+        part.mat.color.copy(part.base);
+        if (part.emissiveBase) part.mat.emissive.copy(part.emissiveBase);
+      }
+    } else {
+      for (const part of feature.parts) {
+        fogExplored(part.mat.color, part.base, EXPLORED_DESAT, EXPLORED_FEATURE_DIM);
+        if (part.emissiveBase) {
+          SCRATCH_COLOR_B.copy(part.emissiveBase).multiplyScalar(EXPLORED_FEATURE_DIM);
+          part.mat.emissive.copy(SCRATCH_COLOR_B);
+        }
+      }
     }
   }
 
@@ -1555,6 +1764,9 @@ export class Renderer {
     this.applyTimeOfDay(state);
 
     const visibleCells = this.computeVisibleCells(state);
+    // Gate the warm practical pools now that fog visibility is known (day = all
+    // off => zero point-light cost; night = only seen lamp tiles glow).
+    this.updatePracticalLights(state, visibleCells);
     const cellCount = state.grid.width * state.grid.height;
 
     // A blast may have destroyed cover since the last sync (a sandbags / low_wall
@@ -1604,6 +1816,54 @@ export class Renderer {
     this.syncObjectiveMarkers(state);
     this.syncSmokeClouds(state);
     this.syncDeployableMarkers(state);
+    this.syncCoverEdges(state, visibleCells);
+  }
+
+  /**
+   * Rebuild the map-wide cover-edge highlights (Track 4 item 2). For each living
+   * PLAYER unit, look at its four orthogonal neighbours; where a neighbour tile
+   * grants cover, draw a thin teal bar on that cover tile's shared edge (the
+   * covered flank), so the player reads at a glance which cover is shielding a
+   * soldier. Visual-only — the cover value is read straight from the sim tile
+   * data (never mutated). Shared geometry + material are reused; only the
+   * per-edge Mesh wrappers churn (the smoke/marker pattern), so nothing here
+   * allocates GPU resources per sync or leaks.
+   */
+  private syncCoverEdges(state: BattleState, visibleCells: ReadonlySet<number>): void {
+    for (const child of [...this.coverEdgeGroup.children]) {
+      this.coverEdgeGroup.remove(child);
+    }
+    const grid = state.grid;
+    // [neighbour dx, dz, edge world offset x, z, bar yaw]. The bar lies on the
+    // shared edge between the unit and the cover tile, running along that edge.
+    const sides: ReadonlyArray<readonly [number, number, number, number, number]> = [
+      [0, -1, 0, -0.5, 0], // N: cover to -Z, bar runs along X
+      [1, 0, 0.5, 0, Math.PI / 2], // E: cover to +X, bar runs along Z
+      [0, 1, 0, 0.5, 0], // S
+      [-1, 0, -0.5, 0, Math.PI / 2], // W
+    ];
+    for (const unit of state.units) {
+      if (unit.faction !== "player" || !unit.alive) continue;
+      const w = tileToWorld(unit.pos.x, unit.pos.y, 0);
+      for (const [dx, dz, ox, oz, yaw] of sides) {
+        const nx = unit.pos.x + dx;
+        const ny = unit.pos.y + dz;
+        if (nx < 0 || ny < 0 || nx >= grid.width || ny >= grid.height) continue;
+        const cover = tileTypeAt(grid, nx, ny)?.cover ?? 0;
+        if (cover <= 0) continue;
+        // Never disclose a cover object on a never-seen tile: the fog hides its
+        // feature mesh and voids its floor, so a bar there would leak its
+        // location. Only draw on tiles that are visible or previously explored.
+        const nIdx = cellIndex(grid, nx, ny);
+        if (!visibleCells.has(nIdx) && !state.explored.has(nIdx)) continue;
+        // Dual-code the flank by cover strength: amber = half, blue = full.
+        const mat = cover >= 2 ? this.coverEdgeFullMaterial : this.coverEdgeHalfMaterial;
+        const bar = new Mesh(this.coverEdgeGeometry, mat);
+        bar.rotation.y = yaw; // geometry is already flat; orient along the edge
+        bar.position.set(w.x + ox, 0.06, w.z + oz);
+        this.coverEdgeGroup.add(bar);
+      }
+    }
   }
 
   /**
@@ -1676,12 +1936,14 @@ export class Renderer {
     if (this.selectedId === null) {
       this.selectionRing.visible = false;
       if (this.selectionHalo) this.selectionHalo.visible = false;
+      this.placeSelectionTick(0, 0, 0, false);
       return;
     }
     const unit = state.units.find((u) => u.id === this.selectedId);
     if (!unit || !unit.alive) {
       this.selectionRing.visible = false;
       if (this.selectionHalo) this.selectionHalo.visible = false;
+      this.placeSelectionTick(0, 0, 0, false);
       return;
     }
     const w = tileToWorld(unit.pos.x, unit.pos.y, 0);
@@ -1691,6 +1953,7 @@ export class Renderer {
       this.selectionHalo.position.set(w.x, 0.02, w.z);
       this.selectionHalo.visible = true;
     }
+    this.placeSelectionTick(w.x, w.z, unit.facing, true);
   }
 
   // -------------------------------------------------------------------------
@@ -1702,6 +1965,7 @@ export class Renderer {
     if (id === null) {
       if (this.selectionRing) this.selectionRing.visible = false;
       if (this.selectionHalo) this.selectionHalo.visible = false;
+      this.placeSelectionTick(0, 0, 0, false);
       this.clearCoverIndicators();
     }
     if (id !== null) {
@@ -1712,6 +1976,17 @@ export class Renderer {
         if (this.selectionHalo) {
           this.selectionHalo.position.set(view.root.position.x, 0.02, view.root.position.z);
           this.selectionHalo.visible = view.root.visible;
+        }
+        // Follow the ring, and reorient to THIS unit's facing now — selecting a
+        // unit does not dispatch/sync, so without this the tick would keep the
+        // previously-selected unit's yaw and misreport the vision cone. The
+        // figure was already rotated to its Dir8 (faceView: character.rotation.y
+        // = dir8ToAngleY(facing)); the tick's glyph points world -Z, so +PI
+        // aligns it with that same facing.
+        if (this.selectionTick) {
+          this.selectionTick.position.set(view.root.position.x, 0.045, view.root.position.z);
+          this.selectionTick.rotation.y = view.character.rotation.y + Math.PI;
+          this.selectionTick.visible = view.root.visible;
         }
       }
     }
@@ -1946,7 +2221,7 @@ export class Renderer {
       this.faceView(shooter, dirTowards(shooter.root.position, ev.targetPos));
       setCharacterPose(shooter.character, { aiming: true });
     }
-    this.addShake(0.04); // per-shot recoil
+    // Gunfire does NOT shake the camera (Track 4 item 6 — explosions only).
     const target = ev.targetId != null ? this.unitViews.get(ev.targetId) ?? null : null;
     // Bullets originate from the tile the sim actually fired from: the shooter's
     // tile for a direct shot, or the lean tile for a corner peek (so a peek
@@ -2060,7 +2335,8 @@ export class Renderer {
       ev.stun,
       ev.knockedOut === true,
     );
-    this.addShake(ev.knockedOut ? 0.1 : 0.05);
+    // A stun strike no longer shakes the camera (explosions only, item 6); the
+    // electric jitter on the target figure below carries the impact instead.
 
     const saved: { mat: MeshStandardMaterial; emissive: Color; intensity: number }[] = [];
     view.character.traverse((node) => {
@@ -2127,7 +2403,7 @@ export class Renderer {
    */
   async playBlast(center: Vec2, radius: number): Promise<void> {
     const w = tileToWorld(center.x, center.y, 0);
-    this.addShake(0.12); // per-blast concussion
+    this.addShake(SHAKE_BLAST); // explosion concussion (the only screen shake)
     await this.effects.playBlast(new Vector3(w.x, 0.4, w.z), radius);
   }
 
@@ -2186,6 +2462,10 @@ export class Renderer {
       this.disposeSceneMesh(this.selectionHalo);
       this.selectionHalo = null;
     }
+    if (this.selectionTick) {
+      this.disposeSceneMesh(this.selectionTick);
+      this.selectionTick = null;
+    }
     if (this.hoverMarker) {
       this.disposeSceneMesh(this.hoverMarker);
       this.hoverMarker = null;
@@ -2205,6 +2485,14 @@ export class Renderer {
     this.markerGeometry.dispose();
     this.mineMaterial.dispose();
     this.scannerMaterial.dispose();
+    // Cover-edge highlights: clear the per-edge wrappers and release the shared
+    // geometry + material owned here (same pattern as smoke/markers).
+    for (const child of [...this.coverEdgeGroup.children]) {
+      this.coverEdgeGroup.remove(child);
+    }
+    this.coverEdgeGeometry.dispose();
+    this.coverEdgeHalfMaterial.dispose();
+    this.coverEdgeFullMaterial.dispose();
     // Release the shared material/texture/env cache after the per-tile clones
     // (above) are gone, then the composer's render targets.
     disposeMaterials();
@@ -2254,6 +2542,12 @@ export class Renderer {
     }
     this.featureMeshes.clear();
     this.floorBase.length = 0;
+    // Warm practical pools are built per grid; release them with it.
+    for (const { light } of this.practicalLights) {
+      this.scene.remove(light);
+      light.dispose();
+    }
+    this.practicalLights.length = 0;
     if (this.groundPlane) {
       this.groundPlane.geometry.dispose();
       (this.groundPlane.material as MeshStandardMaterial).dispose();
@@ -2296,6 +2590,16 @@ function dirTowards(world: Vector3, target: Vec2): number {
 // ---------------------------------------------------------------------------
 // Cover-indicator shield glyphs (flat shapes in the XY plane, normal +Z)
 // ---------------------------------------------------------------------------
+
+/** A small arrowhead (points toward shape +Y) — the selection facing tick. */
+function facingTickShape(): Shape {
+  const s = new Shape();
+  s.moveTo(0, 0.16);
+  s.lineTo(-0.12, -0.06);
+  s.lineTo(0.12, -0.06);
+  s.closePath();
+  return s;
+}
 
 /** Full shield outline (rounded shoulders, pointed bottom) — the full-cover glyph. */
 function fullShieldShape(): Shape {

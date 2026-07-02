@@ -282,10 +282,10 @@ const SPECS: Record<string, MatSpec> = {
   soil: { color: 0x6e4a2c, roughness: 0.98, metalness: 0, detail: true, normalScale: 0.6 },
   crop: { color: 0x9ba83a, roughness: 0.9, metalness: 0, detail: true, normalScale: 0.5 },
   road: { color: 0x3a3d42, roughness: 0.8, metalness: 0, detail: true, normalScale: 0.35 },
-  pavement: { color: 0x8c9198, roughness: 0.85, metalness: 0, detail: true, normalScale: 0.4 },
+  pavement: { color: 0x777c83, roughness: 0.85, metalness: 0, detail: true, normalScale: 0.4 },
   sand: { color: 0xcdb070, roughness: 0.95, metalness: 0, detail: true, normalScale: 0.45 },
   floor_wood: { color: 0x8a5a30, roughness: 0.7, metalness: 0.05, detail: true, normalScale: 0.4 },
-  floor_concrete: { color: 0x767a80, roughness: 0.85, metalness: 0.02, detail: true, normalScale: 0.4 },
+  floor_concrete: { color: 0x666a71, roughness: 0.85, metalness: 0.02, detail: true, normalScale: 0.4 },
   ufo_floor: {
     color: 0x2c8079, roughness: 0.5, metalness: 0.2, detail: true, normalScale: 0.3,
     emissive: 0x0c3b37, emissiveIntensity: 0.6, envIntensity: 0.9,
@@ -305,15 +305,21 @@ const SPECS: Record<string, MatSpec> = {
     color: 0x9fd3e6, roughness: 0.05, metalness: 0, opacity: 0.35,
     emissive: 0x163a44, emissiveIntensity: 0.5, envIntensity: 1.1,
   },
-  crate: { color: 0xb27c3e, roughness: 0.75, metalness: 0.05, detail: true, normalScale: 0.45 },
-  barrel: { color: 0xb5602f, roughness: 0.5, metalness: 0.4, normalOnly: true, normalScale: 0.25, envIntensity: 0.7 },
-  rubble: { color: 0x726b5f, roughness: 0.95, metalness: 0.02, detail: true, normalScale: 0.7 },
+  crate: { color: 0xbf8438, roughness: 0.75, metalness: 0.05, detail: true, normalScale: 0.45 },
+  barrel: { color: 0xc0642c, roughness: 0.5, metalness: 0.4, normalOnly: true, normalScale: 0.25, envIntensity: 0.7 },
+  rubble: { color: 0x7d735f, roughness: 0.95, metalness: 0.02, detail: true, normalScale: 0.7 },
   hedge: { color: 0x2f5a28, roughness: 0.95, metalness: 0, detail: true, normalScale: 0.6 },
   bush: { color: 0x3a6b30, roughness: 0.95, metalness: 0, detail: true, normalScale: 0.6 },
+  // Chest-high concrete emplacement (renderer's low_wall = FULL shoot-over
+  // cover). A distinctly WARM taupe so it reads as a tactical object, never as
+  // the cool architectural walls below (Track 4 item 2 value separation).
+  low_wall: { color: 0x9c8b6e, roughness: 0.9, metalness: 0.02, detail: true, normalScale: 0.5 },
 
   // -- Full cover / blockers ------------------------------------------------
-  wall_building: { color: 0x9a948a, roughness: 0.9, metalness: 0.02, detail: true, normalScale: 0.5 },
-  wall_interior: { color: 0x847e74, roughness: 0.85, metalness: 0.02, detail: true, normalScale: 0.45 },
+  // Walls are cool desaturated grey (high value, low chroma) so architecture
+  // reads distinctly from the WARM cover objects above and the terrain floors.
+  wall_building: { color: 0xa0a4a8, roughness: 0.9, metalness: 0.02, detail: true, normalScale: 0.5 },
+  wall_interior: { color: 0x8a8e92, roughness: 0.85, metalness: 0.02, detail: true, normalScale: 0.45 },
   rock: { color: 0x6f6960, roughness: 0.95, metalness: 0.02, detail: true, normalScale: 0.85 },
   tree: { color: 0x2f6b30, roughness: 0.9, metalness: 0, detail: true, normalScale: 0.55 },
   ufo_hull: {

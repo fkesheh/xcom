@@ -75,7 +75,9 @@ function createRifle(): Group {
   const dark = material(0x101720, 0.38, 0.82);
   const steel = material(0x526272, 0.3, 0.88);
   const furniture = material(0x273443, 0.65, 0.35);
-  const lens = glow(0x55d8ff, 2.2);
+  // Teal optic to match the friendly team accent (FACTION_ACCENT.player, kept in
+  // sync by value to avoid a characters.ts <-> weapons.ts import cycle).
+  const lens = glow(0x38e8d2, 2.2);
 
   const stock = add(root, rounded(0.13, 0.16, 0.29, 0.035), furniture, 0, -0.015, -0.18);
   stock.rotation.x = -0.08;
