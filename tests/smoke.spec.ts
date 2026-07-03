@@ -8,7 +8,7 @@
  * boot path in `src/game/main.ts` reads them out of localStorage.
  */
 import path from "node:path";
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 
 import { createCampaign } from "../src/campaign/storage";
 import {
@@ -27,6 +27,19 @@ const SHOTS_DIR = path.resolve(process.cwd(), "tests", "smoke-shots");
 const BASE: BaseLocation = { lat: 48.2, lon: 14.6, region: "Europe" };
 
 /**
+ * Enter a base facility room deterministically. DOM room-entry is gone in the new
+ * base IA (the base is a bare 3D overview + a single per-room panel), so rooms are
+ * reached in tests via the `window.__baseEnterRoom(kind)` hook the base view exposes
+ * — the deterministic equivalent of clicking a facility mesh. `command` mounts the
+ * geoscape (it IS the Command Center room).
+ */
+async function enterRoom(page: Page, kind: string): Promise<void> {
+  await page.evaluate((k) => {
+    (window as unknown as { __baseEnterRoom?: (roomKind: string) => void }).__baseEnterRoom?.(k);
+  }, kind);
+}
+
+/**
  * Build a campaign whose UFO contact is a launchable crash site. `interceptUfo`
  * auto-resolves based on the interceptor/UFO score forecast, so we search seeds
  * until the contact is actually forced down (status "crashed").
@@ -36,7 +49,9 @@ function crashedCampaign(difficulty: DifficultyLevel = "veteran"): CampaignState
     const fresh = createCampaign(BASE, seed, difficulty);
     const tracked = { ...fresh, ufoContact: createUfoContact(fresh, 0) };
     const resolved = interceptUfo(tracked);
-    if (resolved.ufoContact?.status === "crashed") return resolved;
+    // Require a land crash so the geoscape offers a "Launch Operation" CTA (an
+    // ocean crash is unrecoverable and never launchable).
+    if (resolved.ufoContact?.status === "crashed" && !resolved.ufoContact.overOcean) return resolved;
   }
   throw new Error("Unable to build a crashed-contact campaign for smoke test");
 }
@@ -109,21 +124,23 @@ test.describe("Blacksite boot smoke", () => {
 
     await expect(page.locator("#base-view")).toBeVisible();
     await expect(page.locator("#base-view canvas")).toBeVisible();
-    await expect(page.locator("#base-view .operation-card")).toBeVisible();
-    // Launch button is enabled (crashed contact + active squad).
-    await expect(
-      page.getByRole("button", { name: /recover ufo core/i }),
-    ).toBeEnabled();
 
-    // The market now lives inside the Hangar room — open it from the base hub's
-    // facility list, then assert the market panel (with Buy buttons) is visible
-    // for the screenshot.
-    await page.getByRole("button", { name: /hangar & armory/i }).click();
+    // The market now lives inside the Hangar room. The DOM room-nav sidebar is gone
+    // (bare 3D overview + per-room panel), so reach the room via the __baseEnterRoom
+    // test hook, then assert the market panel (with Buy buttons) is visible.
+    await enterRoom(page, "hangar");
     await expect(page.locator("#base-view .market-card")).toBeVisible();
-
-    // Scroll the market into view for a representative screenshot.
     await page.locator("#base-view .market-card").scrollIntoViewIfNeeded();
     await page.screenshot({ path: path.join(SHOTS_DIR, "02-base.png") });
+
+    // Mission launch moved off the base onto the geoscape live-contact card (reached
+    // via the Command Center room). Enter it and assert the "Launch Operation" CTA is
+    // enabled for the crashed land contact.
+    await enterRoom(page, "command");
+    await expect(page.locator("#geoscape")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /launch operation/i }),
+    ).toBeEnabled();
   });
 
   test("c) geoscape interception overlay renders", async ({ page }) => {
@@ -133,10 +150,11 @@ test.describe("Blacksite boot smoke", () => {
     }, campaign);
     await page.goto("/");
 
-    // Boot with a saved campaign always lands on the base view; the
-    // interception overlay lives on the geoscape, so hop over via "Earth".
+    // Boot with a saved campaign always lands on the base view; the interception
+    // overlay lives on the geoscape, which is now the Command Center room (the
+    // floating "Earth" button is gone).
     await expect(page.locator("#base-view")).toBeVisible();
-    await page.locator('button:has-text("Earth")').click({ force: true });
+    await enterRoom(page, "command");
 
     await expect(page.locator("#geoscape")).toBeVisible();
     await expect(page.locator("#geoscape canvas")).toBeVisible();
@@ -157,12 +175,15 @@ test.describe("Blacksite boot smoke", () => {
 
     // Start from the base screen.
     await expect(page.locator("#base-view")).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: /recover ufo core/i }),
-    ).toBeEnabled();
 
+    // Mission launch lives on the geoscape live-contact card now: enter the Command
+    // Center room, then launch the recovery operation from that card.
+    await enterRoom(page, "command");
+    await expect(page.locator("#geoscape")).toBeVisible();
+    const launch = page.getByRole("button", { name: /launch operation/i });
+    await expect(launch).toBeEnabled();
     // Launch the recovery operation -> Skyranger deployment flight -> Deploy/Wait choice.
-    await page.getByRole("button", { name: /recover ufo core/i }).click();
+    await launch.click();
 
     // Wait for the deploy-or-wait choice (after the ~3s flight), then click Deploy.
     const deployChoice = page.locator(".geo-deploy-actions button:has-text(\"Deploy\")");
@@ -241,39 +262,36 @@ test.describe("Blacksite boot smoke", () => {
 
     await page.screenshot({ path: path.join(SHOTS_DIR, "07-base-airborne.png") });
 
-    // Guidance: an airborne banner names the contact and routes the player to the
-    // Geoscape to intercept — never a launchable crash-site assault mission.
-    const banner = page.locator("#base-view .airborne-banner.tracked");
-    await expect(banner).toBeVisible();
-    const bannerText = ((await banner.textContent()) ?? "").replace(/\s+/g, " ").trim();
-    console.log("[smoke E] airborne banner text:", bannerText);
-    await expect(banner.getByText(/airborne ufo detected/i)).toBeVisible();
+    // Airborne intercept guidance moved onto the geoscape (Command Center room): the
+    // live-contact card reads "Airborne — intercept", offers an Intercept affordance,
+    // and NEVER a launchable recovery CTA (that appears only once the UFO is down on
+    // land). Enter the Command Center to verify.
+    await enterRoom(page, "command");
+    await expect(page.locator("#geoscape")).toBeVisible();
+    const contact = page.locator("#geoscape .geo-contact");
+    await expect(contact).toBeVisible();
+    const contactText = ((await contact.textContent()) ?? "").replace(/\s+/g, " ").trim();
+    console.log("[smoke E] geoscape contact card text:", contactText);
+    await expect(contact.getByText(/airborne/i).first()).toBeVisible();
 
-    // The launch button must read "Intercept first" and be DISABLED.
-    const interceptFirst = page.getByRole("button", { name: /^intercept first$/i });
-    await expect(interceptFirst).toBeVisible();
-    await expect(interceptFirst).toBeDisabled();
+    // The tracked UFO must offer an Intercept affordance (routing the player to
+    // scramble a fighter), never a launchable recovery.
+    const intercept = page.getByRole("button", { name: /intercept/i }).first();
+    await expect(intercept).toBeVisible();
     console.log(
-      "[smoke E] launch button label:",
-      ((await interceptFirst.textContent()) ?? "").replace(/\s+/g, " ").trim(),
+      "[smoke E] intercept button label:",
+      ((await intercept.textContent()) ?? "").replace(/\s+/g, " ").trim(),
     );
 
-    // No enabled "Recover UFO core" launch button may exist for an airborne UFO.
-    const recoverBtn = page.getByRole("button", { name: /recover ufo core/i });
-    const recoverCount = await recoverBtn.count();
-    if (recoverCount > 0) {
-      console.log("[smoke E] 'Recover UFO core' present — asserting it is disabled");
-      await expect(recoverBtn.first()).toBeDisabled();
-    } else {
-      console.log("[smoke E] 'Recover UFO core' correctly absent for airborne UFO");
-    }
+    // No "Launch Operation" CTA may exist for an airborne UFO.
+    await expect(page.getByRole("button", { name: /launch operation/i })).toHaveCount(0);
   });
 
   test("F) geoscape renders the Pause/1x/5x/30x time-speed controls", async ({
     page,
   }) => {
-    // A contact-free campaign boots to the base, then hops to a clean geoscape
-    // (no interception overlay) so the main time-speed controls are on display.
+    // A contact-free campaign boots to the base, then enters the Command Center room
+    // (a clean geoscape, no interception overlay) so the time-speed controls show.
     const campaign = createCampaign(BASE, 7, "veteran");
     await page.addInitScript((state: CampaignState) => {
       window.localStorage.setItem("blacksite.campaign.v1", JSON.stringify(state));
@@ -281,7 +299,7 @@ test.describe("Blacksite boot smoke", () => {
     await page.goto("/");
 
     await expect(page.locator("#base-view")).toBeVisible();
-    await page.locator('button:has-text("Earth")').click({ force: true });
+    await enterRoom(page, "command");
 
     await expect(page.locator("#geoscape")).toBeVisible();
     await expect(page.locator("#geoscape canvas")).toBeVisible();

@@ -58,7 +58,8 @@ import {
   isInterceptorReady,
   ufoTypeInfo,
 } from "../campaign/geoscape";
-import { campaignObjectiveProgress, canBuildNewBase, canLaunchFinalAssault, chooseInterceptor, craftSpeedDegPerHour, DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR, DIFFICULTY_CONFIGS, highestRegionalPanic, MAX_EXTRA_BASES, NEW_BASE_COST, transportCraft } from "../campaign/storage";
+import { generateOperation } from "../campaign/operations";
+import { activeSoldiers, campaignObjectiveProgress, canBuildNewBase, canLaunchFinalAssault, chooseInterceptor, craftSpeedDegPerHour, DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR, deploymentSoldiers, DIFFICULTY_CONFIGS, highestRegionalPanic, MAX_EXTRA_BASES, NEW_BASE_COST, transportCraft } from "../campaign/storage";
 import {
   animateBeaconPulse,
   createEarthShaderMaterial,
@@ -77,6 +78,28 @@ import {
 } from "./globeVisuals";
 import { WORLD_CITY_POINTS } from "./worldMapData";
 
+/**
+ * Granular campaign-event discriminator surfaced to NAV (main.ts) so it can route
+ * each event to the base view as a facility beacon + toast. Mirrors the base
+ * layer's BaseAlertKind (string-literal unions are structurally assignable, so NAV
+ * maps this straight onto BaseAlert without a coupling import from baseView).
+ */
+export type GeoCampaignEventKind =
+  | "ufoDetected"
+  | "ufoShotDown"
+  | "ufoLanded"
+  | "interceptionReport"
+  | "fundingReport"
+  | "missionReport"
+  | "campaignWon"
+  | "campaignLost";
+
+/** A notable campaign event detected while the geoscape is mounted (see detectEvent). */
+export interface GeoCampaignEvent {
+  kind: GeoCampaignEventKind;
+  message: string;
+}
+
 interface GeoscapeOptions {
   campaign: CampaignState | null;
   /** difficulty is only supplied from the new-game screen; existing campaigns keep theirs. */
@@ -92,6 +115,25 @@ interface GeoscapeOptions {
   onBuildNewBase?: (location: BaseLocation) => void;
   /** Launch the endgame final assault on the revealed alien HQ. */
   onLaunchAssault?: () => void;
+  /**
+   * Return from the geoscape (mounted as the Command Center room) back to the base
+   * overview. Rendered as a "Back to Base" control only when a base exists (never on
+   * the new-game difficulty screen).
+   */
+  onBackToBase?: () => void;
+  /**
+   * Launch the staged crash-site / landed-UFO recovery operation from the live
+   * contact card. NAV replays the Skyranger deployment flight in place on the globe
+   * (no screen hop), then enters the battlescape on arrival.
+   */
+  onLaunchMission?: () => void;
+  /**
+   * Fires once per notable campaign event detected while time flows (UFO detected /
+   * shot down / landed, funding + interception + mission reports, campaign won/lost).
+   * NAV queues these and surfaces them as base-facility beacons + toasts when the
+   * player returns to base. The geoscape still shows its own transient toast.
+   */
+  onCampaignEvent?: (event: GeoCampaignEvent) => void;
 }
 
 export interface GeoscapeTimeAction {
@@ -256,6 +298,8 @@ type EventKind = "info" | "won" | "lost";
 interface EventInfo {
   kind: EventKind;
   text: string;
+  /** Granular discriminator NAV maps onto a base-facility beacon (see GeoCampaignEvent). */
+  alertKind: GeoCampaignEventKind;
 }
 
 /** Notable campaign fields tracked across renders so auto-pause only fires on real events. */
@@ -439,6 +483,39 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   color: var(--ui-text);
   font-size: var(--ui-text-base);
   line-height: var(--ui-leading);
+}
+/* Pre-launch briefing preview on a launchable contact: opposition strength, field
+   time, and reward preview so the player never commits to a mission blind. */
+#geoscape .geo-briefing {
+  margin-top: var(--ui-sp-2);
+  padding-top: var(--ui-sp-2);
+  border-top: 1px solid var(--ui-border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+#geoscape .geo-briefing-line {
+  color: var(--ui-text);
+  font-size: var(--ui-text-sm);
+}
+#geoscape .geo-briefing-detail {
+  color: var(--ui-amber);
+  font-size: var(--ui-text-sm);
+}
+#geoscape .geo-briefing-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+#geoscape .geo-briefing-chip {
+  padding: 2px 7px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-pill);
+  background: var(--ui-panel-raised);
+  color: var(--ui-muted);
+  font-size: var(--ui-text-xs);
+  white-space: nowrap;
 }
 /* 150ms slide + glow entrance when a contact first appears. reducedMotion is
    neutralized by the UI_BASE media query. */
@@ -1245,24 +1322,24 @@ function snapshotEvent(campaign: CampaignState | null): EventSnapshot {
 function detectEvent(prev: EventSnapshot, campaign: CampaignState | null): EventInfo | null {
   const next = snapshotEvent(campaign);
   if (prev.status !== next.status) {
-    if (next.status === "won") return { kind: "won", text: "Containment achieved" };
-    if (next.status === "lost") return { kind: "lost", text: "Containment failed" };
+    if (next.status === "won") return { kind: "won", text: "Containment achieved", alertKind: "campaignWon" };
+    if (next.status === "lost") return { kind: "lost", text: "Containment failed", alertKind: "campaignLost" };
   }
   if (prev.contactId === null && next.contactId !== null) {
-    return { kind: "info", text: `UFO detected — ${next.region ?? "unknown sector"}` };
+    return { kind: "info", text: `UFO detected — ${next.region ?? "unknown sector"}`, alertKind: "ufoDetected" };
   }
   if (prev.contactId !== null && next.contactId !== null && prev.contactStatus !== next.contactStatus) {
-    if (next.contactStatus === "crashed") return { kind: "info", text: "UFO shot down" };
-    if (next.contactStatus === "landed") return { kind: "info", text: "UFO landed — launch assault" };
+    if (next.contactStatus === "crashed") return { kind: "info", text: "UFO shot down", alertKind: "ufoShotDown" };
+    if (next.contactStatus === "landed") return { kind: "info", text: "UFO landed — launch assault", alertKind: "ufoLanded" };
   }
   if (prev.fundingReport !== next.fundingReport && next.fundingReport !== null) {
-    return { kind: "info", text: "Council funding report" };
+    return { kind: "info", text: "Council funding report", alertKind: "fundingReport" };
   }
   if (prev.interceptionReport !== next.interceptionReport && next.interceptionReport !== null) {
-    return { kind: "info", text: "Interception report filed" };
+    return { kind: "info", text: "Interception report filed", alertKind: "interceptionReport" };
   }
   if (prev.missionsCompleted !== next.missionsCompleted) {
-    return { kind: "info", text: "Mission report filed" };
+    return { kind: "info", text: "Mission report filed", alertKind: "missionReport" };
   }
   return null;
 }
@@ -2130,12 +2207,25 @@ export class GeoscapeView {
 
   /** Pause + toast when a notable event appears versus the previously rendered snapshot. */
   private notifyCampaignEvent(): void {
+    // No campaign in context (new-game / difficulty screen): reset the module-scoped
+    // snapshot so a freshly-created campaign is never diffed against a prior, now-dead
+    // campaign's state. Without this the constructor's first refresh diffs the old
+    // snapshot (missionsCompleted > 0) against a 0 baseline and fires a bogus "Mission
+    // report filed" event on game start — which NAV would then beacon into the new base.
+    if (!this.campaign) {
+      lastEventSnapshot = null;
+      return;
+    }
     const snapshot = snapshotEvent(this.campaign);
     if (lastEventSnapshot !== null) {
       const info = detectEvent(lastEventSnapshot, this.campaign);
       if (info) {
         this.setTimeSpeed(0);
         this.showToast(info);
+        // Surface the event to NAV so it can beacon the matching base facility +
+        // toast when the player is back at base (the geoscape's own toast fired
+        // above for the on-globe case).
+        this.opts.onCampaignEvent?.({ kind: info.alertKind, message: info.text });
       }
     }
     lastEventSnapshot = snapshot;
@@ -2354,6 +2444,17 @@ export class GeoscapeView {
     if (!c) {
       this.actionsSlot.append(this.confirmButton);
       return;
+    }
+    // The geoscape is the Command Center room: a "Back to Base" control returns to
+    // the base overview. Present only for an existing campaign (never on the
+    // new-game difficulty screen, handled by the !c early return above).
+    if (this.opts.onBackToBase) {
+      const back = el("button", "ui-btn geo-back-to-base");
+      back.type = "button";
+      back.textContent = "Back to Base";
+      back.title = "Return to the base overview";
+      back.addEventListener("click", () => this.opts.onBackToBase?.());
+      this.actionsSlot.append(back);
     }
     const speedGroup = el("div", "geo-speed");
     speedGroup.setAttribute("role", "group");
@@ -4039,7 +4140,87 @@ export class GeoscapeView {
     // (never conveyed by colour alone) and the raw speeds via uiFormat.
     const speedChip = this.speedMatchupChip(contact);
     if (speedChip) card.append(speedChip);
+    // Mission launch lives on this card now (moved off the base view): a downed-on-
+    // land crash site or a landed UFO is directly launchable. A lost-at-sea crash is
+    // unrecoverable, so it never offers the CTA (matches the campaign layer's gate).
+    // A won/lost campaign never launches (a lingering grounded contact must not offer
+    // an enabled CTA that silently no-ops downstream).
+    const c = this.campaign;
+    const active = c?.strategic.status === "active";
+    const launchable =
+      active &&
+      ((contact.status === "crashed" && !contact.overOcean) || contact.status === "landed");
+    // A Skyranger already inbound / on station owns the launch flow (the loiter
+    // "Deploy squad" button drives it). Re-showing "Launch Operation" here would let a
+    // second click restart playDeploymentFlight — teleporting the in-flight craft back
+    // to base and dropping the prior onDeployed closure — so suppress it while flying.
+    const flightInProgress = this.deploying || this.deployArrived || this.loitering;
+    if (launchable && this.opts.onLaunchMission && !flightInProgress) {
+      const squad = c ? deploymentSoldiers(c).length : 0;
+      const roster = c ? activeSoldiers(c).length : 0;
+      // Pre-launch briefing preview: codename, opposition strength, field-time
+      // estimate, mission-specific detail, and reward preview — so the player commits
+      // to the operation informed, not blind (this info lived on the deleted base card).
+      const briefing = this.contactBriefing();
+      if (briefing) card.append(briefing);
+      const launch = el("button", "primary ui-cta geo-launch-cta");
+      launch.type = "button";
+      if (squad === 0) {
+        // No deployable squad: mirror the old base launch button's explanatory
+        // disabled states instead of arming a CTA that would fly the Skyranger and
+        // then silently no-op in startTactical (e.g. whole squad wounded).
+        launch.disabled = true;
+        launch.textContent = roster === 0 ? "No operatives" : "Assign a squad";
+        launch.title =
+          roster === 0
+            ? "Recruit operatives at the base before launching an operation."
+            : "Assign operatives to the deployment at the base before launching.";
+      } else {
+        launch.textContent = "Launch Operation";
+        launch.title = "Deploy the Skyranger and enter the battlescape on arrival.";
+        launch.addEventListener("click", () => this.opts.onLaunchMission?.());
+      }
+      card.append(launch);
+    }
     return card;
+  }
+
+  /**
+   * Pre-launch briefing preview for a launchable contact. generateOperation is
+   * deterministic in the contact's mission seed, so this previews exactly the
+   * operation startTactical will run: codename, opposition strength, field-time
+   * estimate, terror-site civilian count, and the resource reward preview.
+   */
+  private contactBriefing(): HTMLElement | null {
+    const c = this.campaign;
+    if (!c) return null;
+    const op = generateOperation(c);
+    const wrap = el("div", "geo-briefing");
+    const eyebrow = el("div", "geo-briefing-eyebrow ui-eyebrow");
+    eyebrow.textContent = `Operation ${op.codename}`;
+    const line = el("div", "geo-briefing-line");
+    line.textContent = `${op.enemyCount} hostiles · ${formatHours(op.durationHours)} est. field time`;
+    wrap.append(eyebrow, line);
+    const civilians = op.missionContext?.civilianCount;
+    if (op.missionType === "terror" && civilians) {
+      const detail = el("div", "geo-briefing-detail");
+      detail.textContent = `${civilians} civilians in the zone — rescue them`;
+      wrap.append(detail);
+    }
+    const reward = op.reward;
+    const chips = el("div", "geo-briefing-chips");
+    for (const text of [
+      formatSignedCredits(reward.credits),
+      `+${reward.alloys}a`,
+      `+${reward.elerium}e`,
+      `+${reward.alienData} data`,
+    ]) {
+      const chip = el("span", "geo-briefing-chip");
+      chip.textContent = text;
+      chips.append(chip);
+    }
+    wrap.append(chips);
+    return wrap;
   }
 
   /**

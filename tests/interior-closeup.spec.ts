@@ -16,13 +16,10 @@ test("capture a facility interior (dive)", async ({ page }) => {
   await page.goto("/");
   await page.locator("#base-view").waitFor();
   await page.waitForTimeout(900);
-  // Open the Construction room (where facility rows live), then click the first facility row to dive.
-  const construction = page.getByRole("button", { name: /construction/i }).first();
-  if (await construction.count()) { await construction.click(); await page.waitForTimeout(400); }
-  // A facility row in the construction list; click the first to trigger selectFacility -> dive.
-  const rows = page.locator("#base-view .facility-row, #base-view [data-facility], #base-view button.room-card");
-  const n = await rows.count();
-  if (n > 0) { await rows.first().click(); await page.waitForTimeout(1300); }
+  // The overview has no DOM room list anymore — enter a facility interior via the
+  // deterministic test hook (mirrors an on-canvas facility click + camera dive).
+  await page.evaluate(() => window.__baseEnterRoom?.("lab"));
+  await page.waitForTimeout(1300);
   await page.locator("#base-view canvas").first().screenshot({ path: path.join(SHOTS, "base-interior.png") });
   await page.screenshot({ path: path.join(SHOTS, "base-interior-full.png") });
 });

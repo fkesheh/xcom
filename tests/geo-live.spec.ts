@@ -36,8 +36,12 @@ test("capture geoscape with UFO + planes + night", async ({ page }) => {
   await page.goto("/");
   await page.locator("#base-view").waitFor();
   await page.waitForTimeout(500);
-  // Go to geoscape (boot lands on base with a saved campaign). Force-click past any overlay.
-  await page.locator('button:has-text("Earth")').click({ force: true });
+  // Go to geoscape (boot lands on base with a saved campaign). The geoscape is now
+  // the Command Center room; the floating "Earth" button is gone, so enter the room
+  // via the deterministic __baseEnterRoom test hook.
+  await page.evaluate(() => {
+    (window as unknown as { __baseEnterRoom?: (kind: string) => void }).__baseEnterRoom?.("command");
+  });
   await page.locator("#geoscape").waitFor();
   // Let time flow for ~3s so planes patrol + night creeps.
   await page.waitForTimeout(3500);

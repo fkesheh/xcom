@@ -89,8 +89,8 @@ import type { ProjectileKind } from "./effects";
 // initial bundle and loads lazily on first mount. The Renderer and Hud types
 // annotate the mount locals declared outside a try-block in startTactical
 // (their values are still fetched via dynamic import()).
-import type { BaseView } from "./baseView";
-import type { GeoscapeView } from "./geoscape";
+import type { BaseAlert, BaseView } from "./baseView";
+import type { GeoCampaignEvent, GeoscapeView } from "./geoscape";
 import type { PlaneCombatView } from "./planeCombatView";
 import type { Renderer } from "./renderer";
 import type {
@@ -329,6 +329,16 @@ window.addEventListener("pointerdown", () => { void sfx.resume(); }, { once: tru
  */
 let currentCampaign: CampaignState | null = null;
 
+/**
+ * Campaign events detected while the geoscape (Command Center room) is mounted are
+ * queued here and flushed to the base view as facility beacons + toasts the moment
+ * the player returns to base (see showBase). The geoscape shows its own transient
+ * toast for the on-globe case; this queue is what carries an event fired on the
+ * globe back to the base's facility beacons. Deduped by nothing — every distinct
+ * detected event surfaces once.
+ */
+const pendingAlerts: BaseAlert[] = [];
+
 /** Human-readable species label for a captured alien's sim template id, used in
  *  the debrief + containment readouts (falls back to the raw id if unknown). */
 const CAPTIVE_SPECIES_LABELS: Record<string, string> = {
@@ -484,7 +494,44 @@ function buildGeoscapeCallbacks(campaign: CampaignState | null) {
       flushSave();
       clearCampaign();
       currentCampaign = null;
+      // Drop any alerts queued on the dead campaign's globe so they don't beacon /
+      // toast into the next campaign's first base mount.
+      pendingAlerts.length = 0;
       void showGeoscape();
+    },
+    onBackToBase: () => {
+      // The geoscape is mounted as the Command Center room; "Back to Base" reverses
+      // the dive to the base overview. showBase disposes this geoscape.
+      if (currentCampaign) void showBase(currentCampaign);
+    },
+    onLaunchMission: () => {
+      // Mission launch now lives on the geoscape live-contact card. We are already
+      // on the globe (inside the Command Center room), so replay the Skyranger
+      // deployment flight IN PLACE — no screen hop — then enter the battlescape on
+      // arrival via the unchanged startTactical path. Read the live in-memory state
+      // so deployment/weapons/operation match the current squad.
+      const current = currentCampaign ?? campaign;
+      if (!current || current.strategic.status !== "active") return;
+      const contactStatus = current.ufoContact?.status;
+      if (contactStatus !== "crashed" && contactStatus !== "landed") return;
+      // Guard the deployment here too (the geoscape CTA already hides itself for an
+      // empty squad): without a deployable operative the ~3s Skyranger flight would
+      // play out and then startTactical would silently no-op, leaving the globe paused
+      // with no mission and no feedback. Bail before the flight instead.
+      if (deploymentSoldiers(current).length === 0) return;
+      flushSave();
+      currentCampaign = current;
+      geoscape?.playDeploymentFlight(current, () => {
+        void startTactical(currentCampaign ?? current);
+      });
+    },
+    onCampaignEvent: (event: GeoCampaignEvent) => {
+      // Map the geoscape's granular event onto a base alert (structurally identical
+      // string-literal unions). If a base view is somehow already mounted (headless
+      // advance path), beacon it immediately; otherwise queue for the next showBase.
+      const alert: BaseAlert = { kind: event.kind, message: event.message };
+      if (baseView) baseView.pushAlert(alert);
+      else pendingAlerts.push(alert);
     },
   };
 }
@@ -588,33 +635,12 @@ async function showBase(campaign: CampaignState): Promise<void> {
   baseView = new BaseViewCtor({
     campaign,
     operation,
-    onLaunchMission: async () => {
-      // In-place updates keep the closed-over `campaign`/`operation` stale; read
-      // the live in-memory state so deployment, weapons, and the generated
-      // operation match the current squad before handing off to the tactical
-      // controller.
-      const current = currentCampaign ?? campaign;
-      if (current.strategic.status !== "active") return;
-      const contactStatus = current.ufoContact?.status;
-      // Without a staged mission site there is nowhere to fly to — preserve the
-      // prior direct handoff (startTactical no-ops without a valid contact).
-      if (contactStatus !== "crashed" && contactStatus !== "landed") {
-        void startTactical(current);
-        return;
-      }
-      // Stage the fleet's Skyranger transport deployment flight on the globe, then
-      // enter the battlescape on arrival. The geoscape pauses time for the flight;
-      // on arrival, onArrived routes into the existing startTactical launch path.
-      flushSave();
-      currentCampaign = current;
-      disposeTacticalIfExists();
-      baseView?.dispose();
-      baseView = null;
-      const view = await mountGeoscape(current);
-      if (!view) return; // mount failed — recoverable error overlay shown
-      view.playDeploymentFlight(current, () => {
-        void startTactical(currentCampaign ?? current);
-      });
+    onEnterCommandCenter: () => {
+      // The Command Center room IS the geoscape. Clicking the command facility (or
+      // the __baseEnterRoom test hook) mounts the globe in place of a DOM room;
+      // showGeoscape disposes this base view. Mission launch + intercept + objective
+      // progress all live on the geoscape now (contract D).
+      void showGeoscape();
     },
     onStartResearch: (id) => {
       const updated = startResearch(currentCampaign ?? campaign, id);
@@ -676,18 +702,24 @@ async function showBase(campaign: CampaignState): Promise<void> {
       debouncedSave(updated);
       baseView?.update(updated);
     },
-    onOpenGeoscape: () => {
-      void showGeoscape();
-    },
     onResetCampaign: () => {
       // Flush before clearing so a pending debounced save can't resurrect it.
       flushSave();
       clearCampaign();
       currentCampaign = null;
+      // Drop any alerts queued on the dead campaign's globe so they don't beacon /
+      // toast into the next campaign's first base mount.
+      pendingAlerts.length = 0;
       void showGeoscape();
     },
   });
   baseView.mount(appRoot);
+  // Surface any events that fired on the globe (queued while no base view was
+  // mounted) as facility beacons + toasts now that the base is up.
+  if (pendingAlerts.length > 0) {
+    for (const alert of pendingAlerts) baseView.pushAlert(alert);
+    pendingAlerts.length = 0;
+  }
   } catch (err) {
     // Dispose a half-constructed base view (constructor OK but mount threw) so
     // it doesn't leak, then surface a recoverable overlay. Without this catch a
@@ -1479,6 +1511,8 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
     // Flush before clearing so a pending debounced save can't resurrect it.
     flushSave();
     clearCampaign();
+    // Drop any alerts queued on the dead campaign's globe (see onResetCampaign).
+    pendingAlerts.length = 0;
     void showGeoscape();
   }
 

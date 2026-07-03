@@ -44,7 +44,6 @@ import {
   summarizeBaseFacilities,
 } from "../campaign/base";
 import {
-  activeSoldiers,
   allBases,
   availableItemCount,
   availableWeaponCount,
@@ -58,7 +57,6 @@ import {
   canRecruitSoldier,
   canStartResearch,
   CAPTIVE_RANK_ORDER,
-  campaignObjectiveProgress,
   campaignSoldierStatBonus,
   constructedFacilities,
   DEPLOYMENT_SIZE,
@@ -121,10 +119,29 @@ import {
   formatSpeed,
 } from "./uiFormat";
 
+/** Global-alert kinds the geoscape (NAV) can surface to a mounted base view.
+ *  BASE owns the kind→facility mapping ({@link ALERT_FACILITY}); NAV only passes
+ *  a kind + human-readable message and never names a FacilityKind. */
+export type BaseAlertKind =
+  | "ufoDetected"
+  | "ufoShotDown"
+  | "ufoLanded"
+  | "interceptionReport"
+  | "fundingReport"
+  | "missionReport"
+  | "campaignWon"
+  | "campaignLost";
+
+/** A strategic event routed to the base view as a toast + a pulsing facility
+ *  beacon. Delivered via {@link BaseView.pushAlert}. */
+export interface BaseAlert {
+  kind: BaseAlertKind;
+  message: string;
+}
+
 interface BaseViewOptions {
   campaign: CampaignState;
   operation: OperationPlan;
-  onLaunchMission: () => void;
   onStartResearch: (id: ResearchId) => void;
   onBuildFacility: (id: string) => void;
   onRecruitSoldier: () => void;
@@ -134,8 +151,21 @@ interface BaseViewOptions {
   onToggleDeployment: (soldierId: string, deployed: boolean) => void;
   onStartManufacturing: (id: ManufacturingProjectId) => void;
   onPurchaseWeapon?: (weaponId: CampaignWeaponId) => void;
-  onOpenGeoscape: () => void;
+  /** Clicking the Command Center facility opens the geoscape (NAV mounts it) —
+   *  the command room IS the geoscape, so BASE never renders a DOM room for it. */
+  onEnterCommandCenter: () => void;
   onResetCampaign: () => void;
+}
+
+/** Every FacilityKind must resolve so `window.__baseEnterRoom` and the test
+ *  hooks stay strongly typed. */
+declare global {
+  interface Window {
+    /** Deterministic Playwright room-entry hook — mirrors an on-canvas facility
+     *  click for the given kind (command opens the geoscape; others dive into
+     *  the facility interior + room). Added on mount, removed on dispose. */
+    __baseEnterRoom?: (kind: FacilityKind) => void;
+  }
 }
 
 const STYLE_ID = "blacksite-base-style";
@@ -1214,15 +1244,55 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   letter-spacing: .06em;
   text-transform: uppercase;
 }
-#base-view .base-footer {
-  position: absolute;
-  left: 12px;
-  bottom: 12px;
-  z-index: 4;
-  display: flex;
-  gap: 8px;
+/* Top-bar "New campaign" tool — a quiet danger-outline button beside the help
+   button (the overview sidebar that used to host it is gone). */
+#base-view .reset-btn {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 7px;
+  border: 1px solid rgba(255,176,46,.45);
+  color: var(--ui-amber);
+  background: rgba(28,18,6,.55);
+  font: 800 var(--ui-text-xs)/1 ui-monospace, monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  cursor: pointer;
 }
-#base-view .base-footer button { min-height: 38px; }
+#base-view .reset-btn:hover { border-color: rgba(255,176,46,.9); background: rgba(46,30,10,.8); }
+/* First-time hint: one unobtrusive line, bottom-center, fading out after the
+   first interaction (and whenever a room is open). */
+#base-view .base-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 20px;
+  z-index: 4;
+  transform: translateX(-50%);
+  padding: 7px 14px;
+  border: 1px solid var(--ui-border-console);
+  border-radius: 999px;
+  color: var(--ui-muted);
+  background: var(--ui-panel-glass);
+  box-shadow: var(--ui-shadow-sm);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  font: 700 var(--ui-text-xs)/1 ui-monospace, monospace;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity .5s ease;
+}
+#base-view .base-hint.faded { opacity: 0; }
+/* Medbay wounded-recovery readout, folded into the Barracks room. */
+#base-view .medbay-list { display: flex; flex-direction: column; gap: 4px; }
+#base-view .medbay-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+#base-view .medbay-name { color: var(--ui-text); font: 700 var(--ui-text-xs)/1.3 ui-monospace, monospace; }
+#base-view .medbay-eta { color: var(--ui-amber); font: 700 var(--ui-text-xs)/1.3 ui-monospace, monospace; }
 #base-view .base-tooltip {
   position: absolute;
   z-index: 7;
@@ -1317,7 +1387,6 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
     border-radius: 12px 12px 0 0;
   }
   #base-view .topbar-chips { gap: var(--ui-sp-1); }
-  #base-view .base-footer { bottom: auto; top: 56px; }
 }
 #base-view .craft-list {
   display: grid;
@@ -1467,55 +1536,6 @@ function formatCost(resources: {
   return parts.length > 0 ? parts.join(" ") : "No cost";
 }
 
-interface MissionTypeMeta {
-  label: string;
-  icon: string;
-  detail: string;
-  launchLabel: string;
-}
-
-/** Mission-type display metadata. The icon glyph + label carry meaning together so the
- *  colored chip is never the sole signal (color is secondary reinforcement). */
-function missionTypeMeta(operation: OperationPlan): MissionTypeMeta {
-  switch (operation.missionType) {
-    case "terror":
-      return {
-        label: "Terror mission",
-        icon: "▲",
-        detail:
-          operation.missionContext?.civilianCount !== undefined
-            ? `Rescue ${operation.missionContext.civilianCount} civilians`
-            : "Defend civilians from the alien assault",
-        launchLabel: "Deploy to terror site",
-      };
-    case "landedUfo":
-      return {
-        label: "Landed UFO",
-        icon: "◆",
-        detail: "Assault the intact vessel before it departs",
-        launchLabel: "Assault landed UFO",
-      };
-    case "baseDefense":
-      return {
-        label: "Base defense",
-        icon: "■",
-        detail:
-          operation.missionContext?.defenderFacility
-            ? `Hold the line at ${operation.missionContext.defenderFacility}`
-            : "Repel the assault on the blacksite",
-        launchLabel: "Defend the base",
-      };
-    case "crashSite":
-    default:
-      return {
-        label: "Crash site",
-        icon: "▼",
-        detail: "Recover the downed UFO power core",
-        launchLabel: "Recover UFO core",
-      };
-  }
-}
-
 function makeLabel(text: string, color: number): Sprite {
   const canvas = document.createElement("canvas");
   canvas.width = 512;
@@ -1604,7 +1624,10 @@ type RoomId =
   | "barracks"
   | "hangar"
   | "construction"
-  | "containment";
+  | "containment"
+  | "stores"
+  | "radar"
+  | "power";
 
 interface RoomDef {
   id: RoomId;
@@ -1656,21 +1679,30 @@ const ROOM_META: Record<RoomId, RoomDef> = {
     icon: "⛓",
     blurb: "Hold live alien captives for interrogation and HQ intel.",
   },
+  stores: {
+    id: "stores",
+    label: "Stores",
+    icon: "▤",
+    blurb: "Base inventory — resource stockpile and capacity.",
+  },
+  radar: {
+    id: "radar",
+    label: "Radar Tracking",
+    icon: "◎",
+    blurb: "Detection and UFO contact status.",
+  },
+  power: {
+    id: "power",
+    label: "Reactor",
+    icon: "✷",
+    blurb: "Power budget and reactor status.",
+  },
 };
 
-/** Rooms reachable from the overview hub's facility list. */
-const ROOM_NAV: readonly RoomId[] = [
-  "research",
-  "engineering",
-  "barracks",
-  "hangar",
-  "construction",
-  "containment",
-];
-
 /** Map a constructed facility's kind to the dedicated room that manages it.
- *  Facilities without their own screen (power, radar, stores, etc.) fall back
- *  to the overview hub. */
+ *  `command` never resolves here — it is intercepted by the click/hook path and
+ *  opens the geoscape via {@link BaseViewOptions.onEnterCommandCenter}. `access`
+ *  (the lift) has no room and falls back to the bare 3D overview. */
 function roomForFacilityKind(kind: FacilityKind): RoomId {
   switch (kind) {
     case "lab":
@@ -1678,21 +1710,41 @@ function roomForFacilityKind(kind: FacilityKind): RoomId {
     case "workshop":
       return "engineering";
     case "living":
+    case "medbay":
+      // Medbay has no standalone screen — the wounded-recovery readout is folded
+      // into the Barracks room.
       return "barracks";
     case "hangar":
       return "hangar";
     case "containment":
       return "containment";
-    case "command":
     case "stores":
-    case "medbay":
-    case "power":
+      return "stores";
     case "radar":
+      return "radar";
+    case "power":
+      return "power";
+    case "command":
+      // Command is the geoscape, not a DOM room; callers must intercept it.
+      throw new Error("command has no DOM room — enter via onEnterCommandCenter");
     case "access":
     default:
       return "overview";
   }
 }
+
+/** Which facility kind's 3D mesh pulses as the beacon for each global alert.
+ *  BASE owns this mapping so NAV only ever passes a {@link BaseAlertKind}. */
+const ALERT_FACILITY: Record<BaseAlertKind, FacilityKind> = {
+  ufoDetected: "radar",
+  ufoShotDown: "hangar",
+  interceptionReport: "hangar",
+  ufoLanded: "command",
+  fundingReport: "command",
+  missionReport: "command",
+  campaignWon: "command",
+  campaignLost: "command",
+};
 
 /** Resolve a constructed facility's art-directed role (silhouette + accent
  *  glow) from its kind. Overrides the frozen `roleForKind` helper, whose
@@ -1829,13 +1881,89 @@ export class BaseView {
   private tooltipEl: HTMLDivElement | null = null;
   private topbarChips: HTMLElement | null = null;
   private clockEl: HTMLElement | null = null;
-  private primaryHost: HTMLElement | null = null;
-  private objectiveHost: HTMLElement | null = null;
+  /** The room panel — the ONLY sidebar content. Hidden entirely on the bare 3D
+   *  overview (activeRoom === "overview"); shown when a facility room is open. */
+  private sidebar: HTMLElement | null = null;
   private roomHost: HTMLElement | null = null;
+  /** First-time "click a facility" hint, faded out after the first interaction. */
+  private hintEl: HTMLElement | null = null;
+  private hintDismissed = false;
+  /** Facility id whose 3D pad currently pulses as an alert beacon (set by
+   *  pushAlert, cleared on the next user canvas interaction). */
+  private alertBeaconFacilityId: string | null = null;
   private helpOverlay: HTMLDivElement | null = null;
+  /** The facility/expansion id the keyboard cursor is currently on (overview only).
+   *  Expansion pads (→ Construction room) are prefixed "exp:". Null when the canvas
+   *  is unfocused. Reuses the hover highlight for visual feedback. */
+  private keyboardFocusId: string | null = null;
   private readonly onKeydown = (e: KeyboardEvent): void => {
     if (e.key === "Escape" && this.helpOverlay?.classList.contains("show")) {
       this.toggleHelp(false);
+    }
+  };
+
+  /** Ordered keyboard-focus targets on the overview: every constructed facility room
+   *  (including the command center) then every expansion pad (each opens the
+   *  Construction room). Mirrors exactly what a canvas raycast click can reach, so the
+   *  keyboard is a first-class equal to the mouse — no room is mouse-only. */
+  private focusTargets(): string[] {
+    return [
+      ...this.facilityMeshes.map((entry) => entry.facilityId),
+      ...this.expansionHovers.map((pad) => `exp:${pad.id}`),
+    ];
+  }
+
+  private setKeyboardFocus(id: string | null): void {
+    this.keyboardFocusId = id;
+    // A keyboard interaction acknowledges any pending alert beacon, same as a click.
+    this.alertBeaconFacilityId = null;
+    this.hintDismissed = true;
+    if (id !== null && id.startsWith("exp:")) {
+      const expId = id.slice(4);
+      this.hoveredFacilityId = null;
+      this.hoveredExpansionId = expId;
+      for (const pad of this.expansionHovers) pad.label.visible = pad.id === expId;
+    } else {
+      this.hoveredFacilityId = id;
+      this.hoveredExpansionId = null;
+      for (const pad of this.expansionHovers) pad.label.visible = false;
+    }
+    this.applyFacilityHighlight();
+  }
+
+  private readonly onCanvasBlur = (): void => {
+    if (this.keyboardFocusId === null) return;
+    this.setKeyboardFocus(null);
+  };
+
+  /** Arrow keys cycle the focused facility; Enter/Space opens it. Tab is left alone
+   *  so focus can still leave the canvas for the top-bar controls (no focus trap). */
+  private readonly onCanvasKeydown = (e: KeyboardEvent): void => {
+    if (this.disposed || this.interiorRoot) return;
+    const targets = this.focusTargets();
+    if (targets.length === 0) return;
+    const next = e.key === "ArrowRight" || e.key === "ArrowDown";
+    const prev = e.key === "ArrowLeft" || e.key === "ArrowUp";
+    if (next || prev) {
+      e.preventDefault();
+      const cur = this.keyboardFocusId ? targets.indexOf(this.keyboardFocusId) : -1;
+      const step = next ? 1 : -1;
+      const idx = cur < 0 ? (next ? 0 : targets.length - 1) : (cur + step + targets.length) % targets.length;
+      this.setKeyboardFocus(targets[idx]!);
+      return;
+    }
+    if (e.key === "Enter" || e.key === " ") {
+      const id = this.keyboardFocusId;
+      if (!id) return;
+      e.preventDefault();
+      if (id.startsWith("exp:")) {
+        // Expansion pad → Construction room (mirrors the pad-click path).
+        this.selectedFacilityId = null;
+        this.activeRoom = "construction";
+        this.refreshHud();
+        return;
+      }
+      this.activateFacility(id);
     }
   };
 
@@ -1866,10 +1994,21 @@ export class BaseView {
     container.replaceChildren(this.root);
     const dom = this.renderer.domElement;
     this.canvasWrap.appendChild(dom);
+    // Make the 3D base keyboard-operable: focusable canvas + arrow-key facility
+    // navigation. Without this, rooms would be reachable by mouse raycast only.
+    dom.tabIndex = 0;
+    dom.setAttribute("role", "application");
+    dom.setAttribute(
+      "aria-label",
+      "Base facilities. Use the arrow keys to move between facility rooms and press Enter to open one.",
+    );
     window.addEventListener("resize", this.resize);
     dom.addEventListener("pointermove", this.onPointerMove);
     dom.addEventListener("click", this.onCanvasClick);
+    dom.addEventListener("keydown", this.onCanvasKeydown);
+    dom.addEventListener("blur", this.onCanvasBlur);
     window.addEventListener("keydown", this.onKeydown);
+    window.__baseEnterRoom = (kind: FacilityKind): void => this.enterRoomForKind(kind);
     this.resize();
     this.frame();
   }
@@ -1882,8 +2021,11 @@ export class BaseView {
     const dom = this.renderer.domElement;
     dom.removeEventListener("pointermove", this.onPointerMove);
     dom.removeEventListener("click", this.onCanvasClick);
+    dom.removeEventListener("keydown", this.onCanvasKeydown);
+    dom.removeEventListener("blur", this.onCanvasBlur);
     window.removeEventListener("keydown", this.onKeydown);
     window.removeEventListener("resize", this.resize);
+    if (window.__baseEnterRoom) delete window.__baseEnterRoom;
     // CrewSystem owns its pooled meshes/materials; tear each down before the
     // scene walk so its internal dispose() is the single owner of those resources.
     for (const crew of this.crewSystems) crew.dispose();
@@ -1903,6 +2045,51 @@ export class BaseView {
     if (this.disposed) return;
     this.opts.campaign = campaign;
     this.opts.operation = generateOperation(campaign);
+    this.refreshHud();
+  }
+
+  /** Surface a strategic event (from the geoscape, via NAV) while the base view
+   *  is mounted: a transient toast + a pulsing beacon on the mapped facility's 3D
+   *  pad. The beacon persists until the next canvas interaction. BASE owns the
+   *  kind→facility mapping ({@link ALERT_FACILITY}); NAV only passes kind+message. */
+  pushAlert(alert: BaseAlert): void {
+    if (this.disposed) return;
+    // Danger/loss kinds read as warnings; everything else is informational.
+    const warning =
+      alert.kind === "ufoDetected" ||
+      alert.kind === "ufoLanded" ||
+      alert.kind === "campaignLost";
+    this.showNotice(alert.message, warning ? "warning" : "info");
+    const kind = ALERT_FACILITY[alert.kind];
+    const target = this.facilityMeshes.find(
+      (entry) => findBaseFacility(entry.facilityId)?.kind === kind,
+    );
+    this.alertBeaconFacilityId = target?.facilityId ?? null;
+  }
+
+  /** Enter the room for a facility KIND (deterministic test hook + shared by the
+   *  canvas click). Command opens the geoscape; every other kind dives into the
+   *  first constructed facility of that kind. Unbuilt kinds are a no-op. */
+  private enterRoomForKind(kind: FacilityKind): void {
+    if (this.disposed) return;
+    if (kind === "command") {
+      this.alertBeaconFacilityId = null;
+      this.opts.onEnterCommandCenter();
+      return;
+    }
+    const facility = constructedFacilities(this.opts.campaign).find((f) => f.kind === kind);
+    if (!facility) return;
+    this.enterFacility(facility.id, kind);
+  }
+
+  /** Shared facility-entry path (canvas click, installed row, test hook): select
+   *  the pad, open its room, dive the camera into its interior, and re-render. */
+  private enterFacility(facilityId: string, kind: FacilityKind): void {
+    this.alertBeaconFacilityId = null;
+    this.selectedFacilityId = facilityId;
+    this.activeRoom = roomForFacilityKind(kind);
+    this.enterFacilityInterior(roleForFacilityKind(kind));
+    this.applyFacilityHighlight();
     this.refreshHud();
   }
 
@@ -2064,7 +2251,19 @@ export class BaseView {
     this.buildTerrainSlab();
     this.buildCutawayShell();
     this.buildCorridorGrid();
-    for (const facility of availableBaseFacilities(this.opts.campaign)) this.buildExpansionPad(facility);
+    const padFacilities = availableBaseFacilities(this.opts.campaign);
+    // availableBaseFacilities excludes the facility currently under construction, and
+    // the construction bay has no facility mesh yet — so when the LAST buildable
+    // facility is being built there would be ZERO expansion pads, and the pads are the
+    // only door into the Construction room (progress + build queue). Add a pad for the
+    // in-progress facility so that room is never stranded on a base view remount.
+    const buildingId = this.opts.campaign.activeConstruction?.facilityId;
+    const buildingFacility =
+      buildingId !== undefined && !padFacilities.some((f) => f.id === buildingId)
+        ? findBaseFacility(buildingId)
+        : undefined;
+    for (const facility of padFacilities) this.buildExpansionPad(facility);
+    if (buildingFacility) this.buildExpansionPad(buildingFacility);
     for (const facility of constructedFacilities(this.opts.campaign)) this.buildFacility(facility);
     // One-shot de-overlap of the facility name chips once every bay is placed.
     this.layoutFacilityLabels();
@@ -2849,32 +3048,26 @@ export class BaseView {
     help.title = "Base controls — click for help";
     help.setAttribute("aria-label", "Open base help");
     help.addEventListener("click", () => this.toggleHelp(true));
-    tools.appendChild(help);
+    // The overview sidebar (which used to host the reset control) is gone, so the
+    // "New campaign" action lives in the persistent top-bar tools instead.
+    const reset = el("button", "reset-btn");
+    reset.type = "button";
+    reset.textContent = "New campaign";
+    reset.setAttribute("aria-label", "Abandon this campaign and start a new one");
+    reset.addEventListener("click", () => this.opts.onResetCampaign());
+    tools.append(help, reset);
     const topRight = el("div", "topbar-right");
     topRight.append(chips, tools);
     topbar.append(brand, topRight);
 
-    // Console-glass panel: fixed header (operation card) + scrollable body
-    // (objective strip + facility room). The panel itself never scrolls as a whole,
-    // so no section can clip or overlap another (brief item 9).
+    // Console-glass panel: the room panel is the ONLY sidebar content. It renders
+    // per-facility content when a room is open and is hidden entirely on the bare
+    // 3D overview. Nothing global (objective/contact cards) lives here anymore.
     const sidebar = el("aside", "base-sidebar ui-panel");
-    const primaryHost = el("div", "sidebar-header");
     const body = el("div", "sidebar-body ui-panel-body");
-    const objectiveHost = el("div");
     const roomHost = el("div", "facility-room");
-    body.append(objectiveHost, roomHost);
-    sidebar.append(primaryHost, body);
-
-    const footer = el("div", "base-footer");
-    const earth = el("button", "ui-btn");
-    earth.textContent = "Earth";
-    earth.setAttribute("aria-label", "Return to Earth Command (geoscape)");
-    earth.addEventListener("click", () => this.opts.onOpenGeoscape());
-    const reset = el("button", "ui-btn ui-btn--danger");
-    reset.textContent = "New campaign";
-    reset.setAttribute("aria-label", "Abandon this campaign and start a new one");
-    reset.addEventListener("click", () => this.opts.onResetCampaign());
-    footer.append(earth, reset);
+    body.append(roomHost);
+    sidebar.append(body);
 
     const tooltip = el("div", "base-tooltip");
     tooltip.setAttribute("role", "tooltip");
@@ -2884,16 +3077,21 @@ export class BaseView {
     notice.setAttribute("role", "status");
     notice.setAttribute("aria-live", "polite");
 
+    // First-time hint: one small unobtrusive line at bottom-center that fades out
+    // after the first facility interaction.
+    const hint = el("div", "base-hint");
+    hint.textContent = "Click a facility to enter its room";
+
     this.topbarChips = chips;
     this.clockEl = clock;
-    this.primaryHost = primaryHost;
-    this.objectiveHost = objectiveHost;
+    this.sidebar = sidebar;
     this.roomHost = roomHost;
+    this.hintEl = hint;
     this.tooltipEl = tooltip;
     this.noticeEl = notice;
     this.helpOverlay = this.buildHelpOverlay();
 
-    this.root.append(topbar, sidebar, footer, tooltip, notice, this.helpOverlay);
+    this.root.append(topbar, sidebar, hint, tooltip, notice, this.helpOverlay);
     this.refreshHud();
   }
 
@@ -2920,7 +3118,7 @@ export class BaseView {
       ["Armory / Market", "buy weapons and gear from Council suppliers."],
       ["Barracks", "assign weapons & items, then deploy soldiers to the squad."],
       ["Lab / Workshop", "research alien tech and manufacture captured equipment."],
-      ["Earth (footer)", "open the geoscape to scan, intercept, and launch assaults."],
+      ["Command Center", "click it to open the geoscape — scan, intercept, and launch assaults."],
       ["Resources", "$ buys gear & recruits; alloys, elerium, and alien data fuel research and manufacturing."],
     ];
     for (const [head, copy] of tips) {
@@ -2949,22 +3147,17 @@ export class BaseView {
    *  DOM children only — the 3D scene, renderer, and rAF loop are never touched,
    *  so this is safe to call repeatedly (including from update()). */
   private refreshHud(): void {
-    if (!this.primaryHost || !this.roomHost || !this.objectiveHost) return;
+    if (!this.roomHost || !this.sidebar) return;
     const campaign = this.opts.campaign;
-    const operation = this.opts.operation;
-    const contact = campaign.ufoContact;
-    // Ground assaults (terror, landed UFO, base defense) spawn already on the
-    // ground ("landed"); crash-site contacts stay "tracked" until shot down.
-    // Only "crashed"/"landed" are terminal, launchable states — match controller.
-    const launchable = contact?.status === "crashed" || contact?.status === "landed";
-    const launchContact = launchable ? contact : undefined;
-
     this.fillTopbar(campaign);
-    this.primaryHost.replaceChildren(
-      this.renderPrimaryCard(campaign, operation, contact, launchContact),
-    );
-    this.objectiveHost.replaceChildren(this.renderObjectiveStrip(campaign));
-    this.roomHost.replaceChildren(this.renderRoom(campaign));
+    // The room panel is the ONLY sidebar content: shown per-facility when a room
+    // is open, and removed entirely on the bare 3D overview.
+    const overview = this.activeRoom === "overview";
+    this.sidebar.style.display = overview ? "none" : "";
+    this.roomHost.replaceChildren(overview ? el("div") : this.renderRoom(campaign));
+    if (this.hintEl) {
+      this.hintEl.classList.toggle("faded", this.hintDismissed || !overview);
+    }
     this.applyFacilityHighlight();
   }
 
@@ -3011,142 +3204,15 @@ export class BaseView {
     return node;
   }
 
-  /** Primary action card — the dominant, always-present CTA. Three variants:
-   *  launchable ground assault (big LAUNCH button), airborne UFO (intercept
-   *  guidance + Geoscape CTA), or no contact (scan guidance + Geoscape). */
-  private renderPrimaryCard(
-    campaign: CampaignState,
-    operation: OperationPlan,
-    contact: UfoContact | undefined,
-    launchContact: UfoContact | undefined,
-  ): HTMLElement {
-    const card = el("section", "operation-card");
-    const meta = missionTypeMeta(operation);
-
-    if (launchContact) {
-      const eyebrow = el("div", "op-eyebrow ui-eyebrow");
-      eyebrow.textContent = "Operation ready";
-      const title = el("div", "op-title ui-section-title");
-      title.textContent = `Operation ${operation.codename}`;
-      const chipEl = el("div", `mission-chip ${operation.missionType ?? "crashSite"}`);
-      const chipIcon = el("span", "mission-icon");
-      chipIcon.textContent = meta.icon;
-      chipEl.append(chipIcon, document.createTextNode(meta.label));
-      const region = el("div", "op-region");
-      region.textContent =
-        `${operation.region} · ${operation.enemyCount} contacts · ${formatHours(operation.durationHours)} field time`;
-      const chips = el("div", "op-chips");
-      const reward = operation.reward;
-      chips.append(
-        span(formatSignedCredits(reward.credits)),
-        span(`+${reward.alloys}a`),
-        span(`+${reward.elerium}e`),
-        span(`+${reward.alienData}d`),
-      );
-      const deployment = deploymentSoldiers(campaign);
-      const activeRoster = activeSoldiers(campaign);
-      const canLaunch = campaign.strategic.status === "active" && deployment.length > 0;
-      const launch = el("button", "primary ui-cta");
-      launch.textContent = canLaunch
-        ? `${meta.launchLabel} (op ${operation.missionNumber})`
-        : campaign.strategic.status !== "active"
-          ? "Campaign complete"
-          : activeRoster.length === 0
-            ? "No operatives"
-            : "Select squad";
-      launch.disabled = !canLaunch;
-      launch.addEventListener("click", () => this.opts.onLaunchMission());
-      card.append(eyebrow, title, chipEl, region, chips, launch);
-      return card;
-    }
-
-    if (contact) {
-      card.appendChild(this.renderAirborneBanner(contact));
-      return card;
-    }
-
-    const eyebrow = el("div", "op-eyebrow ui-eyebrow");
-    eyebrow.textContent = "No active contact";
-    const title = el("div", "op-title ui-section-title");
-    title.textContent = "Scan for UFO contacts";
-    const copy = el("div", "op-region");
-    copy.textContent = "Advance time on the Geoscape to detect a UFO track.";
-    const openGeo = el("button", "ui-cta");
-    openGeo.textContent = "Open Geoscape";
-    openGeo.addEventListener("click", () => this.opts.onOpenGeoscape());
-    card.append(eyebrow, title, copy, openGeo);
-    return card;
-  }
-
-  /** Airborne intercept banner rendered inside the primary card. Carries an
-   *  enabled Open-Geoscape CTA plus a disabled "Intercept first" indicator so the
-   *  player is never offered a launchable crash-site mission while the UFO is
-   *  still airborne. Variant class tracks engaging/escaped. */
-  private renderAirborneBanner(contact: UfoContact): HTMLElement {
-    const banner = el("div", `airborne-banner ${contact.status}`);
-    const icon = el("span", "banner-icon");
-    const body = el("div", "banner-body");
-    const title = el("strong");
-    const copy = el("p");
-    if (contact.status === "engaging") {
-      icon.textContent = "✦";
-      title.textContent = "Interceptor engaging";
-      copy.textContent = `${contact.id} over ${contact.region}. Direct the dogfight on the Geoscape to bring it down.`;
-    } else if (contact.status === "escaped") {
-      icon.textContent = "↗";
-      title.textContent = "UFO escaped";
-      copy.textContent = `${contact.id} slipped the intercept. Resume the scan on the Geoscape.`;
-    } else {
-      icon.textContent = "✈";
-      title.textContent = "Airborne UFO detected";
-      copy.textContent = `${contact.id} is tracked over ${contact.region}. Intercept to bring it down.`;
-    }
-    const actions = el("div", "banner-actions");
-    const openGeo = el("button", "ui-btn");
-    openGeo.textContent = "Open Geoscape";
-    openGeo.addEventListener("click", () => this.opts.onOpenGeoscape());
-    const intercept = el("button", "ui-btn");
-    intercept.textContent = "Intercept first";
-    intercept.disabled = true;
-    actions.append(openGeo, intercept);
-    body.append(title, copy, actions);
-    banner.append(icon, body);
-    return banner;
-  }
-
-  /** Slim campaign-objective progress bar + a one-line last-mission summary. */
-  private renderObjectiveStrip(campaign: CampaignState): HTMLElement {
-    const objective = campaignObjectiveProgress(campaign);
-    const strip = el("div", "objective-strip");
-    const head = el("div", "obj-head");
-    const headLabel = el("span");
-    headLabel.textContent = objective.title;
-    const headVal = el("b");
-    headVal.textContent = `${objective.completed}/${objective.required} cores`;
-    head.append(headLabel, headVal);
-    const bar = el("div", objective.status === "lost" ? "progress danger" : "progress");
-    const fill = el("i");
-    fill.style.width = `${objective.percent}%`;
-    bar.appendChild(fill);
-    const summary = el("p", "obj-summary");
-    const last = campaign.lastMission;
-    summary.textContent = last
-      ? `Last op ${last.missionNumber} ${last.result === "success" ? "secured" : "failed"} — ${last.region}: ${last.summary}`
-      : "No field report yet. Launch a recovery operation to begin.";
-    strip.append(head, bar, summary);
-    return strip;
-  }
-
   /** Render the active facility room: a header (icon + facility name + back to
    *  base) followed by the room's focused body. The selected room persists across
    *  update() refreshes because activeRoom is a class field. */
   private renderRoom(campaign: CampaignState): HTMLElement {
     const meta = ROOM_META[this.activeRoom];
     const room = el("div", "facility-room");
-    // The back affordance shows for any non-overview room AND whenever a facility
-    // interior is mounted — overview-mapped facilities (power/radar/stores/...)
-    // still need a way back out of their dive.
-    room.append(this.renderRoomHeader(meta, this.activeRoom !== "overview" || this.interiorRoot !== null));
+    // Every room keeps a consistent header (facility name + Back to Base). renderRoom
+    // is only ever called for a non-overview room, so the back affordance always shows.
+    room.append(this.renderRoomHeader(meta, true));
     const body = el("div", "room-body");
     switch (this.activeRoom) {
       case "research":
@@ -3167,9 +3233,18 @@ export class BaseView {
       case "containment":
         body.append(this.renderContainmentRoom(campaign));
         break;
+      case "stores":
+        body.append(this.renderStoresRoom(campaign));
+        break;
+      case "radar":
+        body.append(this.renderRadarRoom(campaign));
+        break;
+      case "power":
+        body.append(this.renderPowerRoom(campaign));
+        break;
       case "overview":
       default:
-        body.append(this.renderOverview(campaign));
+        // Overview has no panel — refreshHud never renders a room for it.
         break;
     }
     room.append(body);
@@ -3197,41 +3272,101 @@ export class BaseView {
     return header;
   }
 
-  /** Overview hub (default room): base capacity at a glance, a hint to click a 3D
-   *  facility, and a grid of facility rooms that each open their dedicated screen.
-   *  This is the non-3D equivalent of clicking a facility in the cutaway. */
-  private renderOverview(campaign: CampaignState): HTMLElement {
-    const wrap = el("div", "hub-overview");
+  /** Stores room: the base inventory/resource stockpile (credits, alloys,
+   *  elerium, alien data) plus the raw capacity readout (power/staff/rooms/
+   *  hangar). Read-only — resources are earned on operations, not traded here. */
+  private renderStoresRoom(campaign: CampaignState): HTMLElement {
+    const wrap = el("div");
     const summary = summarizeBaseFacilities(constructedFacilities(campaign));
-    const stats = el("div", "op-chips");
-    stats.append(
+    const invLabel = el("div", "section-label");
+    invLabel.textContent = "Stockpile";
+    const res = campaign.resources;
+    const inv = el("div", "op-chips");
+    inv.append(
+      span(`${formatCredits(res.credits)} credits`),
+      span(`${res.alloys} alloys`),
+      span(`${res.elerium} elerium`),
+      span(`${res.alienData} alien data`),
+    );
+    const capLabel = el("div", "section-label");
+    capLabel.textContent = "Capacity";
+    const cap = el("div", "op-chips");
+    cap.append(
       span(`Power ${summary.powerUsed}/${summary.powerCapacity}`),
       span(`Staff ${summary.staffAssigned}`),
       span(`Rooms ${summary.facilities}`),
       span(`Hangar ${summary.hangarSlots} slots`),
     );
-    const hint = el("div", "empty-state");
-    hint.textContent = "Click a facility in the base, or pick a room below.";
+    const hint = el("p", "card-copy");
+    hint.textContent =
+      "Alloys, elerium, and alien data are recovered on operations and fuel research and manufacturing. Credits buy gear and recruits.";
+    wrap.append(invLabel, inv, capLabel, cap, hint);
+    return wrap;
+  }
+
+  /** Radar room: read-only detection/tracking status — the current UFO contact
+   *  summary (reused from the airborne banner logic) and a pointer to the Command
+   *  Center for the actual intercept/launch. No launch button lives here. */
+  private renderRadarRoom(campaign: CampaignState): HTMLElement {
+    const wrap = el("div");
     const label = el("div", "section-label");
-    label.textContent = "Facilities";
-    const nav = el("div", "room-nav");
-    for (const id of ROOM_NAV) {
-      const meta = ROOM_META[id];
-      const card = el("button", "room-card");
-      const icon = el("span", "room-icon");
-      icon.textContent = meta.icon;
-      const name = el("span", "room-name");
-      name.textContent = meta.label;
-      const blurb = el("span", "room-blurb");
-      blurb.textContent = meta.blurb;
-      card.append(icon, name, blurb);
-      card.addEventListener("click", () => {
-        this.activeRoom = id;
-        this.refreshHud();
-      });
-      nav.appendChild(card);
+    label.textContent = "Detection";
+    wrap.appendChild(label);
+    const contact = campaign.ufoContact;
+    const card = el("section", "tab-card");
+    const head = el("div", "panel-head");
+    const title = el("span", "panel-title");
+    const copy = el("p", "card-copy");
+    if (!contact) {
+      title.textContent = "No contact";
+      copy.textContent =
+        "Radar array online and sweeping. Advance time in the Command Center to pick up a UFO track.";
+    } else if (contact.status === "engaging") {
+      title.textContent = `Tracking ${contact.id} — engaging`;
+      copy.textContent = `Interceptor engaging ${contact.id} over ${contact.region}. Direct the dogfight from the Command Center.`;
+    } else if (contact.status === "escaped") {
+      title.textContent = `${contact.id} — lost`;
+      copy.textContent = `${contact.id} slipped the intercept over ${contact.region}. Resume the sweep from the Command Center.`;
+    } else if (contact.status === "crashed" || contact.status === "landed") {
+      title.textContent = `${contact.id} — grounded`;
+      copy.textContent = `${contact.id} is down over ${contact.region}. Open the Command Center to launch the recovery operation.`;
+    } else {
+      title.textContent = `Tracking ${contact.id}`;
+      copy.textContent = `${contact.id} is airborne over ${contact.region}. Open the Command Center to intercept.`;
     }
-    wrap.append(stats, hint, label, nav);
+    head.append(title);
+    card.append(head, copy);
+    const pointer = el("p", "card-copy");
+    pointer.textContent = "Intercepts and launches are run from the Command Center (Earth view).";
+    wrap.append(card, pointer);
+    return wrap;
+  }
+
+  /** Reactor room: the base power budget (used vs. capacity) and a plain-language
+   *  reactor status derived from the facility summary. */
+  private renderPowerRoom(campaign: CampaignState): HTMLElement {
+    const wrap = el("div");
+    const summary = summarizeBaseFacilities(constructedFacilities(campaign));
+    const label = el("div", "section-label");
+    label.textContent = "Power budget";
+    const chips = el("div", "op-chips");
+    const margin = summary.powerCapacity - summary.powerUsed;
+    chips.append(
+      span(`Load ${summary.powerUsed}/${summary.powerCapacity}`),
+      span(margin >= 0 ? `+${margin} spare` : `${margin} over`),
+    );
+    const bar = el("div", margin < 0 ? "progress danger" : "progress");
+    const fill = el("i");
+    const pct = summary.powerCapacity > 0
+      ? Math.min(100, Math.round((summary.powerUsed / summary.powerCapacity) * 100))
+      : 0;
+    fill.style.width = `${pct}%`;
+    bar.appendChild(fill);
+    const copy = el("p", "card-copy");
+    copy.textContent = margin >= 0
+      ? `Reactor stable — ${margin} power units in reserve for new facilities.`
+      : `Reactor over budget by ${-margin} units. Build another reactor or shut down a facility.`;
+    wrap.append(label, chips, bar, copy);
     return wrap;
   }
 
@@ -3355,6 +3490,27 @@ export class BaseView {
       table.appendChild(this.renderSoldierRow(campaign, soldier, deployedIds));
     }
     wrap.append(head, table);
+    // Medbay has no standalone room — its wounded-recovery readout folds in here.
+    const wounded = campaign.soldiers.filter((soldier) => soldier.status === "wounded");
+    if (wounded.length > 0) {
+      const medbay = el("section", "tab-card");
+      const mHead = el("div", "panel-head");
+      const mTitle = el("span", "panel-title");
+      mTitle.textContent = `Medbay — ${wounded.length} recovering`;
+      mHead.append(mTitle);
+      const list = el("div", "medbay-list");
+      for (const soldier of wounded) {
+        const remaining = Math.max(
+          0,
+          (soldier.woundedUntilHour ?? campaign.clock.elapsedHours) - campaign.clock.elapsedHours,
+        );
+        const row = el("div", "medbay-row");
+        row.append(span(soldier.name, "medbay-name"), span(formatHours(remaining), "medbay-eta"));
+        list.appendChild(row);
+      }
+      medbay.append(mHead, list);
+      wrap.appendChild(medbay);
+    }
     const fallen = campaign.soldiers.filter((soldier) => soldier.status === "kia");
     if (fallen.length > 0) wrap.appendChild(this.renderMemorial(campaign, fallen));
     return wrap;
@@ -3587,9 +3743,11 @@ export class BaseView {
     return chipEl;
   }
 
-  /** Construction room: base power/staff/room capacity chips, clickable
-   *  installed-facility rows (each opens that facility's own room and highlights
-   *  the 3D cutaway), then active construction + buildable facilities. */
+  /** Construction room: base power/staff/room capacity chips, then active
+   *  construction + buildable/expansion facilities. Reached by clicking an
+   *  unexcavated expansion pad in the 3D base. The old "Installed" facility-row
+   *  nav list was overview's DOM room-switcher and is gone with the sidebar —
+   *  facilities are entered by clicking their 3D pad. */
   private renderConstructionRoom(campaign: CampaignState): HTMLElement {
     const wrap = el("div");
     const summary = summarizeBaseFacilities(constructedFacilities(campaign));
@@ -3602,50 +3760,8 @@ export class BaseView {
       span(`Rooms ${summary.facilities}`),
     );
 
-    const label = el("div", "section-label");
-    label.textContent = "Installed";
-    const installed = el("div");
-    for (const facility of constructedFacilities(campaign)) {
-      const row = el(
-        "div",
-        `facility-row${facility.id === this.selectedFacilityId ? " selected" : ""}`,
-      );
-      const name = el("span", "fr-name");
-      name.textContent = facility.label;
-      const state = el("span", "fr-state");
-      state.textContent = "Open";
-      row.append(name, state);
-      // The facility row is a click target but a <div>; promote it to a real
-      // button role so Tab reaches it and Enter/Space activates it (mirrors the
-      // on-canvas facility click + the overview room-cards, which are buttons).
-      row.setAttribute("role", "button");
-      row.tabIndex = 0;
-      row.setAttribute("aria-label", `Open ${facility.label} facility room`);
-      const open = (): void => this.selectFacility(facility.id);
-      row.addEventListener("click", open);
-      row.addEventListener("keydown", (event: KeyboardEvent) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          open();
-        }
-      });
-      installed.appendChild(row);
-    }
-
-    wrap.append(capLabel, chips, label, installed, this.renderConstructionList(campaign));
+    wrap.append(capLabel, chips, this.renderConstructionList(campaign));
     return wrap;
-  }
-
-  /** Selecting an installed facility (from the Construction room list) opens that
-   *  facility's dedicated room, lifts its emissive, and dives the camera into its
-   *  3D interior — mirroring the on-canvas facility click end to end. */
-  private selectFacility(facilityId: string): void {
-    const facility = findBaseFacility(facilityId);
-    this.selectedFacilityId = facilityId;
-    this.activeRoom = facility ? roomForFacilityKind(facility.kind) : "overview";
-    if (facility) this.enterFacilityInterior(roleForFacilityKind(facility.kind));
-    this.applyFacilityHighlight();
-    this.refreshHud();
   }
 
   /** Containment room: a capacity readout, the held-captive roster (or an
@@ -4158,13 +4274,22 @@ export class BaseView {
     return typeof id === "string" ? id : null;
   }
 
-  /** Click a facility floor in the 3D base: open that facility's dedicated room
-   *  (the lab, workshop, barracks, or hangar), keep it selected so the cutaway
-   *  stays highlighted, dive the camera INTO its 3D interior, and re-render the
-   *  detail panel. Facilities without their own screen fall back to the overview
-   *  hub. Ignored while an interior is already open (use Back to Base first). */
+  /** Click a facility floor in the 3D base. The Command Center opens the geoscape
+   *  (it IS the command room); every other buildable facility opens its dedicated
+   *  room and dives the camera INTO its 3D interior. `access` (the lift) has no
+   *  room and returns to the bare overview. Any canvas click also clears a pending
+   *  alert beacon and fades the first-time hint. Ignored while an interior is open. */
   private onCanvasClick = (event: MouseEvent): void => {
     if (this.disposed || this.facilityMeshes.length === 0 || this.interiorRoot) return;
+    if (this.alertBeaconFacilityId) {
+      // Acknowledge + clear the beacon. The frame loop stops overriding this pad's
+      // emissive the moment the id is null, so without a highlight repaint the pad
+      // would freeze at its last mid-pulse sine sample. Repaint to the static
+      // selected/hover/base value so an empty-space dismiss doesn't leave it half-lit.
+      this.alertBeaconFacilityId = null;
+      this.applyFacilityHighlight();
+    }
+    this.hintDismissed = true;
     const hit = this.facilityMeshAt(event);
     if (!hit) {
       // Clicking an unexcavated expansion pad (which shows a pointer cursor +
@@ -4172,18 +4297,35 @@ export class BaseView {
       // the advertised click is not a silent no-op.
       const expId = this.expansionIdAt();
       if (expId !== null) {
+        this.selectedFacilityId = null;
         this.activeRoom = "construction";
         this.refreshHud();
       }
       return;
     }
-    this.selectedFacilityId = hit.facilityId;
-    const facility = findBaseFacility(hit.facilityId);
-    this.activeRoom = facility ? roomForFacilityKind(facility.kind) : "overview";
-    if (facility) this.enterFacilityInterior(roleForFacilityKind(facility.kind));
-    this.applyFacilityHighlight();
-    this.refreshHud();
+    this.activateFacility(hit.facilityId);
   };
+
+  /** Open the room for a facility id. Shared by the canvas click raycast and the
+   *  keyboard activation path so both routes into a room behave identically. */
+  private activateFacility(facilityId: string): void {
+    const facility = findBaseFacility(facilityId);
+    if (facility?.kind === "command") {
+      // The command room is the geoscape — NAV mounts it; BASE never renders a
+      // DOM room for it.
+      this.opts.onEnterCommandCenter();
+      return;
+    }
+    if (!facility || facility.kind === "access") {
+      // No dedicated room (the lift) — stay on the bare overview.
+      this.selectedFacilityId = null;
+      this.activeRoom = "overview";
+      this.applyFacilityHighlight();
+      this.refreshHud();
+      return;
+    }
+    this.enterFacility(facilityId, facility.kind);
+  }
 
   /** Dive the camera INTO a facility's 3D interior: mount its diorama (built by
    *  baseFacilityInteriors), hide the hub exterior, and tween the camera to a
@@ -4347,6 +4489,19 @@ export class BaseView {
       const reactorPulse = 1.4 + Math.sin(elapsed * 2.2) * 0.7;
       for (const mat of this.reactorCores) mat.emissiveIntensity = reactorPulse;
       this.updateRotators(elapsed);
+    }
+    // Alert beacon: pulse the mapped facility's pad emissive so a strategic event
+    // that fired on the globe surfaces as a hard-to-miss beacon back at base. Runs
+    // after applyFacilityHighlight's static values so it wins each frame; cleared
+    // on the next canvas interaction. Static (reducedMotion) → a steady lift.
+    if (this.alertBeaconFacilityId) {
+      const entry = this.facilityMeshes.find(
+        (e) => e.facilityId === this.alertBeaconFacilityId,
+      );
+      const mat = entry?.mesh.material;
+      if (mat instanceof MeshStandardMaterial) {
+        mat.emissiveIntensity = this.reducedMotion ? 1.15 : 1.0 + Math.sin(elapsed * 4) * 0.65;
+      }
     }
     for (const crew of this.crewSystems) crew.tick(dt);
     this.renderer.render(this.scene, this.camera);
