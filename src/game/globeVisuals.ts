@@ -17,6 +17,7 @@ import {
   Group,
   Line,
   LineLoop,
+  LinearSRGBColorSpace,
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
@@ -115,7 +116,14 @@ export function makeEarthTexture(): CanvasTexture {
   });
 
   const texture = new CanvasTexture(canvas);
-  texture.colorSpace = SRGBColorSpace;
+  // Pass-through (NOT sRGB-decoded): the earth's raw ShaderMaterial does all of
+  // its day/night math directly on the authored 0-255 canvas colors and writes
+  // gl_FragColor without an output-encode pass. If this decoded sRGB→linear, the
+  // navy ocean's blue/green gap would collapse below the shader's oceanAt() 0.06
+  // threshold, misclassifying open ocean as LAND and flooding it with the green
+  // night-land color (the "greenish day" bug). Keeping it linear-pass-through
+  // means the texels share the same space as the shader's constants + output.
+  texture.colorSpace = LinearSRGBColorSpace;
   return texture;
 }
 
