@@ -41,8 +41,15 @@ import {
   DEPLOYMENT_SIZE,
   CAMPAIGN_VICTORY_OPERATIONS,
   canLaunchFinalAssault,
+  canStartManufacturing,
+  startManufacturing,
 } from "../src/campaign/storage";
-import { advanceGeoscape, interceptUfo, canLaunchInterceptor } from "../src/campaign/geoscape";
+import {
+  advanceGeoscape,
+  interceptUfo,
+  canLaunchInterceptor,
+  interceptionSpeedAdvantage,
+} from "../src/campaign/geoscape";
 import { alienBaseCrewRanks, generateOperation, launchFinalAssault } from "../src/campaign/operations";
 import type {
   BaseLocation,
@@ -351,6 +358,9 @@ const RESEARCH_PRIORITY: readonly ResearchId[] = [
   "plasmaWeapons",
   "alloyArmor",
   "alienBiotech",
+  // Air war: unlock the Phantom advanced interceptor early so the fleet can run
+  // down terror ships and battleships instead of being outrun by them.
+  "alienPropulsion",
   "heavyPlasma",
   "advancedMetallurgy",
   "improvedMedikit",
@@ -386,6 +396,14 @@ function economyStep(campaign: CampaignState): CampaignState {
         break;
       }
     }
+  }
+
+  // 2b. Build the Phantom advanced interceptor once alienPropulsion clears. The
+  //     guard already checks research, an idle workshop, a free hangar berth, and
+  //     affordability, so this self-limits to a single Phantom (the hangar's one
+  //     spare slot) and skips once the fleet is full.
+  if (canStartManufacturing(next, "phantom")) {
+    next = startManufacturing(next, "phantom");
   }
 
   // 3. Buy gear. Plasma (when research unlocks it) is the squad's main DPS
@@ -604,9 +622,12 @@ function runCampaign(seed: number, difficulty: DifficultyLevel): CampaignMetrics
     if (!contact) continue;
     if (!counters.encountered.has(contact.id)) counters.encountered.add(contact.id);
 
-    // Tracked crash-site UFO: scramble an interceptor if one is ready.
+    // Tracked crash-site UFO: scramble an interceptor if one is ready AND our
+    // fastest craft can actually catch it. A UFO that outruns the fleet (terror
+    // ship / battleship vs a Raptor) escapes the pursuit and only wastes the
+    // sortie, so skip it and keep building toward a Phantom instead.
     if (contact.status === "tracked") {
-      if (canLaunchInterceptor(campaign)) {
+      if (canLaunchInterceptor(campaign) && interceptionSpeedAdvantage(campaign, contact) !== "outrun") {
         campaign = interceptUfo(campaign);
         const after = campaign.ufoContact;
         if (!after || after.id !== contact.id) {

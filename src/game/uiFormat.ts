@@ -92,6 +92,21 @@ export function groupThousands(value: number): string {
 }
 
 /**
+ * Format a craft/UFO cruise speed (great-circle degrees per hour) for the DOM.
+ * Always one decimal place and a `°/h` suffix so the speed matchup reads
+ * consistently (`0.9°/h`, `1.6°/h`, `1.0°/h`). Deterministic (`toFixed` is
+ * locale-independent); NaN / non-finite / negative clamps to `"0.0°/h"`.
+ *
+ * @example formatSpeed(0.9)  // "0.9°/h"
+ * @example formatSpeed(1.6)  // "1.6°/h"
+ * @example formatSpeed(1)    // "1.0°/h"
+ */
+export function formatSpeed(degPerHour: number): string {
+  const v = Number.isFinite(degPerHour) && degPerHour > 0 ? degPerHour : 0;
+  return `${v.toFixed(1)}°/h`;
+}
+
+/**
  * Format a credit amount with thousands separators and a `c` suffix.
  * Deterministic across machines (no locale). `formatCredits(12400)` → `"12,400c"`.
  * Negative values keep their sign: `formatCredits(-800)` → `"-800c"`.

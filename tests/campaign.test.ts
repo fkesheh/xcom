@@ -80,7 +80,7 @@ import {
   updateCampaignBase,
 } from "../src/campaign/storage";
 import { ITEMS, WEAPONS } from "../src/sim/content";
-import type { CampaignState, MissionType, UfoContact } from "../src/campaign/types";
+import type { CampaignState, Craft, MissionType, UfoContact } from "../src/campaign/types";
 
 describe("campaign state", () => {
   it("creates a persistent campaign record from a base location", () => {
@@ -352,9 +352,10 @@ describe("campaign state", () => {
   });
 
   it("can fail an interception against a strong UFO and applies escape pressure", () => {
-    // Seed 8 rolls a terror ship (strength 5) at hour 18: strong enough to escape without
-    // radar (ufoScore 75 > 74) yet recoverable once radar-2 tips the balance (75 < 84),
-    // preserving the "strong UFO escapes, then is forced down with radar" scenario.
+    // Seed 8 rolls a terror ship (strength 5, speed 1.0) at hour 18: it OUTRUNS the
+    // starting Raptor (0.9), so it escapes the pursuit regardless of engagement
+    // score. radar-2 tips the score but not the speed gate — only a faster craft
+    // (a Phantom, 1.6) can force this hull down.
     const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 8);
     const detected = advanceGeoscape(campaign, 18);
     const forecast = interceptionForecast(detected);
@@ -363,9 +364,26 @@ describe("campaign state", () => {
       ...detected,
       resources: { credits: 1500, alloys: 50, elerium: 10, alienData: 20 },
     };
+    // radar-2 alone still cannot catch a faster UFO — the speed gate stands.
     const radar = completeFacilityConstruction(stocked, "radar-2");
     const radarForecast = interceptionForecast(radar);
-    const recovered = interceptUfo(radar);
+    // A Phantom in the hangar (fastest ready craft) removes the speed gate; with
+    // radar-2's score edge the terror ship is finally forced down.
+    const phantom: Craft = {
+      id: "phantom-1",
+      kind: "interceptor",
+      name: "Phantom",
+      damage: 0,
+      sorties: 0,
+      fuel: 120,
+      maxFuel: 120,
+      speedDegPerHour: 1.6,
+      hullPoints: 140,
+      weaponPower: 1.5,
+    };
+    const withPhantom: CampaignState = { ...radar, fleet: [...radar.fleet!, phantom] };
+    const phantomForecast = interceptionForecast(withPhantom);
+    const recovered = interceptUfo(withPhantom);
 
     expect(detected.ufoContact?.strength).toBe(5);
     expect(forecast).toMatchObject({
@@ -374,7 +392,7 @@ describe("campaign state", () => {
       canLaunch: true,
       strength: 5,
     });
-    expect(forecast?.summary).toContain("UFO may escape");
+    expect(forecast?.summary).toContain("outruns");
     expect(failed.ufoContact).toBeUndefined();
     expect(failed.lastInterceptionReport).toMatchObject({
       contactId: detected.ufoContact?.id,
@@ -395,12 +413,16 @@ describe("campaign state", () => {
     expect(regionalPanicFor(failed, detected.ufoContact!.region)).toBe(
       regionalPanicFor(detected, detected.ufoContact!.region)! + 6,
     );
-    expect(recovered.ufoContact?.status).toBe("crashed");
-    expect(radarForecast).toMatchObject({
+    // radar-2 alone: still outrun, still a dangerous forecast that escapes.
+    expect(radarForecast?.succeeds).toBe(false);
+    expect(radarForecast?.risk).toBe("dangerous");
+    // Phantom + radar-2: the speed gate is gone and the score edge forces it down.
+    expect(phantomForecast).toMatchObject({
       risk: "favorable",
       succeeds: true,
       strength: 5,
     });
+    expect(recovered.ufoContact?.status).toBe("crashed");
     expect(recovered.lastInterceptionReport?.result).toBe("crashed");
   });
 
@@ -1070,11 +1092,11 @@ describe("manufacturing catalog", () => {
     };
   }
 
-  it("exposes the original three weapon projects plus three gear projects", () => {
+  it("exposes the original three weapon projects plus three gear projects and the Phantom craft", () => {
     const ids = MANUFACTURING_PROJECTS.map((project) => project.id);
-    expect(ids).toHaveLength(6);
+    expect(ids).toHaveLength(7);
     expect(new Set(ids)).toEqual(
-      new Set(["pistol", "rifle", "plasma", "grenade", "medkit", "cannon"]),
+      new Set(["pistol", "rifle", "plasma", "grenade", "medkit", "cannon", "phantom"]),
     );
     // The original three projects still produce their weapon into armory.weapons.
     for (const id of ["pistol", "rifle", "plasma"] as const) {
@@ -1140,6 +1162,11 @@ describe("manufacturing catalog", () => {
           WEAPONS[product.weaponId],
           `${product.weaponId} must resolve to a real Weapon definition`,
         ).toBeDefined();
+      } else if (product.kind === "craft") {
+        // A craft product joins the hangar fleet rather than the armory.
+        const added = completed.fleet!.find((craft) => craft.name === product.craft.name);
+        expect(added, `${product.craft.name} must join the fleet`).toBeDefined();
+        expect(completed.fleet!.length).toBe(ready.fleet!.length + 1);
       } else {
         expect(completed.armory.items?.[product.itemId] ?? 0).toBe(
           (ready.armory.items?.[product.itemId] ?? 0) + product.quantity,

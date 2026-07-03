@@ -15,6 +15,7 @@ export type ResearchId =
   | "poweredArmor"
   | "eleriumPowerSource"
   | "mindShield"
+  | "alienPropulsion"
   | "alienInterrogation"
   | "leaderInterrogation"
   | "commanderInterrogation";
@@ -38,7 +39,8 @@ export type ManufacturingProjectId =
   | "sniper"
   | "grenade"
   | "medkit"
-  | "armor";
+  | "armor"
+  | "phantom";
 export type DifficultyLevel = "rookie" | "veteran" | "commander";
 export type MissionType = "crashSite" | "terror" | "landedUfo" | "baseDefense" | "alienBaseAssault";
 /** Classification of a detected UFO, driving its strength / speed / lifetime profile. */
@@ -121,6 +123,17 @@ export interface Craft {
   fuel?: number;
   /** Fuel capacity. */
   maxFuel?: number;
+  /**
+   * Cruise / pursuit speed in great-circle degrees per hour. Drives the patrol
+   * flight's globe speed and the stern-chase comparison against a UFO's own
+   * speed. Optional so legacy saves migrate; defaults to a starting-interceptor
+   * cruise (DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR) when absent.
+   */
+  speedDegPerHour?: number;
+  /** Hull points fielded in an air-combat encounter (default 100). Advanced craft are tougher. */
+  hullPoints?: number;
+  /** Multiplier on this craft's outgoing damage in an air-combat encounter (default 1). */
+  weaponPower?: number;
 }
 
 /** A friendly craft in transit on the globe (patrol toward UFO, return to base). */

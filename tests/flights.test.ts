@@ -71,9 +71,9 @@ describe("active patrol flights", () => {
     expect(patrol!.fromLon).toBe(BASE.lon);
     expect(patrol!.toLat).toBe(advanced.ufoContact!.lat);
     expect(patrol!.toLon).toBe(advanced.ufoContact!.lon);
-    // Cruise speed is proportional to the UFO's speed, banded to [3, 5] deg/hour.
-    expect(patrol!.speedDegPerHour).toBeGreaterThanOrEqual(3);
-    expect(patrol!.speedDegPerHour).toBeLessThanOrEqual(5);
+    // No rubber-band: the patrol cruises at the interceptor's OWN speed (the
+    // starting Raptor's 0.9 deg/hour), not a UFO-proportional band.
+    expect(patrol!.speedDegPerHour).toBe(0.9);
     expect(patrol!.progress).toBeGreaterThanOrEqual(0);
     expect(patrol!.progress).toBeLessThan(1);
   });

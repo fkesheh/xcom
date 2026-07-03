@@ -28,6 +28,11 @@ import {
   chooseInterceptor,
   COUNCIL_REGIONS,
   councilRegionFor,
+  craftHullPoints,
+  craftSpeedDegPerHour,
+  craftWeaponPower,
+  DEFAULT_CRAFT_HULL_POINTS,
+  DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR,
   completeFinishedBaseConstruction,
   completeFinishedConstruction,
   completeFinishedResearch,
@@ -39,12 +44,14 @@ import {
   hasBaseFacility,
   highestRegionalPanic,
   livingSoldiers,
+  PATROL_ID_PREFIX,
   PROJECT_REPORT_LIMIT,
   PANIC_LOSS_THRESHOLD,
   recoverWoundedSoldiers,
   readyInterceptors,
   repairFleet,
   restockMarket,
+  RETURN_ID_PREFIX,
   THREAT_LOSS_THRESHOLD,
 } from "./storage";
 
@@ -58,11 +65,15 @@ export interface UfoTypeProfile {
   panicMult: number;
 }
 
+// Cruise speeds recreate the original X-COM's air-war arc: bigger hulls cruise
+// FASTER, so a starting Raptor (0.9 deg/h) catches scouts/harvesters but is
+// outrun by terror ships and battleships until an advanced interceptor is built.
+// Lifetimes/panic/infiltration are unchanged — only the speed column is re-tuned.
 export const UFO_TYPE_PROFILES: Record<UfoType, UfoTypeProfile> = {
-  scout: { strength: 1, speed: 1.4, lifetimeHours: 30, infiltrationMult: 0.5, panicMult: 0.5 },
-  harvester: { strength: 3, speed: 0.6, lifetimeHours: 44, infiltrationMult: 1.0, panicMult: 1.0 },
-  terror: { strength: 5, speed: 0.35, lifetimeHours: 66, infiltrationMult: 1.6, panicMult: 1.6 },
-  battleship: { strength: 8, speed: 0.15, lifetimeHours: 96, infiltrationMult: 2.2, panicMult: 2.2 },
+  scout: { strength: 1, speed: 0.7, lifetimeHours: 30, infiltrationMult: 0.5, panicMult: 0.5 },
+  harvester: { strength: 3, speed: 0.55, lifetimeHours: 44, infiltrationMult: 1.0, panicMult: 1.0 },
+  terror: { strength: 5, speed: 1.0, lifetimeHours: 66, infiltrationMult: 1.6, panicMult: 1.6 },
+  battleship: { strength: 8, speed: 1.35, lifetimeHours: 96, infiltrationMult: 2.2, panicMult: 2.2 },
 };
 
 export interface UfoTypeInfo {
@@ -99,6 +110,14 @@ const UFO_BASE_SCORE = 40;
 
 /** Starting engagement range for an interactive interception encounter. */
 const ENCOUNTER_START_RANGE = 3;
+/**
+ * Range at which a stern chase breaks off: when the UFO outruns the pursuer, every
+ * Attack beat OPENS the range by one; once it reaches this value the UFO escapes.
+ */
+const ENCOUNTER_STERN_ESCAPE_RANGE = ENCOUNTER_START_RANGE + 3;
+/** Classification thresholds for craftSpeed / ufoSpeed. */
+const SPEED_ADVANTAGE_RATIO = 1.05;
+const SPEED_OUTRUN_RATIO = 0.95;
 /** Salt for the deterministic mission-type roll on contact spawn. */
 const MISSION_TYPE_ROLL_SALT = 0x9e3779ba;
 /** Salt for the deterministic UFO-type roll on contact spawn (independent of missionType). */
@@ -257,8 +276,11 @@ function greatCircleDestination(
 function moveTrackedContact(contact: UfoContact, hours: number): UfoContact {
   if (contact.status !== "tracked") return contact;
   const heading = contact.heading;
-  const speed = contact.speed;
-  if (heading === undefined || speed === undefined || hours <= 0) return contact;
+  // A heading marks a flying (crashSite) contact; ground assaults hold position and
+  // carry none. Speed comes from the live ufoType profile (contactSpeedDegPerHour), so
+  // a reloaded contact with no denormalized speed still drifts at the right rate.
+  if (heading === undefined || hours <= 0) return contact;
+  const speed = contactSpeedDegPerHour(contact);
   const next = greatCircleDestination(contact.lat, contact.lon, heading, speed * hours);
   const lon = next.lon > 180 ? next.lon - 360 : next.lon < -180 ? next.lon + 360 : next.lon;
   const lat = Math.max(-56, Math.min(68, next.lat));
@@ -332,6 +354,43 @@ export function isInterceptorReady(campaign: CampaignState): boolean {
   return readyInterceptors(campaign).length > 0;
 }
 
+/** How a pursuing craft's cruise speed compares to a UFO's own speed. */
+export type InterceptionSpeedAdvantage = "advantage" | "matched" | "outrun";
+
+/**
+ * A contact's own cruise speed (deg/hour). ufoType is the source of truth (its profile
+ * cruise); an explicit per-contact `speed` override is honored for freshly created /
+ * hand-built contacts, but a reloaded contact carries no speed (the load normalizer
+ * drops the denormalized copy) and so always derives against the live profile.
+ */
+export function contactSpeedDegPerHour(contact: UfoContact): number {
+  return contact.speed ?? UFO_TYPE_PROFILES[ufoTypeOf(contact)].speed;
+}
+
+/**
+ * Speed matchup between the interceptor that WOULD engage `contact` (the fastest
+ * ready craft) and the UFO itself:
+ *  - "advantage": the craft is faster — a normal, winnable intercept;
+ *  - "matched":   within ±5% — a hard, even chase;
+ *  - "outrun":    the UFO is faster — a stern chase the pursuer loses unless it
+ *                 forces the range closed (see executeInterceptionAction).
+ * With no ready craft it previews the matchup using the starting-interceptor cruise,
+ * so the UI can warn the commander before committing a launch.
+ */
+export function interceptionSpeedAdvantage(
+  campaign: CampaignState,
+  contact: UfoContact,
+): InterceptionSpeedAdvantage {
+  const craft = chooseInterceptor(campaign);
+  const craftSpeed = craft ? craftSpeedDegPerHour(craft) : DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR;
+  const ufoSpeed = contactSpeedDegPerHour(contact);
+  if (ufoSpeed <= 0) return "advantage";
+  const ratio = craftSpeed / ufoSpeed;
+  if (ratio >= SPEED_ADVANTAGE_RATIO) return "advantage";
+  if (ratio <= SPEED_OUTRUN_RATIO) return "outrun";
+  return "matched";
+}
+
 /** Current damage of the interceptor that would engage the next UFO (0 if none is ready). */
 function engagingDamage(campaign: CampaignState): number {
   return chooseInterceptor(campaign)?.damage ?? 0;
@@ -397,7 +456,10 @@ export function interceptionForecast(campaign: CampaignState): InterceptionForec
   if (!contact) return null;
   const interceptorScore = interceptorEngagementScore(campaign);
   const ufoScore = ufoEngagementScore(contact);
-  const succeeds = interceptorScore >= ufoScore;
+  // A UFO that outruns the pursuing craft cannot be forced down at any score — it
+  // simply escapes. Only a matched-or-faster craft can convert a score edge into a kill.
+  const outrun = interceptionSpeedAdvantage(campaign, contact) === "outrun";
+  const succeeds = !outrun && interceptorScore >= ufoScore;
   const damage = interceptionDamage(campaign, contact, succeeds);
   const risk = succeeds ? "favorable" : "dangerous";
   return {
@@ -410,9 +472,11 @@ export function interceptionForecast(campaign: CampaignState): InterceptionForec
     succeeds,
     canLaunch: canLaunchInterceptor(campaign),
     risk,
-    summary: succeeds
-      ? `Forecast favorable: forced landing likely, estimated interceptor damage ${damage}%.`
-      : `Forecast dangerous: UFO may escape, estimated interceptor damage ${damage}%.`,
+    summary: outrun
+      ? `Forecast dangerous: this UFO outruns the interceptor and will escape the pursuit (est. ${damage}% damage).`
+      : succeeds
+        ? `Forecast favorable: forced landing likely, estimated interceptor damage ${damage}%.`
+        : `Forecast dangerous: UFO may escape, estimated interceptor damage ${damage}%.`,
   };
 }
 
@@ -498,11 +562,14 @@ function encounterRoundSeed(campaign: CampaignState, contact: UfoContact, round:
   return (campaign.seed ^ (contact.missionSeed >>> 0) ^ (Math.max(0, round) * 0x9e3779b9)) >>> 0;
 }
 
-/** Outgoing interceptor damage at the current range; closer range hits harder. */
-function interceptorAttackDamage(range: number, mult: number, roundSeed: number): number {
+/**
+ * Outgoing interceptor damage at the current range; closer range hits harder and
+ * the engaging craft's weaponPower (>1 for advanced interceptors) scales it.
+ */
+function interceptorAttackDamage(range: number, mult: number, roundSeed: number, power: number): number {
   const base = 10 + (ENCOUNTER_START_RANGE - range) * 8;
   const factor = 0.6 + 0.4 * rollFraction(hash(roundSeed ^ ENCOUNTER_INTERCEPTOR_SALT));
-  return Math.max(1, Math.round(base * factor * mult));
+  return Math.max(1, Math.round(base * factor * mult * power));
 }
 
 /** Incoming UFO return fire at the current range; closer range is deadlier both ways. */
@@ -516,8 +583,21 @@ function encounterUfoHpMax(contact: UfoContact): number {
   return 20 + contact.strength * 10;
 }
 
+/** Air-combat hull points of the craft that would engage (advanced craft are tougher). */
+function engagingHullPoints(campaign: CampaignState): number {
+  const craft = chooseInterceptor(campaign);
+  return craft ? craftHullPoints(craft) : DEFAULT_CRAFT_HULL_POINTS;
+}
+
+/** Outgoing air-combat damage multiplier of the craft that would engage. */
+function engagingWeaponPower(campaign: CampaignState): number {
+  const craft = chooseInterceptor(campaign);
+  return craft ? craftWeaponPower(craft) : 1;
+}
+
+/** Current encounter HP of the engaging craft, scaled from its hull and accumulated damage. */
 function encounterInterceptorHp(campaign: CampaignState): number {
-  return Math.max(1, 100 - engagingDamage(campaign));
+  return Math.max(1, Math.round(engagingHullPoints(campaign) * (1 - engagingDamage(campaign) / 100)));
 }
 
 /** An interactive, choice-based interception encounter is currently in progress. */
@@ -542,7 +622,7 @@ export function startInterceptionEncounter(campaign: CampaignState): CampaignSta
     ufoHp: ufoHpMax,
     ufoHpMax,
     interceptorHp,
-    interceptorHpMax: 100,
+    interceptorHpMax: engagingHullPoints(campaign),
     range: ENCOUNTER_START_RANGE,
     roundsElapsed: 0,
     log: ["Interception engaged"],
@@ -554,12 +634,31 @@ export function startInterceptionEncounter(campaign: CampaignState): CampaignSta
   };
 }
 
+/** Percentage (0..100) hull damage the engaging craft has taken this encounter. */
+function encounterDamagePercent(interceptorHp: number, hull: number): number {
+  return Math.max(0, Math.min(100, Math.round((1 - interceptorHp / Math.max(1, hull)) * 100)));
+}
+
 /**
  * Resolves one round of an active encounter. "close" cuts range (improving future
  * damage), "attack" exchanges fire at the current range, "disengage" returns the
- * UFO to tracked without further interceptor damage. Terminal outcomes (UFO down
- * or interceptor lost) reuse the shared auto-resolve resolver. No-op without an
- * active engaging encounter.
+ * UFO to tracked without further interceptor damage.
+ *
+ * STERN CHASE: when the UFO outruns the engaging craft (interceptionSpeedAdvantage
+ * === "outrun"), every Attack beat OPENS the range by one and "close" CANNOT reduce
+ * it — a slower craft physically cannot close the gap, it can only burn afterburner
+ * fuel to hold station. So the range only ever grows: after at most a few firing
+ * passes (each at longer, weaker range) the UFO reaches ENCOUNTER_STERN_ESCAPE_RANGE
+ * and breaks off. This makes the interactive encounter honor the forecast's hard gate
+ * — an outrun UFO genuinely cannot be forced down at any score (matching
+ * interceptionForecast), so a battleship really is uncatchable with a slow Raptor.
+ *
+ * FUEL: attack and afterburner-close burn the engaging craft's fuel. A craft that can
+ * no longer afford a round breaks off and returns to base — fuel is a real limiter on
+ * how long a pursuit can be pressed, not a value that silently clamps at zero.
+ *
+ * Terminal outcomes (UFO down or interceptor lost) reuse the shared auto-resolve
+ * resolver. No-op without an active engaging encounter.
  */
 export function executeInterceptionAction(
   campaign: CampaignState,
@@ -571,6 +670,7 @@ export function executeInterceptionAction(
 
   const round = encounter.roundsElapsed;
   const roundLabel = `Round ${round + 1}`;
+  const outrun = interceptionSpeedAdvantage(campaign, contact) === "outrun";
 
   if (action === "disengage") {
     return {
@@ -580,25 +680,52 @@ export function executeInterceptionAction(
     };
   }
 
+  // A fuel-burning beat (any Attack, or an afterburner Close against a faster UFO)
+  // needs at least one round's fuel in the tank. Out of fuel, the interceptor cannot
+  // sustain the chase: it breaks off and the UFO drops back to tracked (the patrol
+  // layer then flies the empty craft home to refuel).
+  const burnsFuel = action === "attack" || (action === "close" && outrun);
+  if (burnsFuel) {
+    const engaging = chooseInterceptor(campaign);
+    if (engaging && craftFuel(engaging) < ENCOUNTER_FUEL_PER_ATTACK) {
+      return {
+        ...campaign,
+        ufoContact: { ...contact, status: "tracked" },
+        interception: undefined,
+      };
+    }
+  }
+
   if (action === "close") {
-    const range = Math.max(0, encounter.range - 1);
+    // Against a faster UFO the range cannot be reduced — closing only holds station
+    // and burns afterburner fuel; against a matched/slower UFO a Close cuts the range
+    // (and costs no fuel) to set up a harder-hitting pass.
+    const range = outrun ? encounter.range : Math.max(0, encounter.range - 1);
+    const afterFuel = outrun ? burnEngagingFuel(campaign) : campaign;
     return {
-      ...campaign,
+      ...afterFuel,
       interception: {
         ...encounter,
         range,
         roundsElapsed: round + 1,
-        log: [...encounter.log, `${roundLabel}: closing to range ${range}.`],
+        log: [
+          ...encounter.log,
+          outrun
+            ? `${roundLabel}: burning fuel to hold at range ${range}, but ${contact.id} is faster — the gap will not close.`
+            : `${roundLabel}: closing to range ${range}.`,
+        ],
       },
     };
   }
 
   const mult = difficultyConfig(campaign).interceptionDamageMult;
   const roundSeed = encounterRoundSeed(campaign, contact, round);
-  const interceptorDmg = interceptorAttackDamage(encounter.range, mult, roundSeed);
+  const power = engagingWeaponPower(campaign);
+  const interceptorDmg = interceptorAttackDamage(encounter.range, mult, roundSeed, power);
   const ufoDmg = ufoReturnFireDamage(encounter.range, contact.strength, mult, roundSeed);
   const ufoHp = Math.max(0, encounter.ufoHp - interceptorDmg);
   const interceptorHp = Math.max(0, encounter.interceptorHp - ufoDmg);
+  const hull = encounter.interceptorHpMax;
   const log = [
     ...encounter.log,
     `${roundLabel}: interceptor hits ${contact.id} for ${interceptorDmg}; UFO returns ${ufoDmg}.`,
@@ -609,13 +736,36 @@ export function executeInterceptionAction(
 
   // A simultaneous kill is resolved in the interceptor's favor (UFO forced down).
   if (ufoHp <= 0) {
-    const finalInterceptorDamage = 100 - interceptorHp;
+    const finalInterceptorDamage = encounterDamagePercent(interceptorHp, hull);
     const reportDamage = Math.max(0, finalInterceptorDamage - engagingDamage(afterFuel));
     return applyInterceptionOutcome(afterFuel, contact, "crashed", finalInterceptorDamage, reportDamage);
   }
   if (interceptorHp <= 0) {
     const reportDamage = Math.max(0, 100 - engagingDamage(afterFuel));
     return applyInterceptionOutcome(afterFuel, contact, "escaped", 100, reportDamage);
+  }
+
+  // STERN CHASE: the UFO is faster, so a fire pass lets it open the gap. When the
+  // range widens past the break-off threshold the UFO escapes with the interceptor
+  // carrying whatever damage it took during the pursuit.
+  if (outrun) {
+    const openedRange = encounter.range + 1;
+    if (openedRange >= ENCOUNTER_STERN_ESCAPE_RANGE) {
+      const finalInterceptorDamage = encounterDamagePercent(interceptorHp, hull);
+      const reportDamage = Math.max(0, finalInterceptorDamage - engagingDamage(afterFuel));
+      return applyInterceptionOutcome(afterFuel, contact, "escaped", finalInterceptorDamage, reportDamage);
+    }
+    return {
+      ...afterFuel,
+      interception: {
+        ...encounter,
+        ufoHp,
+        interceptorHp,
+        range: openedRange,
+        roundsElapsed: round + 1,
+        log: [...log, `${roundLabel}: ${contact.id} outruns the pursuit — range opens to ${openedRange}.`],
+      },
+    };
   }
 
   return {
@@ -973,20 +1123,14 @@ function rollContactMissionType(campaign: CampaignState, detectedAtHour: number)
 // visual layer reads `activeFlights` and renders each marker between its ends.
 // ===========================================================================
 
-/** Patrol interceptor cruise-speed band (degrees of arc per hour on the globe). */
-const PATROL_SPEED_MIN_DEG_PER_HOUR = 3;
-const PATROL_SPEED_MAX_DEG_PER_HOUR = 5;
-/** Interceptor cruise speed scales with the target UFO's speed so it visibly gains. */
-const PATROL_SPEED_TO_UFO_SPEED_RATIO = 6;
 /**
  * A patrol that has closed to within this fraction of its target UFO shadows it
  * (progress clamped) rather than "arriving": the interceptor tails the UFO until
  * the player engages or the contact expires, so it never teleports home to respawn.
  */
 const PATROL_SHADOW_PROGRESS = 0.99;
-/** Patrol flights carry an id prefix so the sim can tell them from return legs. */
-const PATROL_ID_PREFIX = "patrol:";
-const RETURN_ID_PREFIX = "return:";
+// PATROL_ID_PREFIX / RETURN_ID_PREFIX are defined in storage (beside the fleet logic)
+// so chooseInterceptor can distinguish a contact's patrol from a return leg; imported above.
 
 /** Great-circle angular distance between two lat/lon points, in degrees. */
 function greatCircleDistanceDeg(
@@ -1051,14 +1195,6 @@ function isPatrolFlight(flight: ActiveFlight): boolean {
   return flight.id.startsWith(PATROL_ID_PREFIX);
 }
 
-/** Deterministic interceptor cruise speed (deg/hour), proportional to the UFO's speed. */
-function patrolSpeedDegPerHour(ufoSpeed: number): number {
-  return Math.max(
-    PATROL_SPEED_MIN_DEG_PER_HOUR,
-    Math.min(PATROL_SPEED_MAX_DEG_PER_HOUR, ufoSpeed * PATROL_SPEED_TO_UFO_SPEED_RATIO),
-  );
-}
-
 /** Moves a flight a fixed `hours` along its route by speedDegPerHour * hours. */
 function advanceFlightProgress(flight: ActiveFlight, hours: number): ActiveFlight {
   if (hours <= 0) return flight;
@@ -1068,13 +1204,23 @@ function advanceFlightProgress(flight: ActiveFlight, hours: number): ActiveFligh
   return { ...flight, progress: Math.min(1, flight.progress + delta) };
 }
 
-/** A ready interceptor that is not already airborne (patrolling or returning). */
+/**
+ * The FASTEST ready interceptor that is not already airborne (patrolling or
+ * returning), so a manufactured advanced interceptor is scrambled ahead of a
+ * slower Raptor. Ties keep the earliest craft in fleet order (stable).
+ */
 function chooseIdleInterceptor(
   campaign: CampaignState,
   flights: readonly ActiveFlight[],
 ): Craft | undefined {
   const airborne = new Set(flights.map((flight) => flight.craftId));
-  return readyInterceptors(campaign).find((craft) => !airborne.has(craft.id));
+  const idle = readyInterceptors(campaign).filter((craft) => !airborne.has(craft.id));
+  if (idle.length === 0) return undefined;
+  let best = idle[0]!;
+  for (let i = 1; i < idle.length; i++) {
+    if (craftSpeedDegPerHour(idle[i]!) > craftSpeedDegPerHour(best)) best = idle[i]!;
+  }
+  return best;
 }
 
 function makePatrolFlight(craft: Craft, campaign: CampaignState, contact: UfoContact): ActiveFlight {
@@ -1087,7 +1233,10 @@ function makePatrolFlight(craft: Craft, campaign: CampaignState, contact: UfoCon
     toLat: contact.lat,
     toLon: contact.lon,
     progress: 0,
-    speedDegPerHour: patrolSpeedDegPerHour(contact.speed ?? UFO_TYPE_PROFILES.harvester.speed),
+    // No rubber-band: the patrol cruises at the craft's OWN speed, so a slow Raptor
+    // literally cannot close on a faster UFO (the visual stern chase), while a fast
+    // craft still overtakes and shadows a slower one.
+    speedDegPerHour: craftSpeedDegPerHour(craft),
     startedAtHour: campaign.clock.elapsedHours,
   };
 }

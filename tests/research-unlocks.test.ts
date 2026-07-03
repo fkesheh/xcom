@@ -68,9 +68,10 @@ function installLocalStorageShim(): void {
 describe("research project unlock declarations", () => {
   it("every gear project declares at least one weapon or item unlock", () => {
     for (const node of RESEARCH_PROJECTS) {
-      // Interrogation projects grant intel / HQ reveal / final-assault unlock
-      // rather than buildable gear, so they are exempt from the unlock rule.
-      if (node.consumesCaptive) continue;
+      // Interrogation projects grant intel / HQ reveal / final-assault unlock,
+      // and craft-tech projects gate a buildable interceptor rather than squad
+      // gear, so both are exempt from the weapon/item unlock rule.
+      if (node.consumesCaptive || node.unlocksManufacturing) continue;
       const unlocks = node.unlocks;
       expect(unlocks, `project ${node.id} should declare unlocks`).toBeDefined();
       const total = (unlocks?.weapons?.length ?? 0) + (unlocks?.items?.length ?? 0);

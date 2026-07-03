@@ -6,6 +6,7 @@ import {
   ratioToPercent,
   formatCredits,
   formatSignedCredits,
+  formatSpeed,
 } from "../src/game/uiFormat";
 
 describe("formatHours", () => {
@@ -108,4 +109,23 @@ describe("formatSignedCredits", () => {
   ])("formatSignedCredits(%f) -> %s", (input, expected) => {
     expect(formatSignedCredits(input)).toBe(expected);
   });
+});
+
+describe("formatSpeed", () => {
+  it.each<[number, string]>([
+    [0.9, "0.9°/h"],
+    [1.6, "1.6°/h"],
+    [1, "1.0°/h"],
+    [0.55, "0.6°/h"],
+    [1.35, "1.4°/h"],
+  ])("formatSpeed(%f) -> %s", (input, expected) => {
+    expect(formatSpeed(input)).toBe(expected);
+  });
+
+  it.each<[number]>([[0], [-1], [Number.NaN], [Number.POSITIVE_INFINITY]])(
+    "clamps non-positive / non-finite to 0.0°/h: formatSpeed(%f)",
+    (input) => {
+      expect(formatSpeed(input)).toBe("0.0°/h");
+    },
+  );
 });

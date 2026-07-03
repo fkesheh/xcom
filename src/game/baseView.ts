@@ -75,6 +75,11 @@ import {
   type ResearchProject,
   RESEARCH_PROJECTS,
   canStartManufacturing,
+  craftHullPoints,
+  craftSpeedDegPerHour,
+  craftWeaponPower,
+  DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR,
+  freeHangarSlots,
   manufacturingCost,
   manufacturingDuration,
   researchDuration,
@@ -113,6 +118,7 @@ import {
   formatSignedCredits,
   formatHours,
   formatPercent,
+  formatSpeed,
 } from "./uiFormat";
 
 interface BaseViewOptions {
@@ -1360,7 +1366,44 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   font: 800 var(--ui-text-sm)/1.2 ui-monospace, monospace;
   letter-spacing: .03em;
 }
+/* Speed chip pinned to the right of the craft heading. */
+#base-view .craft-speed {
+  margin-left: auto;
+  padding: 2px 7px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-pill);
+  color: var(--ui-cyan);
+  font: 700 var(--ui-text-xs)/1 ui-monospace, monospace;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+/* Advanced (manufactured Phantom) interceptor: distinct violet accent so it reads
+   apart from the starting Raptors at a glance. */
+#base-view .craft-row.advanced {
+  border-color: rgba(192, 96, 255, .42);
+  background: rgba(30, 12, 44, .5);
+}
+#base-view .craft-row.advanced .craft-icon {
+  color: var(--ui-purple);
+  background: rgba(192, 96, 255, .16);
+}
+#base-view .craft-row.advanced .craft-kind { color: var(--ui-purple); }
+#base-view .craft-row.advanced .craft-speed {
+  border-color: rgba(192, 96, 255, .5);
+  color: var(--ui-purple);
+}
+#base-view .craft-stats {
+  margin: 3px 0 0;
+  color: var(--ui-purple);
+  font: 600 var(--ui-text-xs)/1.3 ui-monospace, monospace;
+  letter-spacing: .02em;
+}
 #base-view .craft-body .card-copy { margin: 3px 0 0; }
+/* Advanced-craft manufacturing order (Phantom): violet accent, matching its hangar row. */
+#base-view .tab-card.craft-order {
+  border-color: rgba(192, 96, 255, .34);
+}
+#base-view .tab-card.craft-order > strong { color: var(--ui-purple); }
 /* Keyboard focus indicators (only for keyboard users — :focus-visible never
    fires on mouse click, so this never shows up in mouse-driven screenshots). */
 #base-view button:focus-visible,
@@ -3239,16 +3282,29 @@ export class BaseView {
    *  repair status line. Interceptors show damage + sorties; the transport shows
    *  deployment readiness. */
   private renderCraftRow(campaign: CampaignState, craft: Craft): HTMLElement {
-    const row = el("div", `craft-row ${craft.kind}`);
+    const speed = craftSpeedDegPerHour(craft);
+    // Advanced interceptor (the manufactured Phantom): cruises faster than the
+    // starting Raptor. Gets a distinct violet accent + diamond glyph and shows its
+    // air-combat stats. Detection is data-driven (speed above the default cruise),
+    // so it never hardcodes a craft id/name.
+    const advanced = craft.kind === "interceptor" && speed > DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR;
+    const row = el("div", `craft-row ${craft.kind}${advanced ? " advanced" : ""}`);
     const icon = el("span", "craft-icon");
-    icon.textContent = "✈";
+    icon.textContent = advanced ? "◆" : "✈";
     const body = el("div", "craft-body");
     const heading = el("div", "craft-heading");
     const kind = el("span", "craft-kind");
-    kind.textContent = craft.kind === "interceptor" ? "Interceptor" : "Transport";
+    kind.textContent = advanced
+      ? "Advanced interceptor"
+      : craft.kind === "interceptor"
+        ? "Interceptor"
+        : "Transport";
     const name = el("strong");
     name.textContent = craft.name;
-    heading.append(kind, name);
+    const speedChip = el("span", "craft-speed");
+    speedChip.textContent = formatSpeed(speed);
+    speedChip.title = "Cruise / pursuit speed";
+    heading.append(kind, name, speedChip);
     const copy = el("p", "card-copy");
     const repairedAt = craft.repairedAtHour;
     const repairing = repairedAt !== undefined && repairedAt > campaign.clock.elapsedHours;
@@ -3264,6 +3320,12 @@ export class BaseView {
       copy.textContent = `Integrity ${formatPercent(integrity)} — ${craft.sorties} sorties flown. Ready to intercept.`;
     }
     body.append(heading, copy);
+    if (advanced) {
+      // Surface the manufactured craft's combat edge (hull + weapon multiplier).
+      const stats = el("p", "craft-stats");
+      stats.textContent = `Hull ${craftHullPoints(craft)} · weapon ${formatPercent(craftWeaponPower(craft) * 100)} · runs down any UFO.`;
+      body.append(stats);
+    }
     row.append(icon, body);
     return row;
   }
@@ -3912,18 +3974,29 @@ export class BaseView {
     project: ManufacturingProject,
     workshopBusy: boolean,
   ): HTMLElement {
-    const card = el("section", "tab-card");
+    const isCraft = project.product.kind === "craft";
+    const card = el("section", `tab-card${isCraft ? " craft-order" : ""}`);
     const locked = !!project.requiresResearch && !hasResearch(campaign, project.requiresResearch);
     const canManufacture = canStartManufacturing(campaign, project.id);
     const cost = manufacturingCost(campaign, project.id);
+    // A craft product also needs a free hangar berth. Surface that reason distinctly
+    // so a full hangar never reads as the generic "Need resources".
+    const hangarFull = isCraft && !locked && freeHangarSlots(campaign) < 1;
+    const requiresTitle = project.requiresResearch
+      ? RESEARCH_PROJECTS.find((candidate) => candidate.id === project.requiresResearch)?.title ??
+        project.requiresResearch
+      : "";
     const title = el("strong");
     title.textContent = project.title;
+    const berthNote = isCraft ? " Occupies one hangar berth." : "";
     const copy = el("p", "card-copy");
     copy.textContent = workshopBusy
       ? "Workshop is committed to another order."
       : locked
-        ? `Requires ${project.requiresResearch}. ${project.description}`
-        : `${project.description} Cost ${formatCost(cost)}, ${formatHours(manufacturingDuration(campaign, project.id))}.`;
+        ? `Requires ${requiresTitle}. ${project.description}`
+        : hangarFull
+          ? `${project.description} No free hangar berth — scrap or lose a craft first.`
+          : `${project.description} Cost ${formatCost(cost)}, ${formatHours(manufacturingDuration(campaign, project.id))}.${berthNote}`;
     const row = el("div", "card-row");
     const costLabel = el("span", "card-cost");
     costLabel.textContent = formatCost(cost);
@@ -3932,9 +4005,11 @@ export class BaseView {
       ? "Workshop busy"
       : locked
         ? "Research required"
-        : canManufacture
-          ? "Start production"
-          : "Need resources";
+        : hangarFull
+          ? "Hangar full"
+          : canManufacture
+            ? "Start production"
+            : "Need resources";
     button.disabled = workshopBusy || !canManufacture;
     button.addEventListener("click", () => this.opts.onStartManufacturing(project.id));
     row.append(costLabel, button);

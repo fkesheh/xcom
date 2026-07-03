@@ -34,7 +34,7 @@ import {
 } from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { UI_TOKENS, UI_BASE, UI_COMPONENTS, UI_PRIMITIVES } from "./uiTheme";
-import { formatCredits, formatHours, formatPercent, formatSignedCredits, groupThousands } from "./uiFormat";
+import { formatCredits, formatHours, formatPercent, formatSignedCredits, formatSpeed, groupThousands } from "./uiFormat";
 
 import type {
   BaseLocation,
@@ -47,15 +47,18 @@ import type {
 } from "../campaign/types";
 import {
   canLaunchInterceptor,
+  contactSpeedDegPerHour,
   executeInterceptionAction,
   formatCampaignClock,
   GEOSCAPE_SCAN_HOURS,
   type InterceptionAction,
   interceptionForecast,
+  type InterceptionSpeedAdvantage,
+  interceptionSpeedAdvantage,
   isInterceptorReady,
   ufoTypeInfo,
 } from "../campaign/geoscape";
-import { campaignObjectiveProgress, canBuildNewBase, canLaunchFinalAssault, DIFFICULTY_CONFIGS, highestRegionalPanic, MAX_EXTRA_BASES, NEW_BASE_COST, transportCraft } from "../campaign/storage";
+import { campaignObjectiveProgress, canBuildNewBase, canLaunchFinalAssault, chooseInterceptor, craftSpeedDegPerHour, DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR, DIFFICULTY_CONFIGS, highestRegionalPanic, MAX_EXTRA_BASES, NEW_BASE_COST, transportCraft } from "../campaign/storage";
 import {
   animateBeaconPulse,
   createEarthShaderMaterial,
@@ -124,6 +127,12 @@ const UP = new Vector3(0, 1, 0);
 
 /** Engagement range at which an interception encounter begins (mirrors the campaign layer). */
 const ENCOUNTER_START_RANGE = 3;
+/**
+ * Range at which an out-run UFO breaks the stern chase and escapes (mirrors the
+ * campaign layer's ENCOUNTER_STERN_ESCAPE_RANGE). Presentation-only: it lets the
+ * closing arc ease the displayed range fully open on the escape beat.
+ */
+const ENCOUNTER_STERN_ESCAPE_RANGE = 6;
 /** Sampling resolution of the base->UFO great-circle trajectory line. */
 const TRAJECTORY_SEGMENTS = 24;
 /**
@@ -136,6 +145,18 @@ const TRAJECTORY_SEGMENTS = 24;
 const FLYOUT_MS_PER_RAD = 3200;
 const FLYOUT_MIN_MS = 4000;
 const FLYOUT_MAX_MS = 8000;
+/**
+ * Upper clamp on the SPEED-SCALED fly-out: when a UFO outruns the pursuer the
+ * fly-out is stretched by 1/ratio (a fast target = a visibly slower closure), so
+ * the ceiling is higher than the distance-only FLYOUT_MAX_MS to let that read.
+ */
+const FLYOUT_SPEED_MAX_MS = 12000;
+/** Clamp band for the craft/UFO speed ratio used to pace the pursuit presentation. */
+const PURSUIT_RATIO_MIN = 0.4;
+const PURSUIT_RATIO_MAX = 2.5;
+/** Clamp band for the drift-rate multiplier (1/ratio) so an outrun UFO pulls ahead. */
+const PURSUIT_DRIFT_SCALE_MIN = 0.6;
+const PURSUIT_DRIFT_SCALE_MAX = 2.4;
 /** Arc fraction the launch flight covers; the remaining slice is range-driven closing. */
 const INTERCEPTOR_FLIGHT_END = 0.82;
 /** Combat exchange beat: precompute the outcome, play the volley, THEN reveal it. */
@@ -636,6 +657,48 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   border-color: var(--ui-border);
   background: var(--ui-panel);
   color: var(--ui-muted);
+}
+/* Speed matchup chip: teal advantage / steel matched / amber outrun. The tone is
+   carried by the left border + label colour, always alongside the text label. */
+#geoscape .geo-speed-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-self: stretch;
+  margin-top: 8px;
+  padding: 6px var(--ui-sp-2);
+  border: 1px solid var(--ui-border);
+  border-left-width: 3px;
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-panel);
+}
+#geoscape .geo-speed-chip-label {
+  font: 800 var(--ui-text-xs)/1 var(--ui-font-mono);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+#geoscape .geo-speed-chip-detail {
+  color: var(--ui-muted);
+  font: 600 var(--ui-text-xs)/1.2 var(--ui-font-mono);
+  letter-spacing: .02em;
+}
+#geoscape .geo-speed-chip.advantage {
+  border-left-color: var(--ui-teal);
+}
+#geoscape .geo-speed-chip.advantage .geo-speed-chip-label { color: var(--ui-teal); }
+#geoscape .geo-speed-chip.matched {
+  border-left-color: var(--ui-muted);
+}
+#geoscape .geo-speed-chip.matched .geo-speed-chip-label { color: var(--ui-muted); }
+#geoscape .geo-speed-chip.outrun {
+  border-left-color: var(--ui-amber);
+  background: rgba(251, 191, 36, .08);
+}
+#geoscape .geo-speed-chip.outrun .geo-speed-chip-label { color: var(--ui-amber); }
+/* Intercept CTA when the UFO outruns the craft: amber warning tone, still enabled. */
+#geoscape .ui-cta.geo-cta-warn {
+  border-color: var(--ui-amber);
+  box-shadow: inset 0 0 0 1px rgba(251, 191, 36, .5);
 }
 #geoscape .geo-empty {
   display: flex;
@@ -1384,6 +1447,8 @@ export class GeoscapeView {
   private beatIntDmg = 0;
   private beatTerminal: null | "crashed" | "escaped" = null;
   private beatRangeTarget: number | null = null;
+  /** Report line shown on a stern-chase escape ("UFO outran [craft]"); null = use the campaign log. */
+  private beatEscapeReport: string | null = null;
   private interceptOverlayEl: HTMLDivElement | null = null;
   private interceptButtons: HTMLButtonElement[] = [];
   private ufoHpFill: HTMLDivElement | null = null;
@@ -2347,14 +2412,23 @@ export class GeoscapeView {
     if (c.ufoContact?.status === "tracked") {
       const intercept = el("button", "primary ui-cta");
       const forecast = interceptionForecast(c);
+      // An out-run UFO cannot be forced down at any score (see the campaign layer's
+      // hard gate). The intercept stays ENABLED — a commander may still scramble to
+      // harass it — but the button and title carry the warning.
+      const outrun = interceptionSpeedAdvantage(c, c.ufoContact) === "outrun";
       intercept.textContent = isInterceptorReady(c)
-        ? forecast?.risk === "dangerous"
-          ? "Risk intercept"
-          : "Intercept"
+        ? outrun
+          ? "Intercept (outrun)"
+          : forecast?.risk === "dangerous"
+            ? "Risk intercept"
+            : "Intercept"
         : "Repairing";
+      if (outrun) intercept.classList.add("geo-cta-warn");
       intercept.disabled = !canLaunchInterceptor(c);
       const ufoInfo = ufoTypeInfo(c.ufoContact?.ufoType);
-      intercept.title = `Engage ${ufoInfo.label} — threat ${ufoInfo.threat}`;
+      intercept.title = outrun
+        ? `${ufoInfo.label} outruns your fastest craft — it cannot be forced down and will open the range every pass. Closing only burns fuel. Field a faster interceptor to catch it.`
+        : `Engage ${ufoInfo.label} — threat ${ufoInfo.threat}`;
       intercept.addEventListener("click", () => this.opts.onInterceptUfo());
       this.actionsSlot.append(intercept);
     }
@@ -2676,6 +2750,43 @@ export class GeoscapeView {
    * contact each refresh is what makes the interceptor visibly chase it. A fresh
    * engagement still kicks off the launch flight via interceptorFlightStartMs.
    */
+  /**
+   * The engaging craft's cruise speed and the contact's own speed (deg/hour). The
+   * craft is the engaging interceptor (chooseInterceptor); the UFO speed comes from
+   * contactSpeedDegPerHour — the SAME function the campaign layer's classification
+   * uses — so the printed "Yours X vs UFO Y" numbers can never disagree with the
+   * advantage/outrun label derived from them. Falls back to the starting-interceptor
+   * cruise when no craft is available so a preview always has real numbers.
+   */
+  private engagementSpeeds(contact: UfoContact): { craft: number; ufo: number } {
+    const c = this.campaign;
+    const craft = c ? chooseInterceptor(c) : undefined;
+    const craftSpeed = craft ? craftSpeedDegPerHour(craft) : DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR;
+    return { craft: craftSpeed, ufo: contactSpeedDegPerHour(contact) };
+  }
+
+  /**
+   * craft/UFO speed ratio driving the pursuit presentation pace, clamped to a sane
+   * band. >1 = the pursuer is faster (advantage, quick closure); <1 = the UFO
+   * outruns it (slow closure, range opens). 1 when there is no contact.
+   */
+  private engagementSpeedRatio(): number {
+    const contact = this.campaign?.ufoContact;
+    if (!contact) return 1;
+    const { craft, ufo } = this.engagementSpeeds(contact);
+    const ratio = craft / ufo;
+    if (!Number.isFinite(ratio) || ratio <= 0) return 1;
+    return Math.max(PURSUIT_RATIO_MIN, Math.min(PURSUIT_RATIO_MAX, ratio));
+  }
+
+  /** True when the current contact outruns the engaging craft (mirrors the campaign layer). */
+  private engagementOutrun(): boolean {
+    const c = this.campaign;
+    const contact = c?.ufoContact;
+    if (!c || !contact) return false;
+    return interceptionSpeedAdvantage(c, contact) === "outrun";
+  }
+
   private refreshInterceptor(): void {
     const c = this.campaign;
     const engaging = this.isEngaging();
@@ -2711,9 +2822,17 @@ export class GeoscapeView {
       // presentation-drift pivot: rotate ufoN0 about pursuitAxis to sweep it along
       // the contact's heading so the interceptor curves after a moving target.
       const angle = baseN.angleTo(ufoN);
+      // Pace the fly-out by the REAL speed ratio: divide the distance-derived time by
+      // craft/UFO speed so a faster pursuer closes visibly quicker and a UFO that
+      // outruns it (ratio < 1) stretches the closure. The higher outrun ceiling
+      // (FLYOUT_SPEED_MAX_MS) lets that slow-closure read past the distance-only max.
+      const ratio = this.engagementSpeedRatio();
+      // Not-outrun engagements keep the distance-only ceiling; an outrun UFO
+      // (ratio < 1) is allowed the higher ceiling so its slow closure fully reads.
+      const ceiling = ratio < 1 ? FLYOUT_SPEED_MAX_MS : FLYOUT_MAX_MS;
       this.interceptorFlightDurationMs = Math.min(
-        FLYOUT_MAX_MS,
-        Math.max(FLYOUT_MIN_MS, angle * FLYOUT_MS_PER_RAD),
+        ceiling,
+        Math.max(FLYOUT_MIN_MS, (angle * FLYOUT_MS_PER_RAD) / ratio),
       );
       this.ufoN0.copy(ufoN);
       this.computePursuitAxis(contact, ufoN);
@@ -2861,7 +2980,17 @@ export class GeoscapeView {
     const flightT = (now - this.interceptorFlightStartMs) / dur;
     if (flightT >= 1) return; // stop drifting once the interceptor has closed
     const elapsedSec = (now - this.interceptorFlightStartMs) / 1000;
-    const driftAngle = Math.min(PURSUIT_MAX_DRIFT_RAD, elapsedSec * PURSUIT_DRIFT_RAD_PER_SEC);
+    // Scale the UFO's own drift by 1/ratio: a faster target (ratio < 1) pulls further
+    // ahead during the fly-out, a slower one barely moves. Keeps the chase honest to
+    // the real speed matchup rather than a fixed globe rate.
+    const driftScale = Math.max(
+      PURSUIT_DRIFT_SCALE_MIN,
+      Math.min(PURSUIT_DRIFT_SCALE_MAX, 1 / this.engagementSpeedRatio()),
+    );
+    const driftAngle = Math.min(
+      PURSUIT_MAX_DRIFT_RAD * driftScale,
+      elapsedSec * PURSUIT_DRIFT_RAD_PER_SEC * driftScale,
+    );
     this.scratchA.copy(this.ufoN0).applyAxisAngle(this.pursuitAxis, driftAngle).normalize();
     route.ufoN.copy(this.scratchA);
     // Reposition + reorient the UFO marker at the drifted point (marker radius).
@@ -2998,6 +3127,7 @@ export class GeoscapeView {
     this.beatReturnFired = false;
     this.beatRangeTarget = null;
     this.beatTerminal = null;
+    this.beatEscapeReport = null;
     this.setInterceptButtonsDisabled(true);
     const nextEnc = next.interception;
     const resolved = nextEnc === undefined && action !== "disengage";
@@ -3009,8 +3139,24 @@ export class GeoscapeView {
       // The log records "UFO returns Y" every attack round, so the UFO always
       // shoots back unless the exchange left the interceptor untouched.
       this.beatUfoReturns = this.beatIntDmg > 0 || (resolved && next.ufoContact?.status === "escaped");
+      const outrun = this.engagementOutrun();
       if (resolved) {
         this.beatTerminal = next.ufoContact?.status === "crashed" ? "crashed" : "escaped";
+        // Stern-chase escape: the range opened past the break-off threshold. Ease the
+        // displayed range fully open during the exchange and stamp a distinct
+        // "UFO outran [craft]" report line for the escape resolution beat. Guarded by
+        // the range threshold so a shot-down interceptor still reads as a normal escape.
+        if (this.beatTerminal === "escaped" && outrun && enc.range + 1 >= ENCOUNTER_STERN_ESCAPE_RANGE) {
+          this.beatRangeTarget = ENCOUNTER_STERN_ESCAPE_RANGE;
+          const craftName =
+            (this.campaign ? chooseInterceptor(this.campaign)?.name : undefined) ?? "the interceptor";
+          const contactId = this.campaign?.ufoContact?.id ?? "UFO";
+          this.beatEscapeReport = `${contactId} outran ${craftName} — contact lost.`;
+        }
+      } else if (nextEnc && nextEnc.range !== enc.range) {
+        // Non-terminal outrun attack: the campaign opened the range one band — ease
+        // the displayed range open so the interceptor visibly falls back.
+        this.beatRangeTarget = nextEnc.range;
       }
       this.triggerInterceptorVolley(ufoDmg); // interceptor teal tracer fires at t=0
       return;
@@ -3064,6 +3210,11 @@ export class GeoscapeView {
   private startResolutionBeat(now: number): void {
     this.beatKind = "resolution";
     this.beatStartMs = now;
+    // On a stern-chase escape, surface the "UFO outran [craft]" report line as the
+    // escape streak plays (the campaign log is gone once the encounter resolves).
+    if (this.beatEscapeReport && this.interceptLogLine) {
+      this.interceptLogLine.textContent = this.beatEscapeReport;
+    }
     if (this.beatTerminal === "crashed") {
       // Crash-fall: a heavy explosion at the UFO + hard camera kick.
       this.fireExplosion(this.ufoMarker.position, now);
@@ -3105,6 +3256,7 @@ export class GeoscapeView {
     this.beatIntDmg = 0;
     this.beatTerminal = null;
     this.beatRangeTarget = null;
+    this.beatEscapeReport = null;
     this.ufoMarker.scale.setScalar(1);
   }
 
@@ -3882,7 +4034,36 @@ export class GeoscapeView {
     ufoLabel.textContent = `${ufoInfo.label} · ${ufoInfo.threat} threat`;
     ufoBadge.append(ufoIcon, ufoLabel);
     card.append(badge, ufoBadge, title, status, meta);
+    // Speed matchup chip: for an airborne (tracked) contact, show how the fastest
+    // ready craft compares to the UFO. Colour is always paired with a text label
+    // (never conveyed by colour alone) and the raw speeds via uiFormat.
+    const speedChip = this.speedMatchupChip(contact);
+    if (speedChip) card.append(speedChip);
     return card;
+  }
+
+  /**
+   * The teal "SPEED ADVANTAGE" / steel "MATCHED" / amber "OUTRUN — cannot close"
+   * chip for a tracked contact, with the engaging craft's cruise vs the UFO's own
+   * speed. Null for a downed/landed contact (no chase to preview).
+   */
+  private speedMatchupChip(contact: UfoContact): HTMLElement | null {
+    const c = this.campaign;
+    if (!c || contact.status !== "tracked") return null;
+    const advantage: InterceptionSpeedAdvantage = interceptionSpeedAdvantage(c, contact);
+    const { craft, ufo } = this.engagementSpeeds(contact);
+    const chip = el("div", `geo-speed-chip ${advantage}`);
+    const label = el("span", "geo-speed-chip-label");
+    label.textContent =
+      advantage === "advantage"
+        ? "SPEED ADVANTAGE"
+        : advantage === "matched"
+          ? "MATCHED"
+          : "OUTRUN — CANNOT CLOSE";
+    const detail = el("span", "geo-speed-chip-detail");
+    detail.textContent = `Yours ${formatSpeed(craft)} vs UFO ${formatSpeed(ufo)}`;
+    chip.append(label, detail);
+    return chip;
   }
 
   /**

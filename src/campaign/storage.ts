@@ -117,16 +117,77 @@ export const STARTING_INTERCEPTOR: InterceptorState = {
  * Mirrors the original game's starting complement.
  */
 export const STARTING_FLEET: readonly Craft[] = [
-  { id: "int-1", kind: "interceptor", name: "Raptor-1", damage: 0, sorties: 0, fuel: 100, maxFuel: 100 },
-  { id: "int-2", kind: "interceptor", name: "Raptor-2", damage: 0, sorties: 0, fuel: 100, maxFuel: 100 },
-  { id: "sky-1", kind: "transport", name: "Skyranger", damage: 0, sorties: 0, fuel: 100, maxFuel: 100 },
+  { id: "int-1", kind: "interceptor", name: "Raptor-1", damage: 0, sorties: 0, fuel: 100, maxFuel: 100, speedDegPerHour: 0.9 },
+  { id: "int-2", kind: "interceptor", name: "Raptor-2", damage: 0, sorties: 0, fuel: 100, maxFuel: 100, speedDegPerHour: 0.9 },
+  { id: "sky-1", kind: "transport", name: "Skyranger", damage: 0, sorties: 0, fuel: 100, maxFuel: 100, speedDegPerHour: 0.7 },
 ];
 
 /** Craft id synthesized for the legacy single-interceptor field when no fleet exists. */
 export const LEGACY_CRAFT_ID = "int-legacy";
 
+/**
+ * Active-flight id conventions. A patrol id is `patrol:<craftId>:<contactId>` and a
+ * return-to-base leg is `return:<craftId>:<hour>`. They live here (beside the fleet
+ * logic) so the engaging-craft picker can tell a craft flying THIS contact's patrol
+ * apart from one merely returning home or patrolling a different contact.
+ */
+export const PATROL_ID_PREFIX = "patrol:";
+export const RETURN_ID_PREFIX = "return:";
+
+/** True when `flight` is the patrol pursuing the given contact (not a return leg / other patrol). */
+function isPatrolFlightForContact(flight: ActiveFlight, contactId: string | undefined): boolean {
+  return (
+    contactId !== undefined &&
+    flight.id.startsWith(PATROL_ID_PREFIX) &&
+    flight.id.endsWith(`:${contactId}`)
+  );
+}
+
 /** Damage fraction at or above which an interceptor is too banged up to be "ready". */
 const INTERCEPTOR_DAMAGE_MAX = 100;
+
+/**
+ * Cruise/pursuit speed (deg/hour) a craft with no explicit speedDegPerHour falls
+ * back to — the starting Raptor's cruise. Legacy saves and hand-built fixtures
+ * without the field behave as a starting interceptor.
+ */
+export const DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR = 0.9;
+/**
+ * Cruise speed (deg/hour) a TRANSPORT with no explicit speedDegPerHour falls back
+ * to — the starting Skyranger's cruise. A transport is slower than an interceptor,
+ * so the fallback must be kind-aware: a single interceptor default would make a
+ * legacy Skyranger's hangar speed chip read the wrong (faster) number.
+ */
+export const DEFAULT_TRANSPORT_SPEED_DEG_PER_HOUR = 0.7;
+/** Hull points an encounter craft fields when it has no explicit hullPoints. */
+export const DEFAULT_CRAFT_HULL_POINTS = 100;
+
+/**
+ * A craft's own cruise/pursuit speed (deg/hour). A missing value falls back to the
+ * starting cruise for the craft's KIND (transport 0.7, interceptor 0.9) so legacy
+ * craft and synthesized fleet rows report the same speed a fresh craft of that kind
+ * would, regardless of save vintage.
+ */
+export function craftSpeedDegPerHour(craft: Craft): number {
+  if (typeof craft.speedDegPerHour === "number" && craft.speedDegPerHour > 0) {
+    return craft.speedDegPerHour;
+  }
+  return craft.kind === "transport"
+    ? DEFAULT_TRANSPORT_SPEED_DEG_PER_HOUR
+    : DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR;
+}
+
+/** A craft's air-combat hull points, defaulting to DEFAULT_CRAFT_HULL_POINTS. */
+export function craftHullPoints(craft: Craft): number {
+  return typeof craft.hullPoints === "number" && craft.hullPoints > 0
+    ? craft.hullPoints
+    : DEFAULT_CRAFT_HULL_POINTS;
+}
+
+/** A craft's outgoing air-combat damage multiplier, defaulting to 1. */
+export function craftWeaponPower(craft: Craft): number {
+  return typeof craft.weaponPower === "number" && craft.weaponPower > 0 ? craft.weaponPower : 1;
+}
 
 /**
  * The effective fleet for interception purposes. A real `fleet` is used when present;
@@ -161,9 +222,32 @@ export function readyInterceptors(campaign: CampaignState): Craft[] {
   );
 }
 
-/** First ready interceptor — the craft that engages the next UFO. */
+/**
+ * The interceptor that engages the current UFO: the FASTEST ready craft that is
+ * actually available to this contact. A craft flying a RETURN leg home — or a patrol
+ * against a DIFFERENT contact — is committed elsewhere and excluded, so the engaging
+ * craft stays in lockstep with the one visibly flying the pursuit on the globe (the
+ * patrol layer's chooseIdleInterceptor). A craft idle in the hangar, or already
+ * flying THIS contact's patrol, is eligible. A manufactured advanced interceptor
+ * (Phantom) is thus scrambled ahead of a slower Raptor once it is in the hangar, but
+ * a Phantom that happens to be flying home is NOT mistaken for the engaging craft.
+ * Ties keep the earliest craft in fleet order (stable).
+ */
 export function chooseInterceptor(campaign: CampaignState): Craft | undefined {
-  return readyInterceptors(campaign)[0];
+  const flights = campaign.activeFlights ?? [];
+  const contactId = campaign.ufoContact?.id;
+  const committedElsewhere = new Set(
+    flights
+      .filter((flight) => !isPatrolFlightForContact(flight, contactId))
+      .map((flight) => flight.craftId),
+  );
+  const ready = readyInterceptors(campaign).filter((craft) => !committedElsewhere.has(craft.id));
+  if (ready.length === 0) return undefined;
+  let best = ready[0]!;
+  for (let i = 1; i < ready.length; i++) {
+    if (craftSpeedDegPerHour(ready[i]!) > craftSpeedDegPerHour(best)) best = ready[i]!;
+  }
+  return best;
 }
 
 /** The Skyranger transport craft, if the fleet has one. */
@@ -195,15 +279,13 @@ export function damageCraft(campaign: CampaignState, craftId: string, damage: nu
     if (idx === -1) return campaign;
     const craft = campaign.fleet[idx]!;
     const sorties = craft.sorties + 1;
+    // Spread the existing craft so per-craft stats (speed/hull/weaponPower) survive
+    // a sortie — rebuilding field-by-field would silently drop them (the field-list gotcha).
     const updated: Craft = {
-      id: craft.id,
-      kind: craft.kind,
-      name: craft.name,
+      ...craft,
       damage: totalDamage,
       sorties,
       repairedAtHour,
-      fuel: craft.fuel,
-      maxFuel: craft.maxFuel,
     };
     const fleet = [...campaign.fleet.slice(0, idx), updated, ...campaign.fleet.slice(idx + 1)];
     return {
@@ -239,15 +321,9 @@ export function repairFleet(campaign: CampaignState, currentHour?: number): Camp
         craft.repairedAtHour <= deadline
       ) {
         changed = true;
-        return {
-          id: craft.id,
-          kind: craft.kind,
-          name: craft.name,
-          damage: 0,
-          sorties: craft.sorties,
-          fuel: craft.fuel,
-          maxFuel: craft.maxFuel,
-        } satisfies Craft;
+        // Spread to preserve per-craft combat stats; clear damage + the repair window.
+        const { repairedAtHour: _repaired, ...rest } = craft;
+        return { ...rest, damage: 0 } satisfies Craft;
       }
       return craft;
     });
@@ -492,6 +568,12 @@ export const RESEARCH_COSTS: Record<ResearchId, CampaignResources> = {
     elerium: 12,
     alienData: 8,
   },
+  alienPropulsion: {
+    credits: 300,
+    alloys: 14,
+    elerium: 6,
+    alienData: 4,
+  },
   alienInterrogation: {
     credits: 200,
     alloys: 0,
@@ -537,6 +619,12 @@ export interface ResearchProject {
   revealsAlienHq?: boolean;
   /** When true, completing the project unlocks the final alien-base assault. */
   unlocksFinalAssault?: boolean;
+  /**
+   * A manufacturing project this research gates (via that project's
+   * `requiresResearch`). Set on tech that enables a buildable craft rather than
+   * squad gear, so it is exempt from the "declares a weapon/item unlock" rule.
+   */
+  unlocksManufacturing?: ManufacturingProjectId;
 }
 
 /**
@@ -548,9 +636,20 @@ export interface ResearchProject {
  * projects whose product has no such definition are intentionally omitted.
  * `quantity` lets a single run fabricate a batch (e.g. of grenades).
  */
+/** Spec for a craft a manufacturing project fabricates straight into the hangar fleet. */
+export interface ManufacturedCraftSpec {
+  kind: "interceptor";
+  name: string;
+  speedDegPerHour: number;
+  hullPoints: number;
+  weaponPower: number;
+  maxFuel: number;
+}
+
 export type ManufacturingProduct =
   | { kind: "weapon"; weaponId: CampaignWeaponId; quantity: number }
-  | { kind: "item"; itemId: string; quantity: number };
+  | { kind: "item"; itemId: string; quantity: number }
+  | { kind: "craft"; craft: ManufacturedCraftSpec; quantity: 1 };
 
 export interface ManufacturingProject {
   id: ManufacturingProjectId;
@@ -663,6 +762,18 @@ export const RESEARCH_PROJECTS: readonly ResearchProject[] = [
     cost: RESEARCH_COSTS.mindShield,
     requires: ["alienBiotech", "eleriumPowerSource"],
     unlocks: { items: ["smoke"] },
+  },
+  {
+    id: "alienPropulsion",
+    title: "Alien propulsion",
+    description:
+      "Reverse-engineer the recovered gravitic drive to power a next-generation interceptor that can run down the largest hulls.",
+    completedDescription:
+      "Gravitic drive schematics are ready — the Phantom advanced interceptor can now be fabricated in the workshop.",
+    durationHours: 32,
+    cost: RESEARCH_COSTS.alienPropulsion,
+    requires: ["alienBiotech"],
+    unlocksManufacturing: "phantom",
   },
   {
     id: "alienInterrogation",
@@ -787,6 +898,27 @@ export const MANUFACTURING_PROJECTS: readonly ManufacturingProject[] = [
     durationHours: 40,
     cost: { credits: 200, alloys: 12, elerium: 4, alienData: 2 },
     requiresResearch: "heavyPlasma",
+  },
+  {
+    id: "phantom",
+    product: {
+      kind: "craft",
+      quantity: 1,
+      craft: {
+        kind: "interceptor",
+        name: "Phantom",
+        speedDegPerHour: 1.6,
+        hullPoints: 140,
+        weaponPower: 1.5,
+        maxFuel: 120,
+      },
+    },
+    title: "Phantom interceptor",
+    description:
+      "Fabricate an elerium-driven advanced interceptor: fast enough to run down a battleship, tougher, and harder-hitting in the air.",
+    durationHours: 60,
+    cost: { credits: 900, alloys: 40, elerium: 20, alienData: 0 },
+    requiresResearch: "alienPropulsion",
   },
 ] as const;
 
@@ -1723,11 +1855,45 @@ export function manufacturingProject(id: ManufacturingProjectId): ManufacturingP
   return MANUFACTURING_PROJECTS.find((project) => project.id === id)!;
 }
 
-/** Deposits a fabricated product into the armory: weapons into `weapons`, items into `items`. */
+/** Total hangar berths across the base's built hangar facilities. */
+export function hangarSlots(campaign: CampaignState): number {
+  return summarizeBaseFacilities(constructedFacilities(campaign)).hangarSlots;
+}
+
+/** Free hangar berths = total slots minus the craft already parked in the fleet. */
+export function freeHangarSlots(campaign: CampaignState): number {
+  const used = (campaign.fleet ?? []).length;
+  return Math.max(0, hangarSlots(campaign) - used);
+}
+
+/**
+ * Deposits a fabricated product into the armory: weapons into `weapons`, items
+ * into `items`. Craft products are NOT armory gear — they join the fleet in
+ * {@link completeFinishedManufacturing} — so this leaves the armory untouched.
+ */
 function addManufacturingProduct(armory: CampaignArmory, product: ManufacturingProduct): CampaignArmory {
-  return product.kind === "weapon"
-    ? addWeapon(armory, product.weaponId, product.quantity)
-    : addItemStock(armory, product.itemId, product.quantity);
+  if (product.kind === "weapon") return addWeapon(armory, product.weaponId, product.quantity);
+  if (product.kind === "item") return addItemStock(armory, product.itemId, product.quantity);
+  return armory;
+}
+
+/** Appends a freshly-fabricated craft to the fleet with a deterministic unique id. */
+function addManufacturedCraft(campaign: CampaignState, spec: ManufacturedCraftSpec): CampaignState {
+  const fleet = campaign.fleet ?? [];
+  const serial = fleet.filter((craft) => craft.id.startsWith(`${spec.name.toLowerCase()}-`)).length + 1;
+  const built: Craft = {
+    id: `${spec.name.toLowerCase()}-${serial}`,
+    kind: spec.kind,
+    name: spec.name,
+    damage: 0,
+    sorties: 0,
+    fuel: spec.maxFuel,
+    maxFuel: spec.maxFuel,
+    speedDegPerHour: spec.speedDegPerHour,
+    hullPoints: spec.hullPoints,
+    weaponPower: spec.weaponPower,
+  };
+  return { ...campaign, fleet: [...fleet, built] };
 }
 
 export function manufacturingDuration(campaign: CampaignState, id: ManufacturingProjectId): number {
@@ -1748,6 +1914,8 @@ export function manufacturingCost(campaign: CampaignState, id: ManufacturingProj
 
 export function canStartManufacturing(campaign: CampaignState, id: ManufacturingProjectId): boolean {
   const project = manufacturingProject(id);
+  // A craft product needs a free hangar berth to receive the finished aircraft.
+  if (project.product.kind === "craft" && freeHangarSlots(campaign) < 1) return false;
   return (
     campaign.strategic.status === "active" &&
     !campaign.activeManufacturing &&
@@ -1773,11 +1941,15 @@ export function completeFinishedManufacturing(campaign: CampaignState): Campaign
   const active = campaign.activeManufacturing;
   if (!active || campaign.clock.elapsedHours < active.completesAtHour) return campaign;
   const project = manufacturingProject(active.projectId);
-  return addProjectReport({
-    ...campaign,
-    activeManufacturing: undefined,
-    armory: addManufacturingProduct(campaign.armory, project.product),
-  }, manufacturingReport(project, campaign.clock.elapsedHours));
+  const delivered =
+    project.product.kind === "craft"
+      ? addManufacturedCraft({ ...campaign, activeManufacturing: undefined }, project.product.craft)
+      : {
+          ...campaign,
+          activeManufacturing: undefined,
+          armory: addManufacturingProduct(campaign.armory, project.product),
+        };
+  return addProjectReport(delivered, manufacturingReport(project, campaign.clock.elapsedHours));
 }
 
 function addProjectReport(campaign: CampaignState, report: ProjectReport): CampaignState {
@@ -1799,6 +1971,15 @@ function constructionReport(facility: BaseFacility, completedAtHour: number): Pr
 
 function manufacturingReport(project: ManufacturingProject, completedAtHour: number): ProjectReport {
   const { product } = project;
+  if (product.kind === "craft") {
+    return {
+      kind: "manufacturing",
+      id: project.id,
+      title: `${project.title} complete`,
+      summary: `Workshop rolled out one ${product.craft.name} interceptor into the hangar.`,
+      completedAtHour,
+    };
+  }
   const delivered =
     product.quantity === 1
       ? `one ${project.title.toLowerCase()}`
@@ -2879,9 +3060,23 @@ function normalizeCraft(value: unknown, clock: CampaignClock): Craft | undefined
     typeof maybe.fuel === "number" && Number.isFinite(maybe.fuel)
       ? Math.max(0, Math.min(maxFuel, maybe.fuel))
       : maxFuel;
+  // Combat/pursuit stats are optional; a missing value falls back to the craft-stat
+  // defaults (craftSpeedDegPerHour / craftHullPoints / craftWeaponPower) at read time,
+  // so legacy craft keep working. Persist any explicit value so advanced craft survive reload.
+  const speedDegPerHour =
+    typeof maybe.speedDegPerHour === "number" && maybe.speedDegPerHour > 0 ? maybe.speedDegPerHour : undefined;
+  const hullPoints =
+    typeof maybe.hullPoints === "number" && maybe.hullPoints > 0 ? Math.floor(maybe.hullPoints) : undefined;
+  const weaponPower =
+    typeof maybe.weaponPower === "number" && maybe.weaponPower > 0 ? maybe.weaponPower : undefined;
+  const combatStats = {
+    ...(speedDegPerHour !== undefined ? { speedDegPerHour } : {}),
+    ...(hullPoints !== undefined ? { hullPoints } : {}),
+    ...(weaponPower !== undefined ? { weaponPower } : {}),
+  };
   // A repair whose scheduled time has already passed is treated as complete.
   if (repairedAtHour !== undefined && repairedAtHour <= clock.elapsedHours) {
-    return { id: maybe.id, kind: maybe.kind, name: maybe.name, damage: 0, sorties, fuel, maxFuel };
+    return { id: maybe.id, kind: maybe.kind, name: maybe.name, damage: 0, sorties, fuel, maxFuel, ...combatStats };
   }
   return {
     id: maybe.id,
@@ -2891,6 +3086,7 @@ function normalizeCraft(value: unknown, clock: CampaignClock): Craft | undefined
     sorties,
     fuel,
     maxFuel,
+    ...combatStats,
     ...(repairedAtHour !== undefined ? { repairedAtHour } : {}),
   };
 }
@@ -2965,7 +3161,12 @@ function normalizeUfoContact(value: unknown, clock: CampaignClock): UfoContact |
       typeof maybe.interceptorDamage === "number" ? Math.max(0, Math.floor(maybe.interceptorDamage)) : undefined,
     // Tracked-UFO flight vector + ocean flag are optional; default to undefined on load.
     heading: typeof maybe.heading === "number" ? maybe.heading : undefined,
-    speed: typeof maybe.speed === "number" ? maybe.speed : undefined,
+    // `speed` is a denormalized copy of the ufoType's profile cruise (UFO_TYPE_PROFILES);
+    // ufoType is the source of truth. We deliberately do NOT rehydrate a persisted speed:
+    // a save written under a previous speed tune would otherwise keep a stale value that
+    // inverts the air war (a legacy scout classified "outrun", a battleship "advantage").
+    // Consumers derive the current speed from ufoType (contactSpeedDegPerHour), so a
+    // reloaded contact always cruises/classifies against the live profile.
     overOcean: typeof maybe.overOcean === "boolean" ? maybe.overOcean : undefined,
   };
 }
