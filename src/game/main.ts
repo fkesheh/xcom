@@ -440,14 +440,25 @@ function buildGeoscapeCallbacks(campaign: CampaignState | null) {
       if (!currentCampaign) return;
       currentCampaign = startInterceptionEncounter(currentCampaign);
       debouncedSave(currentCampaign);
-      // startInterceptionEncounter no-ops (leaves `interception` unset) unless the
-      // contact is a tracked crashSite with a ready interceptor; in that case stay
-      // on the globe. Otherwise hand the live encounter to the dogfight screen.
-      if (!currentCampaign.interception) {
-        geoscape?.update(currentCampaign);
-        return;
-      }
-      void mountPlaneCombat(currentCampaign);
+      // The interception now plays as THEATER on the geoscape itself: the interceptor
+      // flies the great-circle out to the UFO, the dogfight beats animate over the
+      // globe, and the encounter resolves in place. startInterceptionEncounter no-ops
+      // (leaves `interception` unset) unless the contact is a tracked crashSite with a
+      // ready interceptor; either way we refresh the geoscape rather than switching
+      // screens (no more instant snap to a separate dogfight view).
+      geoscape?.update(currentCampaign);
+    },
+    onInterceptionAction: (action: InterceptionAction) => {
+      // Applied only AFTER the geoscape's combat beat has played (precompute ->
+      // animate -> reveal). executeInterceptionAction is pure + deterministic, so
+      // this reproduces exactly the outcome the beat previewed.
+      if (!currentCampaign) return;
+      currentCampaign = executeInterceptionAction(currentCampaign, action);
+      debouncedSave(currentCampaign);
+      geoscape?.update(currentCampaign);
+    },
+    onInterceptorSfx: (kind: "launch" | "cannon" | "bolt" | "explosion") => {
+      sfx.interception(kind);
     },
     onLaunchAssault: () => {
       // Final decapitating strike on the revealed alien HQ. Build the assault

@@ -11,14 +11,17 @@ export default defineConfig({
   testMatch: ["**/*.spec.ts"],
   fullyParallel: false,
   workers: 1,
-  retries: 0,
+  // One retry: headless SwiftShader renders these 3D scenes at ~2fps (61fps on
+  // real GPU), so heavy capture specs are environment-sensitive — a retry
+  // absorbs load/thermal hiccups while real regressions still fail twice.
+  retries: 1,
   timeout: 120_000,
   expect: { timeout: 10_000 },
   use: {
     baseURL: "http://localhost:4178",
     headless: true,
     viewport: { width: 1440, height: 900 },
-    actionTimeout: 15_000,
+    actionTimeout: 30_000,
     navigationTimeout: 30_000,
   },
   webServer: {

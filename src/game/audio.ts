@@ -246,6 +246,48 @@ export class Sfx {
     });
   }
 
+  /**
+   * Geoscape interception beats. launch = interceptor scramble whoosh; cannon =
+   * the interceptor's teal tracer volley; bolt = the UFO's red return-fire zap;
+   * explosion delegates to the shared detonation cue for the kill.
+   */
+  interception(kind: "launch" | "cannon" | "bolt" | "explosion"): void {
+    if (kind === "explosion") {
+      this.explosion();
+      return;
+    }
+    this.play((ctx, out) => {
+      if (kind === "launch") {
+        // Rising jet scramble: swept noise + a climbing body tone.
+        this.noiseBurst(ctx, out, {
+          filterType: "bandpass",
+          f0: 500,
+          f1: 2600,
+          q: 0.7,
+          dur: 0.45,
+          peak: 0.34,
+          attack: 0.05,
+        });
+        this.tone(ctx, out, { type: "triangle", f0: 180, f1: 440, dur: 0.4, peak: 0.28 });
+      } else if (kind === "cannon") {
+        // Interceptor autocannon: a short bright metallic burst.
+        this.noiseBurst(ctx, out, { filterType: "highpass", f0: 2000, q: 0.7, dur: 0.08, peak: 0.6, attack: 0.001 });
+        this.tone(ctx, out, { type: "square", f0: 520, f1: 180, dur: 0.09, peak: 0.3 });
+      } else {
+        // UFO return bolt: a descending sci-fi plasma zap (alien colour).
+        this.tone(ctx, out, {
+          type: "sawtooth",
+          f0: 1300,
+          f1: 220,
+          dur: 0.22,
+          peak: 0.5,
+          filter: { type: "lowpass", f0: 2800, f1: 600, q: 6 },
+        });
+        this.tone(ctx, out, { type: "square", f0: 620, f1: 140, dur: 0.18, peak: 0.2 });
+      }
+    });
+  }
+
   /** Medkit use: a soft two-step rising chime (positive healing cue). */
   heal(): void {
     this.play((ctx, out) => {

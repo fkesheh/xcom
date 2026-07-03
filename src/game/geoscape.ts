@@ -40,12 +40,14 @@ import type {
   BaseLocation,
   CampaignState,
   DifficultyLevel,
+  InterceptionEncounter,
   MissionType,
   UfoContact,
   UfoType,
 } from "../campaign/types";
 import {
   canLaunchInterceptor,
+  executeInterceptionAction,
   formatCampaignClock,
   GEOSCAPE_SCAN_HOURS,
   type InterceptionAction,
@@ -81,6 +83,8 @@ interface GeoscapeOptions {
   onResetCampaign: () => void;
   /** Fires for each Close / Attack / Disengage choice during an active interception encounter. */
   onInterceptionAction?: (action: InterceptionAction) => void;
+  /** Presentation-only SFX cue during the geoscape interception beats. */
+  onInterceptorSfx?: (kind: "launch" | "cannon" | "bolt" | "explosion") => void;
   /** Designate a new radar base on the globe (multi-base campaign). */
   onBuildNewBase?: (location: BaseLocation) => void;
   /** Launch the endgame final assault on the revealed alien HQ. */
@@ -122,10 +126,39 @@ const UP = new Vector3(0, 1, 0);
 const ENCOUNTER_START_RANGE = 3;
 /** Sampling resolution of the base->UFO great-circle trajectory line. */
 const TRAJECTORY_SEGMENTS = 24;
-/** Duration of the interceptor's base->UFO launch flight, in milliseconds. */
-const INTERCEPTOR_FLIGHT_MS = 1300;
+/**
+ * Launch fly-out pacing. The duration derives from the REAL great-circle distance
+ * base->UFO (radians) scaled by FLYOUT_MS_PER_RAD, clamped to [MIN,MAX] so a
+ * near contact still reads as a proper fly-out (~4s) and a globe-spanning one
+ * never drags (~8s). Replaces the old hardcoded 1.3s snap that made the
+ * interceptor appear "instantly close to the ufo".
+ */
+const FLYOUT_MS_PER_RAD = 3200;
+const FLYOUT_MIN_MS = 4000;
+const FLYOUT_MAX_MS = 8000;
 /** Arc fraction the launch flight covers; the remaining slice is range-driven closing. */
-const INTERCEPTOR_FLIGHT_END = 0.75;
+const INTERCEPTOR_FLIGHT_END = 0.82;
+/** Combat exchange beat: precompute the outcome, play the volley, THEN reveal it. */
+const EXCHANGE_BEAT_MS = 2100;
+/** Delay from the interceptor volley to the UFO's return bolt within one exchange. */
+const RETURN_BOLT_DELAY_MS = 640;
+/** Close-in beat: eases the marker to the new range band before applying. */
+const CLOSE_BEAT_MS = 1000;
+/** Disengage beat: brief break-off before the UFO returns to tracked. */
+const DISENGAGE_BEAT_MS = 750;
+/** Resolution beat (UFO crash-fall / escape streak) before the overlay updates. */
+const RESOLUTION_BEAT_MS = 1500;
+/** Per-frame ease factor pulling the displayed engagement range toward its target. */
+const RANGE_EASE = 0.1;
+/** Pursuit drift: the tracked UFO keeps flying during the fly-out (presentation-only,
+ *  never written to campaign state) so the interceptor visibly curves after it. */
+const PURSUIT_DRIFT_RAD_PER_SEC = 0.02;
+const PURSUIT_MAX_DRIFT_RAD = 0.14;
+/** Weight of the interceptor position blended into the orbit target while engaging
+ *  (0 = globe-centered, 1 = fully chase the craft). Gentle so the globe stays read. */
+const CHASE_TARGET_WEIGHT = 0.22;
+/** Per-frame ease factor pulling the orbit target toward its chase goal. */
+const CHASE_EASE = 0.05;
 /** Skyranger transport flight (base -> mission site) on mission launch, in milliseconds. */
 const DEPLOYMENT_FLIGHT_MS = 2800;
 /** Sampling resolution of the base->site Skyranger trajectory line. */
@@ -955,6 +988,49 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   transition: opacity .12s ease;
 }
 #geoscape .geo-threat-flash.active { opacity: 1; transition: opacity .05s ease; }
+/* On-globe interception HUD: a compact, non-blocking panel pinned bottom-centre so
+   the dogfight over the globe stays fully visible behind it. */
+#geoscape .geo-intercept {
+  position: absolute;
+  left: 50%;
+  bottom: calc(96px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  width: min(560px, calc(100vw - 32px));
+  padding: var(--ui-sp-3) var(--ui-sp-4);
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-panel-solid);
+  box-shadow: var(--ui-shadow);
+  pointer-events: auto;
+  animation: geo-intercept-in .18s var(--ui-ease) both;
+}
+@keyframes geo-intercept-in {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+#geoscape .geo-intercept-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 4px;
+}
+#geoscape .geo-intercept-title {
+  color: var(--ui-text); font: 800 var(--ui-text-sm)/1 var(--ui-font-mono);
+  letter-spacing: .06em; text-transform: uppercase;
+}
+#geoscape .geo-intercept-range {
+  color: var(--ui-cyan); font: 700 var(--ui-text-xs)/1 var(--ui-font-mono);
+  letter-spacing: .1em; text-transform: uppercase; white-space: nowrap;
+}
+#geoscape .geo-intercept .geo-bars { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 6px 0 0; }
+#geoscape .geo-intercept .geo-bar-label span:last-child { text-transform: none; letter-spacing: 0; color: var(--ui-text); }
+#geoscape .geo-intercept-log {
+  min-height: 1.35em; margin: 8px 0 0; color: var(--ui-muted);
+  font: 500 var(--ui-text-xs)/1.4 var(--ui-font-mono);
+}
+#geoscape .geo-intercept-actions { display: flex; gap: 8px; margin-top: 10px; }
+#geoscape .geo-intercept-actions button { flex: 1; }
+#geoscape .geo-intercept-actions button:disabled { opacity: .4; cursor: default; }
+@media (prefers-reduced-motion: reduce) {
+  #geoscape .geo-intercept { animation: none; }
+}
 @media (max-width: 820px) {
   #geoscape .geo-panel { width: calc(100vw - 24px); padding: var(--ui-sp-3); }
   #geoscape .geo-left { left: 12px; right: 12px; }
@@ -1076,6 +1152,11 @@ function slerpUnit(a: Vector3, b: Vector3, t: number, out: Vector3): void {
   const w0 = Math.sin((1 - t) * angle) / sinAngle;
   const w1 = Math.sin(t * angle) / sinAngle;
   out.set(a.x * w0 + b.x * w1, a.y * w0 + b.y * w1, a.z * w0 + b.z * w1);
+}
+
+/** Smooth acceleration/deceleration curve for the launch fly-out (0..1 -> 0..1). */
+function easeInOutCubic(t: number): number {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
 
 /** Snapshot of the notable event fields; the clock is intentionally excluded. */
@@ -1282,6 +1363,35 @@ export class GeoscapeView {
   private readonly sunLight = new DirectionalLight(0xffffff, 2.6);
   /** Timestamp (ms) the current interception launch flight began; drives the base->UFO fly-out. */
   private interceptorFlightStartMs = 0;
+  /** Fly-out duration (ms) for the current engagement, derived from base->UFO distance. */
+  private interceptorFlightDurationMs = FLYOUT_MIN_MS;
+  /** Original UFO direction captured at engagement start (drift pivots off this). */
+  private readonly ufoN0 = new Vector3();
+  /** Axis the UFO's presentation drift rotates about (perp to ufoN0, along its heading). */
+  private readonly pursuitAxis = new Vector3(1, 0, 0);
+  /** Eased engagement range that drives the interceptor's closing arc (smooth, not snapped). */
+  private displayRange = ENCOUNTER_START_RANGE;
+  /** Eased OrbitControls target so the camera gently tracks the interceptor while engaging. */
+  private readonly chaseTarget = new Vector3();
+
+  // --- Interception combat beats (precompute -> animate -> reveal) ---
+  private beatActive = false;
+  private beatKind: "exchange" | "close" | "disengage" | "resolution" = "exchange";
+  private beatAction: InterceptionAction = "attack";
+  private beatStartMs = 0;
+  private beatReturnFired = false;
+  private beatUfoReturns = false;
+  private beatIntDmg = 0;
+  private beatTerminal: null | "crashed" | "escaped" = null;
+  private beatRangeTarget: number | null = null;
+  private interceptOverlayEl: HTMLDivElement | null = null;
+  private interceptButtons: HTMLButtonElement[] = [];
+  private ufoHpFill: HTMLDivElement | null = null;
+  private interceptorHpFill: HTMLDivElement | null = null;
+  private ufoHpVal: HTMLSpanElement | null = null;
+  private interceptorHpVal: HTMLSpanElement | null = null;
+  private interceptRangeLabel: HTMLSpanElement | null = null;
+  private interceptLogLine: HTMLDivElement | null = null;
   /** Last-refresh engagement state; a false->true transition kicks off the launch flight. */
   private wasEngaging = false;
   private toastTimer: number | undefined;
@@ -1322,6 +1432,10 @@ export class GeoscapeView {
 
   // --- Interception combat FX (allocated once in buildCombatFx, reused per hit) ---
   private tracerLineFx!: Line;
+  /** UFO return-fire bolt (red, ufo->interceptor); paired with tracerLineFx (teal). */
+  private ufoBoltLineFx!: Line;
+  private ufoBoltStartMs = 0;
+  private ufoBoltActive = false;
   private muzzleFlash!: Mesh;
   private ufoBurst!: Points;
   private interceptorBurst!: Points;
@@ -2250,12 +2364,28 @@ export class GeoscapeView {
   }
 
   private refreshOverlay(): void {
-    const overlay = this.deploying
-      ? this.buildDeploymentOverlay()
-      : this.deployArrived
-        ? this.buildDeployChoiceOverlay()
-        : null;
-    this.overlaySlot.replaceChildren(...(overlay ? [overlay] : []));
+    if (this.deploying) {
+      this.overlaySlot.replaceChildren(this.buildDeploymentOverlay());
+      return;
+    }
+    if (this.deployArrived) {
+      this.overlaySlot.replaceChildren(this.buildDeployChoiceOverlay());
+      return;
+    }
+    if (this.isEngaging()) {
+      // Keep the live panel (with its button + beat state) mounted while a beat
+      // plays; only sync the numbers. Rebuild otherwise (engagement start / after
+      // a beat finalizes with fresh HP).
+      if (this.beatActive && this.interceptOverlayEl) {
+        this.syncInterceptionOverlay();
+        return;
+      }
+      this.overlaySlot.replaceChildren(this.buildInterceptionOverlay());
+      return;
+    }
+    this.interceptOverlayEl = null;
+    this.interceptButtons = [];
+    this.overlaySlot.replaceChildren();
   }
 
   /** Reposition the base + UFO markers; rebuild the UFO marker when its mission type changes. */
@@ -2551,9 +2681,13 @@ export class GeoscapeView {
     const engaging = this.isEngaging();
     // A fresh engagement kicks off the launch flight (reset its clock); the frame
     // loop then flies the craft from base toward the UFO before range closing begins.
-    if (engaging && !this.wasEngaging) {
+    const fresh = engaging && !this.wasEngaging;
+    if (fresh) {
       this.interceptorFlightStartMs = performance.now();
       this.resetContrails();
+      this.resetBeatState();
+      this.displayRange = c?.interception?.range ?? ENCOUNTER_START_RANGE;
+      this.opts.onInterceptorSfx?.("launch");
     }
     this.wasEngaging = engaging;
     if (!engaging || !c?.ufoContact || !c.base) {
@@ -2565,10 +2699,49 @@ export class GeoscapeView {
     const contact = c.ufoContact;
     const baseN = latLonToVector(c.base.lat, c.base.lon, 1).normalize();
     const ufoN = latLonToVector(contact.lat, contact.lon, 1).normalize();
-    this.interceptorRoute = { baseN, ufoN, contactId: contact.id };
-    this.fillTrajectory(baseN, ufoN);
+    // Preserve the drifted route target across in-engagement refreshes so the UFO's
+    // presentation pursuit motion isn't snapped back by a mid-flight re-render.
+    if (this.interceptorRoute && this.interceptorRoute.contactId === contact.id && !fresh) {
+      this.interceptorRoute.baseN.copy(baseN);
+    } else {
+      this.interceptorRoute = { baseN, ufoN: ufoN.clone(), contactId: contact.id };
+    }
+    if (fresh) {
+      // Derive the fly-out duration from the true great-circle distance, and seed the
+      // presentation-drift pivot: rotate ufoN0 about pursuitAxis to sweep it along
+      // the contact's heading so the interceptor curves after a moving target.
+      const angle = baseN.angleTo(ufoN);
+      this.interceptorFlightDurationMs = Math.min(
+        FLYOUT_MAX_MS,
+        Math.max(FLYOUT_MIN_MS, angle * FLYOUT_MS_PER_RAD),
+      );
+      this.ufoN0.copy(ufoN);
+      this.computePursuitAxis(contact, ufoN);
+    }
+    this.fillTrajectory(this.interceptorRoute.baseN, this.interceptorRoute.ufoN);
     this.interceptorMarker.visible = true;
     this.trajectoryLine.visible = true;
+  }
+
+  /**
+   * Axis about which the UFO's presentation drift rotates: perpendicular to ufoN
+   * and aligned with the contact's compass heading (north/east tangent basis), so
+   * the drifted point sweeps the direction the UFO is actually flying.
+   */
+  private computePursuitAxis(contact: UfoContact, ufoN: Vector3): void {
+    const headingRad = ((contact.heading ?? 0) * Math.PI) / 180;
+    // Local east/north tangents at the UFO's position.
+    const north = this.scratchA.set(0, 1, 0).addScaledVector(ufoN, -ufoN.y).normalize();
+    const east = this.scratchB.copy(north).cross(ufoN).normalize();
+    // Travel tangent = sin(heading)*east + cos(heading)*north (compass bearing).
+    const tangent = this.scratchC
+      .copy(east)
+      .multiplyScalar(Math.sin(headingRad))
+      .addScaledVector(north, Math.cos(headingRad));
+    if (tangent.lengthSq() < 1e-8) tangent.set(1, 0, 0);
+    // Rotating ufoN about (ufoN × tangent) moves it along the tangent (heading).
+    this.pursuitAxis.copy(ufoN).cross(tangent).normalize();
+    if (this.pursuitAxis.lengthSq() < 1e-8) this.pursuitAxis.set(1, 0, 0);
   }
 
   private fillTrajectory(baseN: Vector3, ufoN: Vector3): void {
@@ -2647,12 +2820,14 @@ export class GeoscapeView {
     const route = this.interceptorRoute;
     const encounter = this.campaign?.interception;
     if (!this.interceptorMarker.visible || !route || !encounter) return;
-    // Launch flight (base -> engagement range) over ~1.3s, then hand off to the
-    // range-driven closing slice so the player sees the craft fly out to the UFO.
-    const flightT = Math.min(1, Math.max(0, (now - this.interceptorFlightStartMs) / INTERCEPTOR_FLIGHT_MS));
+    // Launch flight (base -> engagement range) over a distance-derived duration
+    // (4-8s), eased so the player watches the craft fly the whole great-circle out
+    // to the UFO; then hand off to the (smoothly eased) range-driven closing slice.
+    const dur = this.interceptorFlightDurationMs || FLYOUT_MIN_MS;
+    const flightT = Math.min(1, Math.max(0, (now - this.interceptorFlightStartMs) / dur));
     const rangeArc =
-      INTERCEPTOR_FLIGHT_END + (1 - encounter.range / ENCOUNTER_START_RANGE) * (1 - INTERCEPTOR_FLIGHT_END);
-    const progress = flightT < 1 ? flightT * INTERCEPTOR_FLIGHT_END : Math.min(1, rangeArc);
+      INTERCEPTOR_FLIGHT_END + (1 - this.displayRange / ENCOUNTER_START_RANGE) * (1 - INTERCEPTOR_FLIGHT_END);
+    const progress = flightT < 1 ? easeInOutCubic(flightT) * INTERCEPTOR_FLIGHT_END : Math.min(1, rangeArc);
     slerpUnit(route.baseN, route.ufoN, progress, this.scratchA); // unit direction at the craft
     this.scratchA.normalize().multiplyScalar(EARTH_RADIUS + 0.14);
     this.interceptorMarker.position.copy(this.scratchA);
@@ -2669,6 +2844,268 @@ export class GeoscapeView {
     );
     this.interceptorMarker.quaternion.setFromRotationMatrix(this.scratchBasis);
     this.interceptorMarker.scale.setScalar(1 + (this.reducedMotion ? 0 : Math.sin(now * 0.012) * 0.18));
+  }
+
+  /**
+   * Presentation pursuit: the tracked UFO keeps flying while the interceptor closes,
+   * so the chase reads as a curve, not a teleport. The drift is purely visual — it
+   * rotates the ROUTE target (and repositions the UFO marker) about the heading axis
+   * and is NEVER written back to campaign state. Frozen during a combat beat (so the
+   * exchange is stable) and once the interceptor has arrived; skipped on reducedMotion.
+   */
+  private applyPursuitDrift(now: number): void {
+    if (this.reducedMotion || this.beatActive) return;
+    const route = this.interceptorRoute;
+    if (!route || !this.isEngaging()) return;
+    const dur = this.interceptorFlightDurationMs || FLYOUT_MIN_MS;
+    const flightT = (now - this.interceptorFlightStartMs) / dur;
+    if (flightT >= 1) return; // stop drifting once the interceptor has closed
+    const elapsedSec = (now - this.interceptorFlightStartMs) / 1000;
+    const driftAngle = Math.min(PURSUIT_MAX_DRIFT_RAD, elapsedSec * PURSUIT_DRIFT_RAD_PER_SEC);
+    this.scratchA.copy(this.ufoN0).applyAxisAngle(this.pursuitAxis, driftAngle).normalize();
+    route.ufoN.copy(this.scratchA);
+    // Reposition + reorient the UFO marker at the drifted point (marker radius).
+    this.ufoMarker.position.copy(this.scratchA).multiplyScalar(EARTH_RADIUS + 0.13);
+    this.ufoMarker.quaternion.setFromUnitVectors(UP, this.scratchA);
+    this.fillTrajectory(route.baseN, route.ufoN); // the pursuit line curves with the target
+  }
+
+  /**
+   * Gently ease the OrbitControls target from the globe centre toward the
+   * interceptor while engaging, so the camera tracks the fly-out; ease it back to
+   * the centre otherwise. Subtle (CHASE_TARGET_WEIGHT) so the globe stays readable;
+   * static under reducedMotion.
+   */
+  private updateChaseCamera(): void {
+    if (this.reducedMotion) return;
+    if (this.isEngaging() && this.interceptorMarker.visible) {
+      this.interceptorMarker.getWorldPosition(this.scratchA);
+      this.chaseTarget.copy(this.scratchA).multiplyScalar(CHASE_TARGET_WEIGHT);
+    } else {
+      this.chaseTarget.set(0, 0, 0);
+    }
+    this.controls.target.lerp(this.chaseTarget, CHASE_EASE);
+  }
+
+  /**
+   * Build the on-globe interception HUD panel (bottom-centre, non-blocking so the
+   * dogfight stays visible). Holds both HP bars, the range/log readout, and the
+   * Close/Attack/Disengage actions. Actions do NOT apply instantly — each starts a
+   * combat beat (see onInterceptClick) that plays before the result is revealed.
+   */
+  private buildInterceptionOverlay(): HTMLElement {
+    const contact = this.campaign?.ufoContact;
+    const panel = el("div", "geo-intercept");
+    const head = el("div", "geo-intercept-head");
+    const title = el("div", "geo-intercept-title");
+    title.textContent = `Intercept — ${ufoTypeInfo(contact?.ufoType).label}`;
+    const range = el("span", "geo-intercept-range");
+    this.interceptRangeLabel = range;
+    head.append(title, range);
+
+    const bars = el("div", "geo-bars");
+    bars.append(this.buildHpBar("interceptor", "Interceptor"), this.buildHpBar("ufo", "UFO"));
+
+    const log = el("div", "geo-intercept-log");
+    this.interceptLogLine = log;
+
+    const actions = el("div", "geo-intercept-actions");
+    const close = el("button", "ui-btn");
+    close.type = "button";
+    close.textContent = "Close in";
+    close.title = "Drop the range one band — closing raises both sides' hit odds and damage.";
+    const attack = el("button", "ui-btn ui-btn--danger");
+    attack.type = "button";
+    attack.textContent = "Attack";
+    attack.title = "Exchange fire at the current range: your volley hits the UFO, then it shoots back.";
+    const disengage = el("button", "ui-btn");
+    disengage.type = "button";
+    disengage.textContent = "Disengage";
+    disengage.title = "Break off the chase and send the interceptor home, leaving the UFO tracked.";
+    close.addEventListener("click", () => this.onInterceptClick("close"));
+    attack.addEventListener("click", () => this.onInterceptClick("attack"));
+    disengage.addEventListener("click", () => this.onInterceptClick("disengage"));
+    actions.append(close, attack, disengage);
+    this.interceptButtons = [close, attack, disengage];
+
+    panel.append(head, bars, log, actions);
+    this.interceptOverlayEl = panel;
+    this.syncInterceptionOverlay();
+    return panel;
+  }
+
+  private buildHpBar(kind: "ufo" | "interceptor", label: string): HTMLElement {
+    const bar = el("div", "geo-bar");
+    const lab = el("div", "geo-bar-label");
+    const name = el("span");
+    name.textContent = label;
+    const val = el("span");
+    const track = el("div", "geo-bar-track");
+    const fill = el("div", `geo-bar-fill ${kind}`);
+    track.append(fill);
+    lab.append(name, val);
+    bar.append(lab, track);
+    if (kind === "ufo") {
+      this.ufoHpFill = fill;
+      this.ufoHpVal = val;
+    } else {
+      this.interceptorHpFill = fill;
+      this.interceptorHpVal = val;
+    }
+    return bar;
+  }
+
+  /** Push the current (already-applied) encounter numbers into the overlay DOM. */
+  private syncInterceptionOverlay(): void {
+    const enc = this.campaign?.interception;
+    if (!enc || !this.interceptOverlayEl) return;
+    const ufoPct = Math.max(0, Math.min(100, (enc.ufoHp / enc.ufoHpMax) * 100));
+    const intPct = Math.max(0, Math.min(100, (enc.interceptorHp / enc.interceptorHpMax) * 100));
+    if (this.ufoHpFill) this.ufoHpFill.style.width = `${ufoPct}%`;
+    if (this.interceptorHpFill) this.interceptorHpFill.style.width = `${intPct}%`;
+    if (this.ufoHpVal) this.ufoHpVal.textContent = `${Math.round(enc.ufoHp)}/${enc.ufoHpMax}`;
+    if (this.interceptorHpVal) this.interceptorHpVal.textContent = `${Math.round(enc.interceptorHp)}/${enc.interceptorHpMax}`;
+    if (this.interceptRangeLabel) this.interceptRangeLabel.textContent = `Range ${enc.range}`;
+    if (this.interceptLogLine) this.interceptLogLine.textContent = enc.log[enc.log.length - 1] ?? "";
+  }
+
+  private setInterceptButtonsDisabled(disabled: boolean): void {
+    for (const btn of this.interceptButtons) btn.disabled = disabled;
+  }
+
+  /**
+   * A player action: precompute the deterministic outcome (visual-only — NOT
+   * applied), then start the matching combat beat. The real state change is applied
+   * (via onInterceptionAction) only when the beat finishes, so the result is
+   * revealed AFTER the animation instead of snapping instantly. Guarded + buttons
+   * disabled so rapid clicks can't overlap beats.
+   */
+  private onInterceptClick(action: InterceptionAction): void {
+    if (this.beatActive || !this.isEngaging()) return;
+    const enc = this.campaign?.interception;
+    const campaign = this.campaign;
+    if (!enc || !campaign) return;
+    // Deterministic preview: executeInterceptionAction is pure, so recomputing it
+    // here (for FX deltas) yields exactly what main will apply on finalize.
+    const next = executeInterceptionAction(campaign, action);
+    this.beginBeat(action, enc, next);
+  }
+
+  private beginBeat(action: InterceptionAction, enc: InterceptionEncounter, next: CampaignState): void {
+    this.beatActive = true;
+    this.beatAction = action;
+    this.beatStartMs = performance.now();
+    this.beatReturnFired = false;
+    this.beatRangeTarget = null;
+    this.beatTerminal = null;
+    this.setInterceptButtonsDisabled(true);
+    const nextEnc = next.interception;
+    const resolved = nextEnc === undefined && action !== "disengage";
+
+    if (action === "attack") {
+      this.beatKind = "exchange";
+      const ufoDmg = resolved ? enc.ufoHp : enc.ufoHp - (nextEnc?.ufoHp ?? enc.ufoHp);
+      this.beatIntDmg = nextEnc ? Math.max(0, enc.interceptorHp - nextEnc.interceptorHp) : 0;
+      // The log records "UFO returns Y" every attack round, so the UFO always
+      // shoots back unless the exchange left the interceptor untouched.
+      this.beatUfoReturns = this.beatIntDmg > 0 || (resolved && next.ufoContact?.status === "escaped");
+      if (resolved) {
+        this.beatTerminal = next.ufoContact?.status === "crashed" ? "crashed" : "escaped";
+      }
+      this.triggerInterceptorVolley(ufoDmg); // interceptor teal tracer fires at t=0
+      return;
+    }
+
+    if (action === "close") {
+      this.beatKind = "close";
+      this.beatRangeTarget = nextEnc?.range ?? Math.max(0, enc.range - 1);
+      return;
+    }
+
+    // disengage
+    this.beatKind = "disengage";
+  }
+
+  /** Frame driver for an active combat beat: schedule the return bolt, ease range,
+   *  chain the resolution beat, and finalize (apply the real result) when done. */
+  private updateInterceptionBeat(now: number): void {
+    // Always ease the displayed range toward its target so marker motion is smooth.
+    const enc = this.campaign?.interception;
+    const target = this.beatActive && this.beatRangeTarget !== null ? this.beatRangeTarget : enc?.range ?? this.displayRange;
+    this.displayRange += (target - this.displayRange) * RANGE_EASE;
+    if (!this.beatActive) return;
+    const elapsed = now - this.beatStartMs;
+
+    if (this.beatKind === "exchange") {
+      if (!this.beatReturnFired && elapsed >= RETURN_BOLT_DELAY_MS) {
+        this.beatReturnFired = true;
+        if (this.beatUfoReturns) this.triggerInterceptorHit(this.beatIntDmg);
+      }
+      if (elapsed >= EXCHANGE_BEAT_MS) {
+        if (this.beatTerminal) this.startResolutionBeat(now);
+        else this.finalizeBeat();
+      }
+      return;
+    }
+    if (this.beatKind === "resolution") {
+      this.updateResolutionBeat(now, elapsed);
+      if (elapsed >= RESOLUTION_BEAT_MS) this.finalizeBeat();
+      return;
+    }
+    if (this.beatKind === "close") {
+      if (elapsed >= CLOSE_BEAT_MS) this.finalizeBeat();
+      return;
+    }
+    // disengage
+    if (elapsed >= DISENGAGE_BEAT_MS) this.finalizeBeat();
+  }
+
+  /** Transition an exchange that killed/escaped the UFO into a short resolution beat. */
+  private startResolutionBeat(now: number): void {
+    this.beatKind = "resolution";
+    this.beatStartMs = now;
+    if (this.beatTerminal === "crashed") {
+      // Crash-fall: a heavy explosion at the UFO + hard camera kick.
+      this.fireExplosion(this.ufoMarker.position, now);
+      this.kickCameraHard();
+      this.opts.onInterceptorSfx?.("explosion");
+    }
+  }
+
+  /** Animate the terminal outcome: UFO crash-falls toward the surface, or streaks away. */
+  private updateResolutionBeat(now: number, elapsed: number): void {
+    const t = Math.min(1, elapsed / RESOLUTION_BEAT_MS);
+    if (!this.ufoMarker.visible) return;
+    if (this.beatTerminal === "crashed") {
+      // Sink the marker toward the surface with a spin as it falls.
+      const radius = EARTH_RADIUS + 0.13 - 0.11 * t;
+      this.scratchA.copy(this.ufoN0).multiplyScalar(radius);
+      this.ufoMarker.position.copy(this.scratchA);
+      this.ufoMarker.scale.setScalar(Math.max(0.2, 1 - t * 0.7));
+    } else if (this.beatTerminal === "escaped") {
+      // Streak away fast along the heading and fade by shrinking.
+      const driftAngle = PURSUIT_MAX_DRIFT_RAD + t * 0.5;
+      this.scratchA.copy(this.ufoN0).applyAxisAngle(this.pursuitAxis, driftAngle).normalize();
+      this.ufoMarker.position.copy(this.scratchA).multiplyScalar(EARTH_RADIUS + 0.13);
+      this.ufoMarker.scale.setScalar(Math.max(0.2, 1 - t * 0.6));
+    }
+  }
+
+  /** Apply the real campaign result (deferred until the beat finished) + reset beat state. */
+  private finalizeBeat(): void {
+    const action = this.beatAction;
+    this.resetBeatState();
+    this.opts.onInterceptionAction?.(action); // main applies + calls update() -> refresh()
+  }
+
+  private resetBeatState(): void {
+    this.beatActive = false;
+    this.beatReturnFired = false;
+    this.beatUfoReturns = false;
+    this.beatIntDmg = 0;
+    this.beatTerminal = null;
+    this.beatRangeTarget = null;
+    this.ufoMarker.scale.setScalar(1);
   }
 
   /** Crisp DOM layer above the canvas for floating "-N" damage numbers. */
@@ -2693,21 +3130,32 @@ export class GeoscapeView {
    * per-hit triggers reposition + reactivate them. Disposed via disposeObject(scene).
    */
   private buildCombatFx(): void {
-    // Tracer beam: interceptor -> UFO (two-point additive line, faded per shot).
+    // Interceptor tracer beam: interceptor -> UFO (teal additive line, faded per shot).
     const tracerGeo = new BufferGeometry();
     tracerGeo.setAttribute("position", new Float32BufferAttribute(new Float32Array(6), 3));
     this.tracerLineFx = new Line(
       tracerGeo,
-      new LineBasicMaterial({ color: 0xfff7cc, transparent: true, opacity: 0, blending: AdditiveBlending }),
+      new LineBasicMaterial({ color: 0x38e8d2, transparent: true, opacity: 0, blending: AdditiveBlending }),
     );
     this.tracerLineFx.frustumCulled = false;
     this.tracerLineFx.visible = false;
     this.earthGroup.add(this.tracerLineFx);
 
-    // Muzzle flash at the interceptor nose.
+    // UFO return-fire bolt: UFO -> interceptor (signal-red additive line).
+    const boltGeo = new BufferGeometry();
+    boltGeo.setAttribute("position", new Float32BufferAttribute(new Float32Array(6), 3));
+    this.ufoBoltLineFx = new Line(
+      boltGeo,
+      new LineBasicMaterial({ color: 0xff4a3a, transparent: true, opacity: 0, blending: AdditiveBlending }),
+    );
+    this.ufoBoltLineFx.frustumCulled = false;
+    this.ufoBoltLineFx.visible = false;
+    this.earthGroup.add(this.ufoBoltLineFx);
+
+    // Muzzle flash at the interceptor nose (teal-white to match the tracer).
     this.muzzleFlash = new Mesh(
       new SphereGeometry(0.022, 10, 8),
-      new MeshBasicMaterial({ color: 0xfff1b0, transparent: true, opacity: 0, blending: AdditiveBlending }),
+      new MeshBasicMaterial({ color: 0xaef7ec, transparent: true, opacity: 0, blending: AdditiveBlending }),
     );
     this.muzzleFlash.visible = false;
     this.earthGroup.add(this.muzzleFlash);
@@ -2867,6 +3315,7 @@ export class GeoscapeView {
     this.fireBurst(this.ufoBurst, to, now);
     this.fxUfoBurstActive = true;
     this.fireExplosion(to, now);
+    this.opts.onInterceptorSfx?.("cannon");
     if (!this.volleyDamageShown && dmg > 0) {
       this.spawnDamageNumber(this.ufoMarker, Math.round(dmg), "ufo");
       this.volleyDamageShown = true;
@@ -2880,11 +3329,25 @@ export class GeoscapeView {
     this.fxExplosionActive = true;
   }
 
-  /** UFO return fire hits the interceptor: impact burst + threat flash + shake. */
+  /** UFO return fire hits the interceptor: red bolt + impact burst + threat flash + shake. */
   private triggerInterceptorHit(dmg: number): void {
-    this.fireBurst(this.interceptorBurst, this.interceptorMarker.position, performance.now());
+    const now = performance.now();
+    // Red bolt streaks from the UFO back to the interceptor (the visible "shoot back").
+    const from = this.ufoMarker.position;
+    const to = this.interceptorMarker.position;
+    const attr = this.ufoBoltLineFx.geometry.getAttribute("position") as Float32BufferAttribute;
+    const arr = attr.array as Float32Array;
+    arr[0] = from.x; arr[1] = from.y; arr[2] = from.z;
+    arr[3] = to.x; arr[4] = to.y; arr[5] = to.z;
+    attr.needsUpdate = true;
+    (this.ufoBoltLineFx.material as LineBasicMaterial).opacity = 0.95;
+    this.ufoBoltLineFx.visible = true;
+    this.ufoBoltStartMs = now;
+    this.ufoBoltActive = true;
+    this.opts.onInterceptorSfx?.("bolt");
+    this.fireBurst(this.interceptorBurst, this.interceptorMarker.position, now);
     this.fxInterceptorBurstActive = true;
-    this.spawnDamageNumber(this.interceptorMarker, Math.round(dmg), "interceptor");
+    if (dmg > 0) this.spawnDamageNumber(this.interceptorMarker, Math.round(dmg), "interceptor");
     this.flashThreat();
     this.kickCamera();
   }
@@ -2960,6 +3423,15 @@ export class GeoscapeView {
         this.tracerLineFx.visible = false;
       } else {
         (this.tracerLineFx.material as LineBasicMaterial).opacity = 0.95 * (1 - t);
+      }
+    }
+    if (this.ufoBoltActive) {
+      const t = (now - this.ufoBoltStartMs) / FX_TRACER_MS;
+      if (t >= 1) {
+        this.ufoBoltActive = false;
+        this.ufoBoltLineFx.visible = false;
+      } else {
+        (this.ufoBoltLineFx.material as LineBasicMaterial).opacity = 0.95 * (1 - t);
       }
     }
     if (this.fxMuzzleActive) {
@@ -3817,7 +4289,13 @@ export class GeoscapeView {
       this.hqMarker.scale.setScalar(1 + (this.reducedMotion ? 0 : Math.sin(now * 0.014) * 0.26));
     }
     this.updateContactLabel(contact);
+    // Interception theater: drift the pursued UFO, fly the interceptor out, run the
+    // active combat beat, and advance/decay all combat FX + contrails.
+    this.applyPursuitDrift(now);
     this.animateInterceptor(now);
+    this.updateInterceptionBeat(now);
+    this.updateCombatFx(now);
+    this.updateContrails(now);
     this.advanceFlowingTime(now);
     // onAdvanceTime may synchronously dispose+remount this view (current controller);
     // bail before touching the disposed renderer/controls in that case.
@@ -3834,6 +4312,7 @@ export class GeoscapeView {
       if (ring.parent) animateBeaconPulse(ring, now, this.reducedMotion);
     }
     if (this.cloudMesh) this.cloudMesh.rotation.y += 0.00018;
+    this.updateChaseCamera();
     this.controls.update();
     // Camera shake: offset around the controls-derived base, then restore so the
     // next controls.update() is unaffected (no drift into OrbitControls state).
