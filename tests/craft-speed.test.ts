@@ -124,7 +124,7 @@ describe("craft speed + combat stats round-trip save/load", () => {
       sorties: 0,
       fuel: 120,
       maxFuel: 120,
-      speedDegPerHour: 1.6,
+      speedDegPerHour: 64.3,
       hullPoints: 140,
       weaponPower: 1.5,
     };
@@ -138,10 +138,10 @@ describe("craft speed + combat stats round-trip save/load", () => {
     expect(loaded).not.toBeNull();
 
     const raptor = loaded!.fleet!.find((craft) => craft.id === "int-1")!;
-    expect(raptor.speedDegPerHour).toBe(0.9);
+    expect(raptor.speedDegPerHour).toBe(36.2);
 
     const restored = loaded!.fleet!.find((craft) => craft.id === "phantom-1")!;
-    expect(restored.speedDegPerHour).toBe(1.6);
+    expect(restored.speedDegPerHour).toBe(64.3);
     expect(restored.hullPoints).toBe(140);
     expect(restored.weaponPower).toBe(1.5);
   });
@@ -172,7 +172,7 @@ describe("craft speed + combat stats round-trip save/load", () => {
 // ===========================================================================
 
 describe("patrol speed comes from the assigned craft (no rubber-band)", () => {
-  it("launches a Raptor patrol at the Raptor's own 0.9 deg/h regardless of UFO speed", () => {
+  it("launches a Raptor patrol at the Raptor's own 36.2 deg/h regardless of UFO speed", () => {
     // A slow harvester and a fast battleship both yield the SAME patrol speed — the
     // craft's own cruise — proving the speed is no longer proportional to the UFO's.
     const slow = advanceGeoscape(
@@ -185,8 +185,8 @@ describe("patrol speed comes from the assigned craft (no rubber-band)", () => {
     );
     const patrolSlow = (slow.activeFlights ?? []).find((f) => f.id.startsWith("patrol:"));
     const patrolFast = (fast.activeFlights ?? []).find((f) => f.id.startsWith("patrol:"));
-    expect(patrolSlow?.speedDegPerHour).toBe(0.9);
-    expect(patrolFast?.speedDegPerHour).toBe(0.9);
+    expect(patrolSlow?.speedDegPerHour).toBe(36.2);
+    expect(patrolFast?.speedDegPerHour).toBe(36.2);
   });
 
   it("scrambles the fastest ready craft and flies the patrol at its own speed", () => {
@@ -197,9 +197,9 @@ describe("patrol speed comes from the assigned craft (no rubber-band)", () => {
     const advanced = advanceGeoscape(withUfo, 1);
     const patrol = (advanced.activeFlights ?? []).find((f) => f.id.startsWith("patrol:"));
     expect(patrol).toBeDefined();
-    // The Phantom (1.6) is the fastest ready craft, so it scrambles at its own speed.
+    // The Phantom (64.3) is the fastest ready craft, so it scrambles at its own speed.
     expect(patrol!.craftId).toBe(chooseInterceptor(withUfo)!.id);
-    expect(patrol!.speedDegPerHour).toBe(1.6);
+    expect(patrol!.speedDegPerHour).toBe(64.3);
   });
 });
 
@@ -208,11 +208,11 @@ describe("patrol speed comes from the assigned craft (no rubber-band)", () => {
 // ===========================================================================
 
 describe("craftSpeedDegPerHour falls back per craft kind", () => {
-  it("defaults a legacy transport to the retuned Skyranger cruise (2.5), not the interceptor 0.9", () => {
+  it("defaults a legacy transport to the retuned Skyranger cruise (24.6), not the interceptor 36.2", () => {
     const transport: Craft = { id: "sky-legacy", kind: "transport", name: "Skyranger", damage: 0, sorties: 0 };
     const interceptor: Craft = { id: "int-legacy", kind: "interceptor", name: "Raptor", damage: 0, sorties: 0 };
-    expect(craftSpeedDegPerHour(transport)).toBe(2.5);
-    expect(craftSpeedDegPerHour(interceptor)).toBe(0.9);
+    expect(craftSpeedDegPerHour(transport)).toBe(24.6);
+    expect(craftSpeedDegPerHour(interceptor)).toBe(36.2);
   });
 });
 
@@ -221,7 +221,7 @@ describe("craftSpeedDegPerHour falls back per craft kind", () => {
 // ===========================================================================
 
 describe("interceptionSpeedAdvantage classification", () => {
-  it("classifies each UFO type against a starting Raptor (0.9 deg/h)", () => {
+  it("classifies each UFO type against a starting Raptor (36.2 deg/h)", () => {
     const c = createCampaign(BASE, SEED);
     expect(interceptionSpeedAdvantage(c, trackedContact("scout", 0))).toBe("advantage");
     expect(interceptionSpeedAdvantage(c, trackedContact("harvester", 0))).toBe("advantage");
@@ -333,7 +333,7 @@ describe("chooseInterceptor stays in lockstep with the craft flying the pursuit"
       sorties: 0,
       fuel: 120,
       maxFuel: 120,
-      speedDegPerHour: 1.6,
+      speedDegPerHour: 64.3,
       hullPoints: 140,
       weaponPower: 1.5,
     };
@@ -348,7 +348,7 @@ describe("chooseInterceptor stays in lockstep with the craft flying the pursuit"
       toLat: BASE.lat,
       toLon: BASE.lon,
       progress: 0.3,
-      speedDegPerHour: 1.6,
+      speedDegPerHour: 64.3,
       startedAtHour: 18,
     };
     const campaign: CampaignState = {
@@ -363,8 +363,8 @@ describe("chooseInterceptor stays in lockstep with the craft flying the pursuit"
     // The Phantom is committed to a return leg, so it is NOT the engaging craft even
     // though it is the fastest ready hull — the chip/forecast track the Raptor on patrol.
     expect(chosen.id).not.toBe("phantom-1");
-    expect(craftSpeedDegPerHour(chosen)).toBe(0.9);
-    // Advantage is computed against the Raptor (0.9 vs harvester 0.55), not the Phantom.
+    expect(craftSpeedDegPerHour(chosen)).toBe(36.2);
+    // Advantage is computed against the Raptor (36.2 vs harvester 22.1), not the Phantom.
     expect(interceptionSpeedAdvantage(campaign, contact)).toBe("advantage");
   });
 
@@ -377,7 +377,7 @@ describe("chooseInterceptor stays in lockstep with the craft flying the pursuit"
       sorties: 0,
       fuel: 120,
       maxFuel: 120,
-      speedDegPerHour: 1.6,
+      speedDegPerHour: 64.3,
       hullPoints: 140,
       weaponPower: 1.5,
     };
@@ -392,7 +392,7 @@ describe("chooseInterceptor stays in lockstep with the craft flying the pursuit"
       toLat: contact.lat,
       toLon: contact.lon,
       progress: 0.5,
-      speedDegPerHour: 1.6,
+      speedDegPerHour: 64.3,
       startedAtHour: 18,
     };
     const campaign: CampaignState = {
@@ -431,7 +431,7 @@ describe("legacy save migration: stale contact speed does not invert the air war
 
   it("re-classifies a pre-retune scout (old speed 1.4) as catchable, not 'outrun'", () => {
     const loaded = reloadWithStaleContact({ ...trackedContact("scout", 5), speed: 1.4 });
-    // The denormalized copy is dropped; the live scout profile (0.7) wins.
+    // The denormalized copy is dropped; the live scout profile (28.2) wins.
     expect(loaded.ufoContact?.speed).toBeUndefined();
     expect(interceptionSpeedAdvantage(loaded, loaded.ufoContact!)).toBe("advantage");
     expect(interceptionForecast(loaded)?.succeeds).toBe(true);
@@ -443,7 +443,7 @@ describe("legacy save migration: stale contact speed does not invert the air war
     expect(interceptionForecast(loaded)?.succeeds).toBe(false);
   });
 
-  it("migrates a legacy transport persisted at the old 0.7 cruise up to the new 2.5 default", () => {
+  it("migrates a legacy transport persisted at the old 0.7 cruise up to the new 24.6 default", () => {
     const base = createCampaign(BASE, SEED);
     const legacyFleet = (base.fleet ?? []).map((craft) =>
       craft.kind === "transport" ? { ...craft, speedDegPerHour: 0.7 } : craft,
@@ -454,18 +454,18 @@ describe("legacy save migration: stale contact speed does not invert the air war
     );
     const loaded = loadCampaign()!;
     const transport = loaded.fleet!.find((craft) => craft.kind === "transport")!;
-    // The stale 0.7 is dropped, so the craft re-reads the retuned default.
-    expect(craftSpeedDegPerHour(transport)).toBe(2.5);
+    // The stale 0.7 is dropped (below the legacy floor), so the craft re-reads the retuned default.
+    expect(craftSpeedDegPerHour(transport)).toBe(24.6);
     // A non-legacy (faster) transport speed is preserved, not clobbered.
     const fastFleet = (base.fleet ?? []).map((craft) =>
-      craft.kind === "transport" ? { ...craft, speedDegPerHour: 3.2 } : craft,
+      craft.kind === "transport" ? { ...craft, speedDegPerHour: 30 } : craft,
     );
     localStorage.setItem(
       CAMPAIGN_STORAGE_KEY,
       JSON.stringify(JSON.parse(JSON.stringify({ ...base, fleet: fastFleet }))),
     );
     const fast = loadCampaign()!.fleet!.find((craft) => craft.kind === "transport")!;
-    expect(craftSpeedDegPerHour(fast)).toBe(3.2);
+    expect(craftSpeedDegPerHour(fast)).toBe(30);
   });
 });
 
@@ -493,7 +493,7 @@ describe("Phantom progression arc", () => {
     const phantom = campaign.fleet!.find((craft) => craft.name === "Phantom");
     expect(phantom).toBeDefined();
     expect(campaign.fleet!.length).toBe(fleetBefore + 1);
-    expect(craftSpeedDegPerHour(phantom!)).toBe(1.6);
+    expect(craftSpeedDegPerHour(phantom!)).toBe(64.3);
     expect(craftHullPoints(phantom!)).toBe(140);
     expect(craftWeaponPower(phantom!)).toBe(1.5);
     // The fastest ready craft is scrambled for interception.

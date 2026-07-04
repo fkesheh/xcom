@@ -73,7 +73,7 @@ describe("active patrol flights", () => {
     expect(patrol!.toLon).toBe(advanced.ufoContact!.lon);
     // No rubber-band: the patrol cruises at the interceptor's OWN speed (the
     // starting Raptor's 0.9 deg/hour), not a UFO-proportional band.
-    expect(patrol!.speedDegPerHour).toBe(0.9);
+    expect(patrol!.speedDegPerHour).toBe(36.2);
     expect(patrol!.progress).toBeGreaterThanOrEqual(0);
     expect(patrol!.progress).toBeLessThan(1);
   });

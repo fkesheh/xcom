@@ -37,32 +37,33 @@ describe("UFO type profiling", () => {
   });
 
   it("exposes the exact spec constants for UFO_TYPE_PROFILES", () => {
-    // Speeds re-tuned to the original's spirit: bigger hulls cruise FASTER, so a
-    // starting Raptor (0.9 deg/h) is outrun by terror ships and battleships.
+    // Real-world km/h speeds: bigger hulls cruise FASTER, so a starting Raptor
+    // (36.2 deg/h ≈ 4,023 km/h) is outrun by terror ships and battleships. Each keeps
+    // its historical catchability ratio vs the Raptor.
     expect(UFO_TYPE_PROFILES.scout).toEqual({
       strength: 1,
-      speed: 0.7,
+      speed: 28.2,
       lifetimeHours: 30,
       infiltrationMult: 0.5,
       panicMult: 0.5,
     });
     expect(UFO_TYPE_PROFILES.harvester).toEqual({
       strength: 3,
-      speed: 0.55,
+      speed: 22.1,
       lifetimeHours: 44,
       infiltrationMult: 1.0,
       panicMult: 1.0,
     });
     expect(UFO_TYPE_PROFILES.terror).toEqual({
       strength: 5,
-      speed: 1.0,
+      speed: 40.2,
       lifetimeHours: 66,
       infiltrationMult: 1.6,
       panicMult: 1.6,
     });
     expect(UFO_TYPE_PROFILES.battleship).toEqual({
       strength: 8,
-      speed: 1.35,
+      speed: 54.3,
       lifetimeHours: 96,
       infiltrationMult: 2.2,
       panicMult: 2.2,
@@ -152,13 +153,13 @@ describe("UFO type profiling", () => {
     expect(harvester.strength).toBeGreaterThan(scout.strength);
 
     // Bigger combat hulls cruise faster; the harvester is the slowest hauler and a
-    // scout, though fragile, still outpaces it. Battleship + terror outrun a Raptor (0.9).
+    // scout, though fragile, still outpaces it. Battleship + terror outrun a Raptor (36.2).
     expect(battleship.speed).toBeGreaterThan(terror.speed);
     expect(terror.speed).toBeGreaterThan(scout.speed);
     expect(scout.speed).toBeGreaterThan(harvester.speed);
-    expect(harvester.speed).toBeLessThan(0.9);
-    expect(terror.speed).toBeGreaterThan(0.9);
-    expect(battleship.speed).toBeGreaterThan(0.9);
+    expect(harvester.speed).toBeLessThan(36.2);
+    expect(terror.speed).toBeGreaterThan(36.2);
+    expect(battleship.speed).toBeGreaterThan(36.2);
 
     expect(battleship.lifetimeHours).toBeGreaterThan(terror.lifetimeHours);
     expect(terror.lifetimeHours).toBeGreaterThan(harvester.lifetimeHours);

@@ -66,14 +66,20 @@ export interface UfoTypeProfile {
 }
 
 // Cruise speeds recreate the original X-COM's air-war arc: bigger hulls cruise
-// FASTER, so a starting Raptor (0.9 deg/h) catches scouts/harvesters but is
-// outrun by terror ships and battleships until an advanced interceptor is built.
-// Lifetimes/panic/infiltration are unchanged — only the speed column is re-tuned.
+// FASTER, so a starting Raptor (36.2 deg/h ≈ 4,023 km/h) catches scouts/harvesters
+// but is outrun by terror ships and battleships until an advanced interceptor is
+// built. Speeds are authored as real-world km/h (comments) and stored as the internal
+// deg/hour (≈ km/h ÷ 111.19); each preserves its historical catchability RATIO vs the
+// Raptor so the classification invariants hold. Lifetimes/panic/infiltration unchanged.
+//   scout      ratio .78  → 3,130 km/h ≈ 28.2 deg/h   (caught)
+//   harvester  ratio .61  → 2,460 km/h ≈ 22.1 deg/h   (caught)
+//   terror     ratio 1.11 → 4,470 km/h ≈ 40.2 deg/h   (outruns a Raptor)
+//   battleship ratio 1.50 → 6,030 km/h ≈ 54.3 deg/h   (outruns a Raptor; Phantom catches)
 export const UFO_TYPE_PROFILES: Record<UfoType, UfoTypeProfile> = {
-  scout: { strength: 1, speed: 0.7, lifetimeHours: 30, infiltrationMult: 0.5, panicMult: 0.5 },
-  harvester: { strength: 3, speed: 0.55, lifetimeHours: 44, infiltrationMult: 1.0, panicMult: 1.0 },
-  terror: { strength: 5, speed: 1.0, lifetimeHours: 66, infiltrationMult: 1.6, panicMult: 1.6 },
-  battleship: { strength: 8, speed: 1.35, lifetimeHours: 96, infiltrationMult: 2.2, panicMult: 2.2 },
+  scout: { strength: 1, speed: 28.2, lifetimeHours: 30, infiltrationMult: 0.5, panicMult: 0.5 },
+  harvester: { strength: 3, speed: 22.1, lifetimeHours: 44, infiltrationMult: 1.0, panicMult: 1.0 },
+  terror: { strength: 5, speed: 40.2, lifetimeHours: 66, infiltrationMult: 1.6, panicMult: 1.6 },
+  battleship: { strength: 8, speed: 54.3, lifetimeHours: 96, infiltrationMult: 2.2, panicMult: 2.2 },
 };
 
 export interface UfoTypeInfo {
@@ -245,7 +251,7 @@ function rollUfoType(seed: number): UfoType {
  * (lat, lon in degrees), a heading (degrees clockwise from north), and a distance
  * (degrees of arc = speed * hours), returns the new lat/lon. Pure trigonometry.
  */
-function greatCircleDestination(
+export function greatCircleDestination(
   lat: number,
   lon: number,
   headingDeg: number,

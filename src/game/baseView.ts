@@ -76,6 +76,7 @@ import {
   craftHullPoints,
   craftSpeedDegPerHour,
   craftWeaponPower,
+  degPerHourToKmh,
   DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR,
   freeHangarSlots,
   manufacturingCost,
@@ -3484,7 +3485,7 @@ export class BaseView {
     const name = el("strong");
     name.textContent = craft.name;
     const speedChip = el("span", "craft-speed");
-    speedChip.textContent = formatSpeed(speed);
+    speedChip.textContent = formatSpeed(degPerHourToKmh(speed));
     speedChip.title = "Cruise / pursuit speed";
     heading.append(kind, name, speedChip);
     const copy = el("p", "card-copy");

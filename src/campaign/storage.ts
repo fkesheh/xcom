@@ -56,6 +56,23 @@ export const CAMPAIGN_STORAGE_KEY = "blacksite.campaign.v1";
 export const CAMPAIGN_VICTORY_OPERATIONS = 4;
 
 /**
+ * Real-world speed conversion. The globe is a unit sphere modelled in great-circle
+ * DEGREES; the internal air-war math (patrol progress, tracked-UFO drift, pursuit
+ * classification) all runs in deg/hour. But the player thinks in km/h, so craft/UFO
+ * speeds are AUTHORED as km/h (the source of truth in every design comment) and
+ * converted to deg/h with this factor. One degree of great-circle arc ≈ 111.19 km.
+ */
+export const KM_PER_DEGREE = 111.19;
+/** km/h → internal deg/hour. e.g. kmhToDegPerHour(4023) ≈ 36.18 (a 2,500 mph Raptor). */
+export function kmhToDegPerHour(kmh: number): number {
+  return kmh / KM_PER_DEGREE;
+}
+/** internal deg/hour → km/h, for the DOM speed chips (formatSpeed renders km/h). */
+export function degPerHourToKmh(degPerHour: number): number {
+  return degPerHour * KM_PER_DEGREE;
+}
+
+/**
  * Endgame arc constants. The true campaign victory is winning the alien-base
  * assault at the revealed HQ. CAMPAIGN_VICTORY_OPERATIONS remains a FALLBACK
  * milestone that auto-reveals the HQ (so a capture-free campaign stays winnable,
@@ -117,9 +134,9 @@ export const STARTING_INTERCEPTOR: InterceptorState = {
  * Mirrors the original game's starting complement.
  */
 export const STARTING_FLEET: readonly Craft[] = [
-  { id: "int-1", kind: "interceptor", name: "Raptor-1", damage: 0, sorties: 0, fuel: 100, maxFuel: 100, speedDegPerHour: 0.9 },
-  { id: "int-2", kind: "interceptor", name: "Raptor-2", damage: 0, sorties: 0, fuel: 100, maxFuel: 100, speedDegPerHour: 0.9 },
-  { id: "sky-1", kind: "transport", name: "Skyranger", damage: 0, sorties: 0, fuel: 100, maxFuel: 100, speedDegPerHour: 2.5 },
+  { id: "int-1", kind: "interceptor", name: "Raptor-1", damage: 0, sorties: 0, fuel: 100, maxFuel: 100, speedDegPerHour: 36.2 },
+  { id: "int-2", kind: "interceptor", name: "Raptor-2", damage: 0, sorties: 0, fuel: 100, maxFuel: 100, speedDegPerHour: 36.2 },
+  { id: "sky-1", kind: "transport", name: "Skyranger", damage: 0, sorties: 0, fuel: 100, maxFuel: 100, speedDegPerHour: 24.6 },
 ];
 
 /** Craft id synthesized for the legacy single-interceptor field when no fleet exists. */
@@ -147,33 +164,33 @@ function isPatrolFlightForContact(flight: ActiveFlight, contactId: string | unde
 const INTERCEPTOR_DAMAGE_MAX = 100;
 
 /**
- * Cruise/pursuit speed (deg/hour) a craft with no explicit speedDegPerHour falls
- * back to — the starting Raptor's cruise. Legacy saves and hand-built fixtures
- * without the field behave as a starting interceptor.
+ * Cruise/pursuit speed a craft with no explicit speedDegPerHour falls back to — the
+ * starting Raptor's cruise: 2,500 mph = 4,023 km/h ≈ 36.2 deg/hour. Legacy saves and
+ * hand-built fixtures without the field behave as a starting interceptor.
  */
-export const DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR = 0.9;
+export const DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR = 36.2;
 /**
- * Cruise speed (deg/hour) a TRANSPORT with no explicit speedDegPerHour falls back
- * to — the starting Skyranger's cruise. Raised from the original 0.7 to 2.5 so a
- * ~40-degree crossing takes ~16 game-hours (was ~57h — longer than a crash site's
- * 48h lifetime, so far sites were literally unreachable and the transport looked
- * frozen at 1x). Still kind-aware and slower than a Phantom's 1.6: a legacy
- * Skyranger's hangar speed chip must read the transport number, not the interceptor.
+ * Cruise speed a TRANSPORT with no explicit speedDegPerHour falls back to — the
+ * starting Skyranger's cruise: 1,700 mph = 2,736 km/h ≈ 24.6 deg/hour. At that speed
+ * a 180-degree antipodal crossing takes ~7.3 game-hours (the design target: "anywhere
+ * in the world in ~7-8h"). Still kind-aware and slower than a Phantom's 64.3, so a
+ * legacy Skyranger's hangar chip reads the transport number, not the interceptor's.
  */
-export const DEFAULT_TRANSPORT_SPEED_DEG_PER_HOUR = 2.5;
+export const DEFAULT_TRANSPORT_SPEED_DEG_PER_HOUR = 24.6;
 /**
- * The original (pre-retune) transport cruise. A legacy save that persisted this exact
- * value for a transport predates the 2.5 retune; normalizeCraft drops it so the craft
- * re-reads the new DEFAULT_TRANSPORT_SPEED_DEG_PER_HOUR rather than staying stuck at
- * the unreachably-slow 0.7. No interceptor migration: 0.9 Raptors are unchanged.
+ * Sanity floor (deg/hour) below which a persisted craft speed is treated as LEGACY.
+ * Every real-world craft now cruises far above this (transport 24.6, interceptor 36.2,
+ * Phantom 64.3), so any saved craft speed under the floor predates the km/h retune
+ * (old magnitudes were 0.7 / 0.9 / 1.6 / 2.5). normalizeCraft drops such a value so the
+ * craft re-derives its kind's current default instead of crawling at a pre-retune rate.
  */
-export const LEGACY_TRANSPORT_SPEED_DEG_PER_HOUR = 0.7;
+export const LEGACY_SPEED_FLOOR_DEG_PER_HOUR = 5;
 /** Hull points an encounter craft fields when it has no explicit hullPoints. */
 export const DEFAULT_CRAFT_HULL_POINTS = 100;
 
 /**
  * A craft's own cruise/pursuit speed (deg/hour). A missing value falls back to the
- * starting cruise for the craft's KIND (transport 0.7, interceptor 0.9) so legacy
+ * starting cruise for the craft's KIND (transport 24.6, interceptor 36.2) so legacy
  * craft and synthesized fleet rows report the same speed a fresh craft of that kind
  * would, regardless of save vintage.
  */
@@ -969,8 +986,11 @@ export const MANUFACTURING_PROJECTS: readonly ManufacturingProject[] = [
       quantity: 1,
       craft: {
         kind: "interceptor",
+        // 7,150 km/h ≈ 64.3 deg/hour — scaled to keep the Phantom's historical 1.6/0.9
+        // speed ratio over the Raptor (36.2 × 1.6 / 0.9 ≈ 64.3), so it still runs down a
+        // battleship (54.3) that outruns a Raptor.
         name: "Phantom",
-        speedDegPerHour: 1.6,
+        speedDegPerHour: 64.3,
         hullPoints: 140,
         weaponPower: 1.5,
         maxFuel: 120,
@@ -3136,14 +3156,15 @@ function normalizeCraft(value: unknown, clock: CampaignClock): Craft | undefined
   // Combat/pursuit stats are optional; a missing value falls back to the craft-stat
   // defaults (craftSpeedDegPerHour / craftHullPoints / craftWeaponPower) at read time,
   // so legacy craft keep working. Persist any explicit value so advanced craft survive reload.
-  // A transport persisted at the pre-retune 0.7 cruise is a legacy save: drop the
-  // explicit value so the craft re-reads the new (faster) DEFAULT_TRANSPORT_SPEED,
-  // migrating far crash sites from "unreachable" to a ~16h crossing. Interceptors and
-  // any faster transport keep their explicit speed.
+  // LEGACY SPEED MIGRATION: a save from before the km/h retune carries a pre-scale speed
+  // (old magnitudes 0.7 / 0.9 / 1.6 / 2.5, all below LEGACY_SPEED_FLOOR_DEG_PER_HOUR). Drop
+  // any such value — for BOTH kinds — so the craft re-derives its kind's current default
+  // (transport 24.6, interceptor 36.2) instead of crawling ~40× too slow. Any real (post-
+  // retune) speed is well above the floor and is preserved verbatim.
   const rawSpeed =
     typeof maybe.speedDegPerHour === "number" && maybe.speedDegPerHour > 0 ? maybe.speedDegPerHour : undefined;
   const speedDegPerHour =
-    maybe.kind === "transport" && rawSpeed === LEGACY_TRANSPORT_SPEED_DEG_PER_HOUR ? undefined : rawSpeed;
+    rawSpeed !== undefined && rawSpeed < LEGACY_SPEED_FLOOR_DEG_PER_HOUR ? undefined : rawSpeed;
   const hullPoints =
     typeof maybe.hullPoints === "number" && maybe.hullPoints > 0 ? Math.floor(maybe.hullPoints) : undefined;
   const weaponPower =

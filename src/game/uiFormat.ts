@@ -92,18 +92,20 @@ export function groupThousands(value: number): string {
 }
 
 /**
- * Format a craft/UFO cruise speed (great-circle degrees per hour) for the DOM.
- * Always one decimal place and a `°/h` suffix so the speed matchup reads
- * consistently (`0.9°/h`, `1.6°/h`, `1.0°/h`). Deterministic (`toFixed` is
- * locale-independent); NaN / non-finite / negative clamps to `"0.0°/h"`.
+ * Format a craft/UFO cruise speed given in REAL-WORLD km/h for the DOM. Speeds are
+ * modelled internally as great-circle degrees per hour; call sites convert with
+ * `degPerHourToKmh` (campaign layer) before formatting, so the player reads a
+ * grounded number ("4,023 km/h") instead of an abstract "36.2°/h". Thousands are
+ * grouped deterministically (no locale); NaN / non-finite / negative clamps to
+ * `"0 km/h"`.
  *
- * @example formatSpeed(0.9)  // "0.9°/h"
- * @example formatSpeed(1.6)  // "1.6°/h"
- * @example formatSpeed(1)    // "1.0°/h"
+ * @example formatSpeed(4023)  // "4,023 km/h"
+ * @example formatSpeed(2736)  // "2,736 km/h"
+ * @example formatSpeed(0)     // "0 km/h"
  */
-export function formatSpeed(degPerHour: number): string {
-  const v = Number.isFinite(degPerHour) && degPerHour > 0 ? degPerHour : 0;
-  return `${v.toFixed(1)}°/h`;
+export function formatSpeed(kmh: number): string {
+  const v = Number.isFinite(kmh) && kmh > 0 ? kmh : 0;
+  return `${groupThousands(v)} km/h`;
 }
 
 /**

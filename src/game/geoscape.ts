@@ -51,6 +51,7 @@ import {
   executeInterceptionAction,
   formatCampaignClock,
   GEOSCAPE_SCAN_HOURS,
+  greatCircleDestination,
   type InterceptionAction,
   interceptionForecast,
   type InterceptionSpeedAdvantage,
@@ -59,7 +60,7 @@ import {
   ufoTypeInfo,
 } from "../campaign/geoscape";
 import { generateOperation } from "../campaign/operations";
-import { activeSoldiers, campaignObjectiveProgress, canBuildNewBase, canLaunchFinalAssault, chooseInterceptor, craftSpeedDegPerHour, DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR, deploymentSoldiers, DIFFICULTY_CONFIGS, highestRegionalPanic, MAX_EXTRA_BASES, NEW_BASE_COST } from "../campaign/storage";
+import { activeSoldiers, campaignObjectiveProgress, canBuildNewBase, canLaunchFinalAssault, chooseInterceptor, craftSpeedDegPerHour, degPerHourToKmh, DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR, deploymentSoldiers, DIFFICULTY_CONFIGS, highestRegionalPanic, MAX_EXTRA_BASES, NEW_BASE_COST } from "../campaign/storage";
 import {
   animateBeaconPulse,
   createEarthShaderMaterial,
@@ -330,9 +331,9 @@ const SPEED_OPTIONS: readonly SpeedOption[] = [
  * minutes per tick without spamming onAdvanceTime.
  */
 const SPEED_TICKS: Record<number, { hours: number; ms: number }> = {
-  1: { hours: 1 / 60, ms: 700 }, // ~1 game-minute per tick
-  5: { hours: 5 / 60, ms: 500 }, // ~5 game-minutes per tick
-  30: { hours: 20 / 60, ms: 400 }, // ~20 game-minutes per tick
+  1: { hours: 1 / 60, ms: 700 }, // ~1 game-min/tick  ≈ 0.024 game-h/s (near real-time)
+  5: { hours: 5 / 60, ms: 400 }, // ~5 game-min/tick  ≈ 0.21 game-h/s (~12.5 game-min/s)
+  30: { hours: 0.5, ms: 250 }, //  30 game-min/tick  ≈ 2 game-h/s (a full day in ~12s)
 };
 
 /** Auto-pause toast kind; pairs an icon with the color so the alert is never color-alone. */
@@ -1971,6 +1972,36 @@ export class GeoscapeView {
     this.resize();
     this.applyCanvasCursor();
     this.frame();
+    this.installMarkerProbe();
+  }
+
+  /**
+   * Read-only test hook (mirrors baseView's `__baseEnterRoom`): projects every visible
+   * flight/UFO marker to screen pixels so an automated smoothness probe can confirm
+   * markers glide per-frame instead of teleporting per clock-tick. Never mutates state.
+   */
+  private installMarkerProbe(): void {
+    const probeVec = new Vector3();
+    const project = (obj: Object3D): { x: number; y: number } => {
+      const rect = this.renderer.domElement.getBoundingClientRect();
+      obj.getWorldPosition(probeVec).project(this.camera);
+      return { x: (probeVec.x * 0.5 + 0.5) * rect.width, y: (-probeVec.y * 0.5 + 0.5) * rect.height };
+    };
+    (window as unknown as { __geoMarkers?: () => unknown }).__geoMarkers = () => {
+      const flights: Array<{ id: string; x: number; y: number }> = [];
+      for (const [id, entry] of this.flightMarkers) {
+        if (entry.marker.visible) flights.push({ id, ...project(entry.marker) });
+      }
+      return {
+        displayHours: this.displayHours(),
+        elapsedHours: this.campaign?.clock.elapsedHours ?? 0,
+        timeSpeed: this.timeSpeed,
+        engaging: this.isEngaging(),
+        flightDurationMs: this.interceptorFlightDurationMs,
+        flights,
+        ufo: this.ufoMarker.visible ? project(this.ufoMarker) : null,
+      };
+    };
   }
 
   dispose(): void {
@@ -1991,6 +2022,7 @@ export class GeoscapeView {
     this.root.remove();
     this.deployArrivedFired.clear();
     this.damageLayer = null;
+    delete (window as unknown as { __geoMarkers?: () => unknown }).__geoMarkers;
   }
 
   private buildScene(): Mesh {
@@ -3294,6 +3326,62 @@ export class GeoscapeView {
       entry.trail.geometry.dispose();
       (entry.trail.material as LineBasicMaterial).dispose();
       this.flightMarkers.delete(id);
+    }
+  }
+
+  /**
+   * FRAME-SMOOTH FLIGHTS. refresh() only repositions markers on a SPEED_TICKS clock
+   * tick (up to 700ms apart, ~20 game-minutes at 30×). At real craft speeds one tick
+   * is an 8-18° teleport, so between ticks each marker sat frozen then jumped — the
+   * "jumping places" the player saw. This runs EVERY frame and advances each marker
+   * along its own great-circle by the sub-tick fraction of game-hours already elapsed
+   * (displayHours − the tick's whole-hour base), the SAME fractional-time trick that
+   * smooths the clock/terminator. It is presentation-only: campaign state is never
+   * written; the next tick's refresh() snaps the marker to the authoritative position
+   * (which this exactly predicted, so the motion is continuous). Guarded by
+   * isTimeFlowing(), so a paused globe or an active interception stays put.
+   */
+  private smoothMarkers(): void {
+    const c = this.campaign;
+    if (!c || !this.isTimeFlowing()) return;
+    const extraHours = this.displayHours() - c.clock.elapsedHours;
+    if (extraHours <= 0) return;
+    // Transports in transit + interceptor patrols: nudge each along its route arc.
+    for (const flight of c.activeFlights ?? []) {
+      const entry = this.flightMarkers.get(flight.id);
+      if (!entry || !entry.marker.visible) continue;
+      // An arrived/loitering deployment (progress clamped to 1) holds station.
+      if (flight.progress >= 1) continue;
+      const fromN = latLonToVector(flight.fromLat, flight.fromLon, 1).normalize();
+      const toN = latLonToVector(flight.toLat, flight.toLon, 1).normalize();
+      const arcDeg = fromN.angleTo(toN) * (180 / Math.PI);
+      if (arcDeg < 1e-6) continue;
+      const disp = Math.min(1, flight.progress + (flight.speedDegPerHour * extraHours) / arcDeg);
+      slerpUnit(fromN, toN, disp, this.scratchA); // unit direction at the craft
+      this.scratchB.copy(this.scratchA); // posUnit (surface normal)
+      this.scratchA.multiplyScalar(EARTH_RADIUS + 0.14);
+      entry.marker.position.copy(this.scratchA);
+      this.orientMarker(entry.marker, this.scratchB, toN);
+    }
+    // The tracked UFO flies too — drift its marker along heading × profile speed. Only
+    // a tracked (airborne) contact with a heading moves; crashed/landed hold position,
+    // and the interactive-engagement pursuit drift (applyPursuitDrift) owns it otherwise.
+    const contact = c.ufoContact;
+    if (
+      contact &&
+      contact.status === "tracked" &&
+      contact.heading !== undefined &&
+      this.ufoMarker.visible
+    ) {
+      const dest = greatCircleDestination(
+        contact.lat,
+        contact.lon,
+        contact.heading,
+        contactSpeedDegPerHour(contact) * extraHours,
+      );
+      const normal = latLonToVector(dest.lat, dest.lon, 1).normalize();
+      this.ufoMarker.position.copy(normal).multiplyScalar(EARTH_RADIUS + 0.13);
+      this.ufoMarker.quaternion.setFromUnitVectors(UP, normal);
     }
   }
 
@@ -4670,7 +4758,7 @@ export class GeoscapeView {
           ? "MATCHED"
           : "OUTRUN — CANNOT CLOSE";
     const detail = el("span", "geo-speed-chip-detail");
-    detail.textContent = `Yours ${formatSpeed(craft)} vs UFO ${formatSpeed(ufo)}`;
+    detail.textContent = `Yours ${formatSpeed(degPerHourToKmh(craft))} vs UFO ${formatSpeed(degPerHourToKmh(ufo))}`;
     chip.append(label, detail);
     return chip;
   }
@@ -5026,6 +5114,7 @@ export class GeoscapeView {
     // onAdvanceTime may synchronously dispose+remount this view (current controller);
     // bail before touching the disposed renderer/controls in that case.
     if (this.disposed) return;
+    this.smoothMarkers();
     this.animateDeploymentMarkers(now);
     this.updateTerminator();
     this.updateCityLights();

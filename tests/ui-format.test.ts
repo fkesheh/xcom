@@ -112,20 +112,22 @@ describe("formatSignedCredits", () => {
 });
 
 describe("formatSpeed", () => {
+  // formatSpeed now renders a real-world km/h value (call sites convert deg/h → km/h
+  // via degPerHourToKmh), thousands-grouped, deterministically.
   it.each<[number, string]>([
-    [0.9, "0.9°/h"],
-    [1.6, "1.6°/h"],
-    [1, "1.0°/h"],
-    [0.55, "0.6°/h"],
-    [1.35, "1.4°/h"],
+    [4023, "4,023 km/h"],
+    [2736, "2,736 km/h"],
+    [7150, "7,150 km/h"],
+    [950, "950 km/h"],
+    [6030, "6,030 km/h"],
   ])("formatSpeed(%f) -> %s", (input, expected) => {
     expect(formatSpeed(input)).toBe(expected);
   });
 
   it.each<[number]>([[0], [-1], [Number.NaN], [Number.POSITIVE_INFINITY]])(
-    "clamps non-positive / non-finite to 0.0°/h: formatSpeed(%f)",
+    "clamps non-positive / non-finite to 0 km/h: formatSpeed(%f)",
     (input) => {
-      expect(formatSpeed(input)).toBe("0.0°/h");
+      expect(formatSpeed(input)).toBe("0 km/h");
     },
   );
 });

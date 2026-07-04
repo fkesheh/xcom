@@ -377,7 +377,7 @@ describe("campaign state", () => {
       sorties: 0,
       fuel: 120,
       maxFuel: 120,
-      speedDegPerHour: 1.6,
+      speedDegPerHour: 64.3,
       hullPoints: 140,
       weaponPower: 1.5,
     };
