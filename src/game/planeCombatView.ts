@@ -11,7 +11,6 @@ import {
   Float32BufferAttribute,
   Group,
   Line,
-  LineBasicMaterial,
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
@@ -49,7 +48,7 @@ const FX_BURST_MS = 460;
 const FX_EXPLOSION_MS = 720;
 const FX_SHAKE_MS = 260;
 /** Camera shake magnitude (world units) at hit onset; decays over FX_SHAKE_MS. */
-const FX_SHAKE_MAGNITUDE = 0.06;
+const FX_SHAKE_MAGNITUDE = 0.035;
 /** Multiplier on shake magnitude for the killing blow. */
 const FX_SHAKE_KILL_MULT = 2.4;
 /** Ms the kill explosion plays before onResolve returns the player to the geoscape. */
@@ -68,11 +67,13 @@ const SEPARATION_LONG = 3.4;
 /** Stage separation between the two craft at Point-blank range. */
 const SEPARATION_CLOSE = 1.15;
 /** Radius of the slow dramatic camera orbit around the engagement midpoint. */
-const CAMERA_ORBIT_RADIUS = 5.6;
+const CAMERA_ORBIT_RADIUS = 3.0;
 /** Height of the orbiting camera above the engagement midpoint. */
-const CAMERA_ORBIT_HEIGHT = 1.7;
+const CAMERA_ORBIT_HEIGHT = 1.1;
 /** Radians per second the camera orbits (slow, for drama). */
-const CAMERA_ORBIT_RATE = 0.18;
+const CAMERA_ORBIT_RATE = 0.12;
+/** Camera field of view (deg). Wider frames both craft large at close orbit. */
+const CAMERA_FOV = 52;
 
 const STYLE_ID = "plane-combat-style";
 
@@ -416,7 +417,7 @@ export class PlaneCombatView {
   private readonly root: HTMLDivElement;
   private readonly canvasWrap: HTMLDivElement;
   private readonly scene = new Scene();
-  private readonly camera = new PerspectiveCamera(46, 1, 0.1, 100);
+  private readonly camera = new PerspectiveCamera(CAMERA_FOV, 1, 0.1, 100);
   private readonly renderer = new WebGLRenderer({ antialias: true, alpha: true });
   private readonly stage = new Group();
   private readonly interceptorMarker = new Group();
@@ -455,7 +456,8 @@ export class PlaneCombatView {
   };
 
   // --- Pooled combat FX (allocated once, reused per hit; no per-frame alloc) ---
-  private tracerLineFx!: Line;
+  private tracerBeamCore!: Mesh;
+  private tracerBeamGlow!: Mesh;
   private muzzleFlash!: Mesh;
   private ufoBurst!: Points;
   private interceptorBurst!: Points;
@@ -484,6 +486,13 @@ export class PlaneCombatView {
   private readonly scratchA = new Vector3();
   private readonly scratchB = new Vector3();
   private readonly cameraBase = new Vector3();
+  // Traveling-beam endpoints (cached on fire) + per-frame scratch for center/dir.
+  private readonly fxTracerFrom = new Vector3();
+  private readonly fxTracerTo = new Vector3();
+  private readonly beamEnd = new Vector3();
+  private readonly beamCenter = new Vector3();
+  private readonly beamDir = new Vector3();
+  private readonly beamUp = new Vector3(0, 1, 0);
   private startTimeMs = 0;
 
   constructor(private readonly opts: PlaneCombatOptions) {
@@ -721,18 +730,43 @@ export class PlaneCombatView {
   // --------------------------------------------------------------------------
 
   private buildCombatFx(): void {
-    const tracerGeo = new BufferGeometry();
-    tracerGeo.setAttribute("position", new Float32BufferAttribute(new Float32Array(6), 3));
-    this.tracerLineFx = new Line(
-      tracerGeo,
-      new LineBasicMaterial({ color: 0xfff7cc, transparent: true, opacity: 0, blending: AdditiveBlending }),
+    // Traveling beam: a glowing additive cylinder that grows from the interceptor
+    // nose toward the UFO over the tracer lifetime (a moving tracer reads as a
+    // "shot"). Built once and pooled; only its transform/opacity update per frame.
+    // Unit height (y spans -0.5..0.5) so scale.y maps directly to beam length.
+    this.tracerBeamCore = new Mesh(
+      new CylinderGeometry(0.022, 0.022, 1, 8, 1, true),
+      new MeshBasicMaterial({
+        color: 0xfff7cc,
+        transparent: true,
+        opacity: 0,
+        blending: AdditiveBlending,
+        side: DoubleSide,
+        depthWrite: false,
+      }),
     );
-    this.tracerLineFx.frustumCulled = false;
-    this.tracerLineFx.visible = false;
-    this.stage.add(this.tracerLineFx);
+    this.tracerBeamCore.frustumCulled = false;
+    this.tracerBeamCore.visible = false;
+    this.stage.add(this.tracerBeamCore);
+
+    // Softer, wider outer shell wrapped around the core for a bloom-like glow.
+    this.tracerBeamGlow = new Mesh(
+      new CylinderGeometry(0.075, 0.075, 1, 12, 1, true),
+      new MeshBasicMaterial({
+        color: 0xffb347,
+        transparent: true,
+        opacity: 0,
+        blending: AdditiveBlending,
+        side: DoubleSide,
+        depthWrite: false,
+      }),
+    );
+    this.tracerBeamGlow.frustumCulled = false;
+    this.tracerBeamGlow.visible = false;
+    this.stage.add(this.tracerBeamGlow);
 
     this.muzzleFlash = new Mesh(
-      new SphereGeometry(0.18, 12, 10),
+      new SphereGeometry(0.3, 14, 12),
       new MeshBasicMaterial({ color: 0xfff1b0, transparent: true, opacity: 0, blending: AdditiveBlending }),
     );
     this.muzzleFlash.visible = false;
@@ -832,23 +866,22 @@ export class PlaneCombatView {
     this.wasEngaging = false;
   }
 
-  /** Interceptor volley: tracer beam + muzzle flash + impact burst at the UFO. */
+  /** Interceptor volley: traveling beam + muzzle flash + impact burst at the UFO. */
   private fireInterceptorVolley(dmg: number): void {
     const now = performance.now();
-    const from = this.interceptorAnchor;
-    const to = this.ufoAnchor;
-    const attr = this.tracerLineFx.geometry.getAttribute("position") as Float32BufferAttribute;
-    const arr = attr.array as Float32Array;
-    arr[0] = from.x; arr[1] = from.y; arr[2] = from.z;
-    arr[3] = to.x; arr[4] = to.y; arr[5] = to.z;
-    attr.needsUpdate = true;
-    (this.tracerLineFx.material as LineBasicMaterial).opacity = 0.95;
-    this.tracerLineFx.visible = true;
+    // Cache endpoints; the beam grows from `from` to `to` over FX_TRACER_MS in
+    // updateCombatFx — a tracer that travels toward the UFO reads as a real shot.
+    this.fxTracerFrom.copy(this.interceptorAnchor);
+    this.fxTracerTo.copy(this.ufoAnchor);
+    (this.tracerBeamCore.material as MeshBasicMaterial).opacity = 1;
+    (this.tracerBeamGlow.material as MeshBasicMaterial).opacity = 0.6;
+    this.tracerBeamCore.visible = true;
+    this.tracerBeamGlow.visible = true;
     this.fxTracerStartMs = now;
     this.fxTracerActive = true;
 
     // Muzzle flash just ahead of the interceptor nose (toward the UFO).
-    this.scratchA.copy(to).sub(from).normalize().multiplyScalar(0.9).add(from);
+    this.scratchA.copy(this.fxTracerTo).sub(this.fxTracerFrom).normalize().multiplyScalar(0.9).add(this.fxTracerFrom);
     this.muzzleFlash.position.copy(this.scratchA);
     (this.muzzleFlash.material as MeshBasicMaterial).opacity = 1;
     this.muzzleFlash.scale.setScalar(1);
@@ -856,7 +889,7 @@ export class PlaneCombatView {
     this.fxMuzzleStartMs = now;
     this.fxMuzzleActive = true;
 
-    this.fireBurst(this.ufoBurst, this.ufoBurstPos, to, now);
+    this.fireBurst(this.ufoBurst, this.ufoBurstPos, this.ufoAnchor, now);
     this.fxBurstSide = "ufo";
     if (dmg > 0) this.kickCamera(1);
   }
@@ -915,9 +948,11 @@ export class PlaneCombatView {
       const t = (now - this.fxTracerStartMs) / FX_TRACER_MS;
       if (t >= 1) {
         this.fxTracerActive = false;
-        this.tracerLineFx.visible = false;
+        this.tracerBeamCore.visible = false;
+        this.tracerBeamGlow.visible = false;
       } else {
-        (this.tracerLineFx.material as LineBasicMaterial).opacity = 0.95 * (1 - t);
+        (this.tracerBeamCore.material as MeshBasicMaterial).opacity = 0.95 * (1 - t);
+        (this.tracerBeamGlow.material as MeshBasicMaterial).opacity = 0.6 * (1 - t);
       }
     }
     if (this.fxMuzzleActive) {
