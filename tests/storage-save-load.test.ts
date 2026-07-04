@@ -56,10 +56,12 @@ describe("campaign save/load normalization", () => {
     delete (globalThis as { localStorage?: Storage }).localStorage;
   });
 
+  // "engaging" is intentionally NOT in this list: a contact is only ever "engaging"
+  // alongside a live `interception`, so an engaging contact WITHOUT one is a corrupt
+  // (stuck) state that loadCampaign reconciles to "tracked" — covered separately below.
   it.each([
     ["tracked", "tracked" as const],
     ["landed", "landed" as const],
-    ["engaging", "engaging" as const],
     ["crashed", "crashed" as const],
   ])("preserves a %s ufoContact status across a save/load round-trip", (_label, status) => {
     const campaign = freshCampaign();
@@ -74,6 +76,46 @@ describe("campaign save/load normalization", () => {
     expect(loaded!.ufoContact!.id).toBe(contact.id);
     expect(loaded!.ufoContact!.status).toBe(status);
     expect(loaded!.ufoContact!.missionType).toBe("terror");
+  });
+
+  it("round-trips a live engagement (engaging contact + matching interception) intact", () => {
+    const campaign = freshCampaign();
+    // A tracked crashSite contact at the base position drops straight into engagement.
+    const contact = createUfoContact(campaign, 18, "crashSite");
+    const staged: CampaignState = {
+      ...campaign,
+      clock: { ...campaign.clock, elapsedHours: 18 },
+      ufoContact: { ...contact, lat: campaign.base.lat, lon: campaign.base.lon },
+    };
+    const engaged = startInterceptionEncounter(staged);
+    expect(engaged.ufoContact!.status).toBe("engaging");
+    expect(engaged.interception).toBeDefined();
+
+    saveCampaign(engaged);
+    const loaded = loadCampaign();
+
+    expect(loaded!.ufoContact!.status).toBe("engaging");
+    expect(loaded!.interception).toBeDefined();
+    expect(loaded!.interception!.contactId).toBe(contact.id);
+    expect(canResolveInterception(loaded!)).toBe(true);
+  });
+
+  it("reconciles a stuck engaging contact (no valid interception) back to tracked on load", () => {
+    // Simulates a save captured mid-engagement on a previous build whose interception
+    // wire schema no longer normalizes: the contact would otherwise sit inert at
+    // "engaging", un-actable and un-re-engageable, until it expires and penalizes the
+    // player. loadCampaign must reopen it to "tracked" and drop the orphan encounter.
+    const campaign = freshCampaign();
+    const contact = { ...createUfoContact(campaign, 18, "terror"), status: "engaging" as const };
+    const staged: CampaignState = { ...campaign, ufoContact: contact, interception: undefined };
+
+    saveCampaign(staged);
+    const loaded = loadCampaign();
+
+    expect(loaded!.ufoContact).toBeDefined();
+    expect(loaded!.ufoContact!.status).toBe("tracked");
+    expect(loaded!.interception).toBeUndefined();
+    expect(canResolveInterception(loaded!)).toBe(false);
   });
 
   it("drops a stale escaped contact on load (matching applyInterceptionOutcome clearing ufoContact)", () => {

@@ -40,7 +40,6 @@ import type {
   BaseLocation,
   CampaignState,
   DifficultyLevel,
-  InterceptionEncounter,
   MissionType,
   UfoContact,
   UfoType,
@@ -48,7 +47,7 @@ import type {
 import {
   canLaunchInterceptor,
   contactSpeedDegPerHour,
-  executeInterceptionAction,
+  ENGAGEMENT_RANGE_KM,
   formatCampaignClock,
   GEOSCAPE_SCAN_HOURS,
   greatCircleDestination,
@@ -57,6 +56,7 @@ import {
   type InterceptionSpeedAdvantage,
   interceptionSpeedAdvantage,
   isInterceptorReady,
+  STERN_ESCAPE_KM,
   ufoTypeInfo,
 } from "../campaign/geoscape";
 import { generateOperation } from "../campaign/operations";
@@ -108,10 +108,16 @@ interface GeoscapeOptions {
   onAdvanceTime: (hours: number) => void;
   onInterceptUfo: () => void;
   onResetCampaign: () => void;
-  /** Fires for each Close / Attack / Disengage choice during an active interception encounter. */
+  /** Fires for each Keep Chasing / Disengage choice during an active pursuit. */
   onInterceptionAction?: (action: InterceptionAction) => void;
-  /** Presentation-only SFX cue during the geoscape interception beats. */
-  onInterceptorSfx?: (kind: "launch" | "cannon" | "bolt" | "explosion") => void;
+  /** Presentation-only SFX cue for the interceptor launching on a fresh pursuit. */
+  onInterceptorSfx?: (kind: "launch") => void;
+  /**
+   * Fired once the pursuit's real km gap closes to <=ENGAGEMENT_RANGE_KM (THE ZOOM).
+   * NAV disposes the geoscape and mounts PlaneCombatView for the cinematic dogfight;
+   * the pursuit act's job ends here — combat resolution lives in that view.
+   */
+  onZoomToDogfight?: (campaign: CampaignState) => void;
   /** Designate a new radar base on the globe (multi-base campaign). */
   onBuildNewBase?: (location: BaseLocation) => void;
   /** Launch the endgame final assault on the revealed alien HQ. */
@@ -211,14 +217,6 @@ function markHintsSeen(): void {
 const EARTH_RADIUS = 1.5;
 const UP = new Vector3(0, 1, 0);
 
-/** Engagement range at which an interception encounter begins (mirrors the campaign layer). */
-const ENCOUNTER_START_RANGE = 3;
-/**
- * Range at which an out-run UFO breaks the stern chase and escapes (mirrors the
- * campaign layer's ENCOUNTER_STERN_ESCAPE_RANGE). Presentation-only: it lets the
- * closing arc ease the displayed range fully open on the escape beat.
- */
-const ENCOUNTER_STERN_ESCAPE_RANGE = 6;
 /** Sampling resolution of the base->UFO great-circle trajectory line. */
 const TRAJECTORY_SEGMENTS = 24;
 /**
@@ -246,17 +244,7 @@ const PURSUIT_DRIFT_SCALE_MIN = 0.6;
 const PURSUIT_DRIFT_SCALE_MAX = 2.4;
 /** Arc fraction the launch flight covers; the remaining slice is range-driven closing. */
 const INTERCEPTOR_FLIGHT_END = 0.82;
-/** Combat exchange beat: precompute the outcome, play the volley, THEN reveal it. */
-const EXCHANGE_BEAT_MS = 2100;
-/** Delay from the interceptor volley to the UFO's return bolt within one exchange. */
-const RETURN_BOLT_DELAY_MS = 640;
-/** Close-in beat: eases the marker to the new range band before applying. */
-const CLOSE_BEAT_MS = 1000;
-/** Disengage beat: brief break-off before the UFO returns to tracked. */
-const DISENGAGE_BEAT_MS = 750;
-/** Resolution beat (UFO crash-fall / escape streak) before the overlay updates. */
-const RESOLUTION_BEAT_MS = 1500;
-/** Per-frame ease factor pulling the displayed engagement range toward its target. */
+/** Per-frame ease factor pulling the displayed pursuit range (km) toward its target. */
 const RANGE_EASE = 0.1;
 /** Pursuit drift: the tracked UFO keeps flying during the fly-out (presentation-only,
  *  never written to campaign state) so the interceptor visibly curves after it. */
@@ -269,8 +257,6 @@ const CHASE_TARGET_WEIGHT = 0.22;
 const CHASE_EASE = 0.05;
 /** Sampling resolution of the base->site Skyranger trajectory line. */
 const DEPLOYMENT_SEGMENTS = 32;
-/** Particles per interception impact burst (precomputed; no per-frame allocation). */
-const BURST_PARTICLES = 14;
 
 /** Max sampled points of the UFO flight trail (one per refresh while airborne). */
 const UFO_TRAIL_MAX = 48;
@@ -280,14 +266,6 @@ const UFO_TRAIL_MIN_DEG = 0.4;
 const FLIGHT_TRAIL_MAX = 24;
 /** Min degrees between two flight-trail samples (avoids a dense blob when creeping). */
 const FLIGHT_TRAIL_MIN_DEG = 0.4;
-
-/** Interception combat-FX durations, in milliseconds. */
-const FX_TRACER_MS = 200;
-const FX_MUZZLE_MS = 130;
-const FX_BURST_MS = 430;
-const FX_SHAKE_MS = 240;
-/** Camera shake magnitude (world units) at hit onset; decays over FX_SHAKE_MS. */
-const FX_SHAKE_MAGNITUDE = 0.03;
 
 /**
  * Id of the UFO contact whose "new detection" slide+glow entrance has already been
@@ -300,14 +278,6 @@ let announcedContactId: string | null = null;
 
 /** Contrail particles per craft (ring buffer; no per-frame allocation). */
 const CONTRAIL_MAX = 36;
-/** Particles in the dogfight explosion burst (larger than the standard impact burst). */
-const EXPLOSION_PARTICLES = 26;
-/** Multi-round tracer pulses fired per interceptor volley (reads as a cannon burst). */
-const VOLLEY_ROUNDS = 3;
-/** Stagger between successive tracer rounds within one volley, in milliseconds. */
-const VOLLEY_ROUND_MS = 65;
-/** Ms the interceptor "taking fire" threat badge + screen flash stays lit. */
-const THREAT_FLASH_MS = 420;
 
 interface SpeedOption {
   speed: number;
@@ -1008,30 +978,6 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   background: var(--ui-panel-solid);
   backdrop-filter: blur(4px);
 }
-#geoscape .geo-bar { margin: var(--ui-sp-2) 0; }
-#geoscape .geo-bar-label {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 4px;
-  color: var(--ui-muted);
-  font: 700 var(--ui-text-xs)/1 var(--ui-font-mono);
-  letter-spacing: .12em;
-  text-transform: uppercase;
-}
-#geoscape .geo-bar-track {
-  height: 10px;
-  border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-pill);
-  background: rgba(255,255,255,.08);
-  overflow: hidden;
-}
-#geoscape .geo-bar-fill {
-  height: 100%;
-  border-radius: var(--ui-radius-pill);
-  transition: width var(--ui-mid) var(--ui-ease);
-}
-#geoscape .geo-bar-fill.ufo { background: var(--ui-red); }
-#geoscape .geo-bar-fill.interceptor { background: var(--ui-cyan); }
 #geoscape .geo-overlay-host {
   position: absolute;
   inset: 0;
@@ -1243,24 +1189,6 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
 #geoscape .geo-toast[data-kind="lost"] {
   border-left-color: var(--ui-red);
 }
-#geoscape .geo-damage-layer {
-  position: absolute;
-  inset: 0;
-  z-index: 7;
-  pointer-events: none;
-}
-#geoscape .geo-dmg {
-  position: absolute;
-  transform: translate(-50%, -50%);
-  color: var(--ui-text-strong);
-  font: 800 var(--ui-text-base)/1 var(--ui-font-mono);
-  letter-spacing: .03em;
-  text-shadow: 0 1px 3px rgba(0,0,0,.9), 0 0 8px rgba(0,0,0,.6);
-  animation: geo-dmg-float .9s ease-out forwards;
-  white-space: nowrap;
-}
-#geoscape .geo-dmg.ufo { color: var(--ui-amber); }
-#geoscape .geo-dmg.interceptor { color: var(--ui-red); }
 /* Callout pinned to the active UFO marker so the player sees where to act. */
 #geoscape .geo-contact-label {
   position: absolute;
@@ -1277,11 +1205,6 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   white-space: nowrap;
   pointer-events: none;
   box-shadow: var(--ui-shadow);
-}
-@keyframes geo-dmg-float {
-  0% { opacity: 0; transform: translate(-50%, -30%) scale(.7); }
-  15% { opacity: 1; transform: translate(-50%, -55%) scale(1.05); }
-  100% { opacity: 0; transform: translate(-50%, -140%) scale(1); }
 }
 #geoscape .geo-threat-tag {
   display: inline-flex;
@@ -1305,19 +1228,8 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   50% { box-shadow: 0 0 14px rgba(248,113,113,.7); }
   100% { box-shadow: 0 0 0 rgba(248,113,113,0); }
 }
-#geoscape .geo-threat-flash {
-  position: absolute;
-  inset: 0;
-  z-index: 6;
-  pointer-events: none;
-  opacity: 0;
-  background: radial-gradient(circle at 50% 60%, rgba(248,68,68,.34), rgba(120,8,16,.18) 55%, transparent 80%);
-  mix-blend-mode: screen;
-  transition: opacity .12s ease;
-}
-#geoscape .geo-threat-flash.active { opacity: 1; transition: opacity .05s ease; }
-/* On-globe interception HUD: a compact, non-blocking panel pinned bottom-centre so
-   the dogfight over the globe stays fully visible behind it. */
+/* On-globe PURSUIT HUD: a compact, non-blocking panel pinned bottom-centre so
+   the chase over the globe stays fully visible behind it. */
 #geoscape .geo-intercept {
   position: absolute;
   left: 50%;
@@ -1347,8 +1259,12 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   color: var(--ui-cyan); font: 700 var(--ui-text-xs)/1 var(--ui-font-mono);
   letter-spacing: .1em; text-transform: uppercase; white-space: nowrap;
 }
-#geoscape .geo-intercept .geo-bars { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 6px 0 0; }
-#geoscape .geo-intercept .geo-bar-label span:last-child { text-transform: none; letter-spacing: 0; color: var(--ui-text); }
+#geoscape .geo-intercept-sub {
+  margin: 2px 0 0; color: var(--ui-muted);
+  font: 600 var(--ui-text-xs)/1.3 var(--ui-font-mono);
+  letter-spacing: .04em;
+}
+#geoscape .geo-intercept-sub.warn { color: var(--ui-amber); }
 #geoscape .geo-intercept-log {
   min-height: 1.35em; margin: 8px 0 0; color: var(--ui-muted);
   font: 500 var(--ui-text-xs)/1.4 var(--ui-font-mono);
@@ -1381,11 +1297,10 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   outline: 2px solid var(--ui-cyan);
   outline-offset: 2px;
 }
-/* Respect prefers-reduced-motion: stop the floating damage numbers and the
-   threat pulse, and collapse transitions. The 3D marker throb + camera shake
-   are additionally frozen from JS via Geoscape.reducedMotion. */
+/* Respect prefers-reduced-motion: stop the threat pulse and collapse transitions.
+   The 3D marker throb + pursuit contrails are additionally frozen from JS via
+   Geoscape.reducedMotion. */
 @media (prefers-reduced-motion: reduce) {
-  #geoscape .geo-dmg { animation: none !important; }
   #geoscape .geo-threat-tag.active { animation: none !important; }
   #geoscape *,
   #geoscape *::before,
@@ -1707,33 +1622,23 @@ export class GeoscapeView {
   private readonly ufoN0 = new Vector3();
   /** Axis the UFO's presentation drift rotates about (perp to ufoN0, along its heading). */
   private readonly pursuitAxis = new Vector3(1, 0, 0);
-  /** Eased engagement range that drives the interceptor's closing arc (smooth, not snapped). */
-  private displayRange = ENCOUNTER_START_RANGE;
+  /** Eased pursuit range (real km) that drives the interceptor's closing arc (smooth, not snapped). */
+  private displayRange = ENGAGEMENT_RANGE_KM;
+  /** Real km gap captured at the start of the current pursuit; normalizes the closing arc. */
+  private pursuitStartRangeKm = ENGAGEMENT_RANGE_KM;
   /** Eased OrbitControls target so the camera gently tracks the interceptor while engaging. */
   private readonly chaseTarget = new Vector3();
 
-  // --- Interception combat beats (precompute -> animate -> reveal) ---
-  private beatActive = false;
-  private beatKind: "exchange" | "close" | "disengage" | "resolution" = "exchange";
-  private beatAction: InterceptionAction = "attack";
-  private beatStartMs = 0;
-  private beatReturnFired = false;
-  private beatUfoReturns = false;
-  private beatIntDmg = 0;
-  private beatTerminal: null | "crashed" | "escaped" = null;
-  private beatRangeTarget: number | null = null;
-  /** Report line shown on a stern-chase escape ("UFO outran [craft]"); null = use the campaign log. */
-  private beatEscapeReport: string | null = null;
+  // --- Pursuit HUD (rangeKm + keepChasing/disengage; no combat exchange on the globe) ---
   private interceptOverlayEl: HTMLDivElement | null = null;
   private interceptButtons: HTMLButtonElement[] = [];
-  private ufoHpFill: HTMLDivElement | null = null;
-  private interceptorHpFill: HTMLDivElement | null = null;
-  private ufoHpVal: HTMLSpanElement | null = null;
-  private interceptorHpVal: HTMLSpanElement | null = null;
   private interceptRangeLabel: HTMLSpanElement | null = null;
+  private interceptSubLine: HTMLDivElement | null = null;
   private interceptLogLine: HTMLDivElement | null = null;
   /** Last-refresh engagement state; a false->true transition kicks off the launch flight. */
   private wasEngaging = false;
+  /** contactId THE ZOOM has already fired for; guards a double-fire of onZoomToDogfight. */
+  private zoomedContactId: string | null = null;
   private toastTimer: number | undefined;
 
   // Dynamic DOM containers populated by refresh() (static shell lives in buildHud()).
@@ -1777,32 +1682,6 @@ export class GeoscapeView {
   /** Scratch for projecting a marker to screen space for damage numbers (per hit, not per frame). */
   private readonly scratchProject = new Vector3();
 
-  // --- Interception combat FX (allocated once in buildCombatFx, reused per hit) ---
-  private tracerLineFx!: Line;
-  /** UFO return-fire bolt (red, ufo->interceptor); paired with tracerLineFx (teal). */
-  private ufoBoltLineFx!: Line;
-  private ufoBoltStartMs = 0;
-  private ufoBoltActive = false;
-  private muzzleFlash!: Mesh;
-  private ufoBurst!: Points;
-  private interceptorBurst!: Points;
-  private readonly ufoBurstVel = new Float32Array(BURST_PARTICLES * 3);
-  private readonly interceptorBurstVel = new Float32Array(BURST_PARTICLES * 3);
-  private prevUfoHp: number | null = null;
-  private prevInterceptorHp: number | null = null;
-  private fxTracerStartMs = 0;
-  private fxMuzzleStartMs = 0;
-  /** Shared burst clock: the UFO + interceptor bursts fire together in one exchange. */
-  private fxBurstStartMs = 0;
-  private fxTracerActive = false;
-  private fxMuzzleActive = false;
-  private fxUfoBurstActive = false;
-  private fxInterceptorBurstActive = false;
-  private shakeStartMs = 0;
-  private shakeActive = false;
-  private shakeMagnitude = FX_SHAKE_MAGNITUDE;
-  private readonly cameraBase = new Vector3();
-  private damageLayer: HTMLDivElement | null = null;
   /** Screen-space callout pinned to the active UFO marker ("where to act"). */
   private contactLabel: HTMLDivElement | null = null;
   /** Cached label text so the DOM is only rewritten when the contact changes. */
@@ -1838,18 +1717,6 @@ export class GeoscapeView {
   private readonly ufoContrailRing = new Float32Array(CONTRAIL_MAX * 3);
   private readonly interceptorContrailState = { head: 0, count: 0 };
   private readonly ufoContrailState = { head: 0, count: 0 };
-
-  // --- Amplified dogfight FX (bigger explosions, multi-round volleys) ---
-  private explosionBurst!: Points;
-  private readonly explosionBurstVel = new Float32Array(EXPLOSION_PARTICLES * 3);
-  private fxExplosionActive = false;
-  private volleyRounds = 0;
-  private volleyNextMs = 0;
-  private volleyDamageShown = false;
-
-  // --- Dogfight HUD "taking fire" threat flash ---
-  private threatFlash: HTMLDivElement | null = null;
-  private threatFlashTimer: number | undefined;
 
   // --- Non-blocking Skyranger deployment ---
   /**
@@ -1916,9 +1783,9 @@ export class GeoscapeView {
     // UFO flight trail allocated once; positions + per-vertex fade are rewritten per refresh.
     this.ufoTrailLine = this.makeUfoTrailLine();
     this.earthMesh = this.buildScene();
-    this.buildCombatFx();
+    this.buildChaseFx();
     this.buildDeploymentFx();
-    this.buildDamageLayer();
+    this.buildContactLabel();
     const panels = this.buildHud();
     this.selectedRegion = panels.region;
     this.selectedCoords = panels.coords;
@@ -2009,7 +1876,6 @@ export class GeoscapeView {
     this.disposed = true;
     cancelAnimationFrame(this.raf);
     if (this.toastTimer !== undefined) window.clearTimeout(this.toastTimer);
-    if (this.threatFlashTimer !== undefined) window.clearTimeout(this.threatFlashTimer);
     window.removeEventListener("resize", this.resize);
     window.removeEventListener("keydown", this.onKeydown);
     this.renderer.domElement.removeEventListener("pointerdown", this.onPointerDown);
@@ -2021,7 +1887,6 @@ export class GeoscapeView {
     this.closeGeoModal();
     this.root.remove();
     this.deployArrivedFired.clear();
-    this.damageLayer = null;
     delete (window as unknown as { __geoMarkers?: () => unknown }).__geoMarkers;
   }
 
@@ -2421,6 +2286,7 @@ export class GeoscapeView {
     this.refreshChips();
     this.refreshActions();
     this.refreshOverlay();
+    this.refreshZoomTransition();
     this.refreshMarkers();
     this.refreshInterceptor();
     this.refreshSpeedState();
@@ -2440,10 +2306,34 @@ export class GeoscapeView {
         : "Drag to rotate / wheel to zoom / click Earth to designate base";
   }
 
-  /** True while an interactive interception encounter overlay is open. */
+  /** True while an interactive interception encounter (pursuit or engagement) is live. */
   private isEngaging(): boolean {
     const c = this.campaign;
     return !!c?.interception && c?.ufoContact?.status === "engaging";
+  }
+
+  /** True while the encounter is still the globe pursuit act (before THE ZOOM). */
+  private isPursuing(): boolean {
+    const c = this.campaign;
+    return !!c?.interception && c.ufoContact?.status === "engaging" && c.interception.phase !== "engagement";
+  }
+
+  /**
+   * Fire onZoomToDogfight exactly once per encounter, the frame its real km gap
+   * crosses into the engagement phase. NAV (main.ts) disposes this view and mounts
+   * PlaneCombatView in response — the pursuit act's job ends here.
+   */
+  private refreshZoomTransition(): void {
+    const c = this.campaign;
+    const enc = c?.interception;
+    if (!c || !enc || c.ufoContact?.status !== "engaging") {
+      this.zoomedContactId = null;
+      return;
+    }
+    if (enc.phase === "engagement" && this.zoomedContactId !== enc.contactId) {
+      this.zoomedContactId = enc.contactId;
+      this.opts.onZoomToDogfight?.(c);
+    }
   }
 
   /** Pause + toast when a notable event appears versus the previously rendered snapshot. */
@@ -3099,11 +2989,10 @@ export class GeoscapeView {
   }
 
   private refreshOverlay(): void {
-    if (this.isEngaging()) {
-      // Keep the live panel (with its button + beat state) mounted while a beat
-      // plays; only sync the numbers. Rebuild otherwise (engagement start / after
-      // a beat finalizes with fresh HP).
-      if (this.beatActive && this.interceptOverlayEl) {
+    if (this.isPursuing()) {
+      // Mount the pursuit HUD once per pursuit and just resync its numbers on every
+      // later refresh — no beat/reveal delay: keepChasing/disengage apply immediately.
+      if (this.interceptOverlayEl) {
         this.syncInterceptionOverlay();
         return;
       }
@@ -3506,8 +3395,9 @@ export class GeoscapeView {
     if (fresh) {
       this.interceptorFlightStartMs = performance.now();
       this.resetContrails();
-      this.resetBeatState();
-      this.displayRange = c?.interception?.range ?? ENCOUNTER_START_RANGE;
+      this.zoomedContactId = null;
+      this.pursuitStartRangeKm = Math.max(1, c?.interception?.rangeKm ?? ENGAGEMENT_RANGE_KM);
+      this.displayRange = this.pursuitStartRangeKm;
       this.opts.onInterceptorSfx?.("launch");
     }
     this.wasEngaging = engaging;
@@ -3652,8 +3542,8 @@ export class GeoscapeView {
     // to the UFO; then hand off to the (smoothly eased) range-driven closing slice.
     const dur = this.interceptorFlightDurationMs || FLYOUT_MIN_MS;
     const flightT = Math.min(1, Math.max(0, (now - this.interceptorFlightStartMs) / dur));
-    const rangeArc =
-      INTERCEPTOR_FLIGHT_END + (1 - this.displayRange / ENCOUNTER_START_RANGE) * (1 - INTERCEPTOR_FLIGHT_END);
+    const closedFraction = Math.max(0, Math.min(1, 1 - this.displayRange / this.pursuitStartRangeKm));
+    const rangeArc = INTERCEPTOR_FLIGHT_END + closedFraction * (1 - INTERCEPTOR_FLIGHT_END);
     const progress = flightT < 1 ? easeInOutCubic(flightT) * INTERCEPTOR_FLIGHT_END : Math.min(1, rangeArc);
     slerpUnit(route.baseN, route.ufoN, progress, this.scratchA); // unit direction at the craft
     this.scratchA.normalize().multiplyScalar(EARTH_RADIUS + 0.14);
@@ -3677,13 +3567,13 @@ export class GeoscapeView {
    * Presentation pursuit: the tracked UFO keeps flying while the interceptor closes,
    * so the chase reads as a curve, not a teleport. The drift is purely visual — it
    * rotates the ROUTE target (and repositions the UFO marker) about the heading axis
-   * and is NEVER written back to campaign state. Frozen during a combat beat (so the
-   * exchange is stable) and once the interceptor has arrived; skipped on reducedMotion.
+   * and is NEVER written back to campaign state. Stops once the interceptor has
+   * arrived or THE ZOOM has fired; skipped on reducedMotion.
    */
   private applyPursuitDrift(now: number): void {
-    if (this.reducedMotion || this.beatActive) return;
+    if (this.reducedMotion) return;
     const route = this.interceptorRoute;
-    if (!route || !this.isEngaging()) return;
+    if (!route || !this.isPursuing()) return;
     const dur = this.interceptorFlightDurationMs || FLYOUT_MIN_MS;
     const flightT = (now - this.interceptorFlightStartMs) / dur;
     if (flightT >= 1) return; // stop drifting once the interceptor has closed
@@ -3724,86 +3614,72 @@ export class GeoscapeView {
     this.controls.target.lerp(this.chaseTarget, CHASE_EASE);
   }
 
+  /** Ease the displayed range (km) toward the encounter's real gap so marker motion
+   *  is smooth rather than snapped, every frame the pursuit is live. */
+  private easePursuitRange(): void {
+    const enc = this.campaign?.interception;
+    if (!enc) return;
+    this.displayRange += (enc.rangeKm - this.displayRange) * RANGE_EASE;
+  }
+
   /**
-   * Build the on-globe interception HUD panel (bottom-centre, non-blocking so the
-   * dogfight stays visible). Holds both HP bars, the range/log readout, and the
-   * Close/Attack/Disengage actions. Actions do NOT apply instantly — each starts a
-   * combat beat (see onInterceptClick) that plays before the result is revealed.
+   * Build the on-globe PURSUIT HUD panel (bottom-centre, non-blocking so the chase
+   * over the globe stays fully visible). Real km range + closing speed, plus the
+   * two pursuit verbs — keepChasing / disengage. No attack here: weapons only fire
+   * once THE ZOOM hands the encounter to the cinematic dogfight (planeCombatView).
    */
   private buildInterceptionOverlay(): HTMLElement {
     const contact = this.campaign?.ufoContact;
     const panel = el("div", "geo-intercept");
     const head = el("div", "geo-intercept-head");
     const title = el("div", "geo-intercept-title");
-    title.textContent = `Intercept — ${ufoTypeInfo(contact?.ufoType).label}`;
+    title.textContent = `Pursuit — ${ufoTypeInfo(contact?.ufoType).label}`;
     const range = el("span", "geo-intercept-range");
     this.interceptRangeLabel = range;
     head.append(title, range);
 
-    const bars = el("div", "geo-bars");
-    bars.append(this.buildHpBar("interceptor", "Interceptor"), this.buildHpBar("ufo", "UFO"));
+    const sub = el("div", "geo-intercept-sub");
+    this.interceptSubLine = sub;
 
     const log = el("div", "geo-intercept-log");
     this.interceptLogLine = log;
 
     const actions = el("div", "geo-intercept-actions");
-    const close = el("button", "ui-btn");
-    close.type = "button";
-    close.textContent = "Close in";
-    close.title = "Drop the range one band — closing raises both sides' hit odds and damage.";
-    const attack = el("button", "ui-btn ui-btn--danger");
-    attack.type = "button";
-    attack.textContent = "Attack";
-    attack.title = "Exchange fire at the current range: your volley hits the UFO, then it shoots back.";
+    const keepChasing = el("button", "ui-btn ui-btn--danger");
+    keepChasing.type = "button";
+    keepChasing.textContent = "Keep Chasing";
+    keepChasing.title = `Press the pursuit — closes the gap toward the ${groupThousands(ENGAGEMENT_RANGE_KM)}km engagement range (or lets it open if the UFO outruns you).`;
     const disengage = el("button", "ui-btn");
     disengage.type = "button";
     disengage.textContent = "Disengage";
     disengage.title = "Break off the chase and send the interceptor home, leaving the UFO tracked.";
-    close.addEventListener("click", () => this.onInterceptClick("close"));
-    attack.addEventListener("click", () => this.onInterceptClick("attack"));
-    disengage.addEventListener("click", () => this.onInterceptClick("disengage"));
-    actions.append(close, attack, disengage);
-    this.interceptButtons = [close, attack, disengage];
+    keepChasing.addEventListener("click", () => this.onPursuitAction("keepChasing"));
+    disengage.addEventListener("click", () => this.onPursuitAction("disengage"));
+    actions.append(keepChasing, disengage);
+    this.interceptButtons = [keepChasing, disengage];
 
-    panel.append(head, bars, log, actions);
+    panel.append(head, sub, log, actions);
     this.interceptOverlayEl = panel;
     this.syncInterceptionOverlay();
     return panel;
   }
 
-  private buildHpBar(kind: "ufo" | "interceptor", label: string): HTMLElement {
-    const bar = el("div", "geo-bar");
-    const lab = el("div", "geo-bar-label");
-    const name = el("span");
-    name.textContent = label;
-    const val = el("span");
-    const track = el("div", "geo-bar-track");
-    const fill = el("div", `geo-bar-fill ${kind}`);
-    track.append(fill);
-    lab.append(name, val);
-    bar.append(lab, track);
-    if (kind === "ufo") {
-      this.ufoHpFill = fill;
-      this.ufoHpVal = val;
-    } else {
-      this.interceptorHpFill = fill;
-      this.interceptorHpVal = val;
-    }
-    return bar;
-  }
-
-  /** Push the current (already-applied) encounter numbers into the overlay DOM. */
+  /** Push the current (already-applied) encounter numbers into the pursuit HUD DOM. */
   private syncInterceptionOverlay(): void {
     const enc = this.campaign?.interception;
     if (!enc || !this.interceptOverlayEl) return;
-    const ufoPct = Math.max(0, Math.min(100, (enc.ufoHp / enc.ufoHpMax) * 100));
-    const intPct = Math.max(0, Math.min(100, (enc.interceptorHp / enc.interceptorHpMax) * 100));
-    if (this.ufoHpFill) this.ufoHpFill.style.width = `${ufoPct}%`;
-    if (this.interceptorHpFill) this.interceptorHpFill.style.width = `${intPct}%`;
-    if (this.ufoHpVal) this.ufoHpVal.textContent = `${Math.round(enc.ufoHp)}/${enc.ufoHpMax}`;
-    if (this.interceptorHpVal) this.interceptorHpVal.textContent = `${Math.round(enc.interceptorHp)}/${enc.interceptorHpMax}`;
-    if (this.interceptRangeLabel) this.interceptRangeLabel.textContent = `Range ${enc.range}`;
+    if (this.interceptRangeLabel) {
+      this.interceptRangeLabel.textContent = `${groupThousands(Math.max(0, Math.round(enc.rangeKm)))} km`;
+    }
+    if (this.interceptSubLine) {
+      const outrunning = enc.closingSpeedKmH <= 0;
+      this.interceptSubLine.textContent = outrunning
+        ? `${ufoTypeInfo(this.campaign?.ufoContact?.ufoType).label} is outrunning you — range opening. Contact lost past ${groupThousands(STERN_ESCAPE_KM)} km.`
+        : `Closing at ${groupThousands(Math.round(enc.closingSpeedKmH))} km/h — THE ZOOM triggers at ${groupThousands(ENGAGEMENT_RANGE_KM)} km.`;
+      this.interceptSubLine.classList.toggle("warn", outrunning);
+    }
     if (this.interceptLogLine) this.interceptLogLine.textContent = enc.log[enc.log.length - 1] ?? "";
+    this.setInterceptButtonsDisabled(false);
   }
 
   private setInterceptButtonsDisabled(disabled: boolean): void {
@@ -3811,173 +3687,19 @@ export class GeoscapeView {
   }
 
   /**
-   * A player action: precompute the deterministic outcome (visual-only — NOT
-   * applied), then start the matching combat beat. The real state change is applied
-   * (via onInterceptionAction) only when the beat finishes, so the result is
-   * revealed AFTER the animation instead of snapping instantly. Guarded + buttons
-   * disabled so rapid clicks can't overlap beats.
+   * A pursuit verb (keepChasing / disengage): applied immediately — no beat/reveal
+   * delay, since the thrill (lock-on tension, missile travel, hit/miss reveals)
+   * lives in the cinematic dogfight past THE ZOOM, not on the globe. Buttons are
+   * disabled until the next refresh re-syncs so a rapid double-click can't double-fire.
    */
-  private onInterceptClick(action: InterceptionAction): void {
-    if (this.beatActive || !this.isEngaging()) return;
-    const enc = this.campaign?.interception;
-    const campaign = this.campaign;
-    if (!enc || !campaign) return;
-    // Deterministic preview: executeInterceptionAction is pure, so recomputing it
-    // here (for FX deltas) yields exactly what main will apply on finalize.
-    const next = executeInterceptionAction(campaign, action);
-    this.beginBeat(action, enc, next);
-  }
-
-  private beginBeat(action: InterceptionAction, enc: InterceptionEncounter, next: CampaignState): void {
-    this.beatActive = true;
-    this.beatAction = action;
-    this.beatStartMs = performance.now();
-    this.beatReturnFired = false;
-    this.beatRangeTarget = null;
-    this.beatTerminal = null;
-    this.beatEscapeReport = null;
+  private onPursuitAction(action: InterceptionAction): void {
+    if (!this.isPursuing()) return;
     this.setInterceptButtonsDisabled(true);
-    const nextEnc = next.interception;
-    const resolved = nextEnc === undefined && action !== "disengage";
-
-    if (action === "attack") {
-      this.beatKind = "exchange";
-      const ufoDmg = resolved ? enc.ufoHp : enc.ufoHp - (nextEnc?.ufoHp ?? enc.ufoHp);
-      this.beatIntDmg = nextEnc ? Math.max(0, enc.interceptorHp - nextEnc.interceptorHp) : 0;
-      // The log records "UFO returns Y" every attack round, so the UFO always
-      // shoots back unless the exchange left the interceptor untouched.
-      this.beatUfoReturns = this.beatIntDmg > 0 || (resolved && next.ufoContact?.status === "escaped");
-      const outrun = this.engagementOutrun();
-      if (resolved) {
-        this.beatTerminal = next.ufoContact?.status === "crashed" ? "crashed" : "escaped";
-        // Stern-chase escape: the range opened past the break-off threshold. Ease the
-        // displayed range fully open during the exchange and stamp a distinct
-        // "UFO outran [craft]" report line for the escape resolution beat. Guarded by
-        // the range threshold so a shot-down interceptor still reads as a normal escape.
-        if (this.beatTerminal === "escaped" && outrun && enc.range + 1 >= ENCOUNTER_STERN_ESCAPE_RANGE) {
-          this.beatRangeTarget = ENCOUNTER_STERN_ESCAPE_RANGE;
-          const craftName =
-            (this.campaign ? chooseInterceptor(this.campaign)?.name : undefined) ?? "the interceptor";
-          const contactId = this.campaign?.ufoContact?.id ?? "UFO";
-          this.beatEscapeReport = `${contactId} outran ${craftName} — contact lost.`;
-        }
-      } else if (nextEnc && nextEnc.range !== enc.range) {
-        // Non-terminal outrun attack: the campaign opened the range one band — ease
-        // the displayed range open so the interceptor visibly falls back.
-        this.beatRangeTarget = nextEnc.range;
-      }
-      this.triggerInterceptorVolley(ufoDmg); // interceptor teal tracer fires at t=0
-      return;
-    }
-
-    if (action === "close") {
-      this.beatKind = "close";
-      this.beatRangeTarget = nextEnc?.range ?? Math.max(0, enc.range - 1);
-      return;
-    }
-
-    // disengage
-    this.beatKind = "disengage";
-  }
-
-  /** Frame driver for an active combat beat: schedule the return bolt, ease range,
-   *  chain the resolution beat, and finalize (apply the real result) when done. */
-  private updateInterceptionBeat(now: number): void {
-    // Always ease the displayed range toward its target so marker motion is smooth.
-    const enc = this.campaign?.interception;
-    const target = this.beatActive && this.beatRangeTarget !== null ? this.beatRangeTarget : enc?.range ?? this.displayRange;
-    this.displayRange += (target - this.displayRange) * RANGE_EASE;
-    if (!this.beatActive) return;
-    const elapsed = now - this.beatStartMs;
-
-    if (this.beatKind === "exchange") {
-      if (!this.beatReturnFired && elapsed >= RETURN_BOLT_DELAY_MS) {
-        this.beatReturnFired = true;
-        if (this.beatUfoReturns) this.triggerInterceptorHit(this.beatIntDmg);
-      }
-      if (elapsed >= EXCHANGE_BEAT_MS) {
-        if (this.beatTerminal) this.startResolutionBeat(now);
-        else this.finalizeBeat();
-      }
-      return;
-    }
-    if (this.beatKind === "resolution") {
-      this.updateResolutionBeat(now, elapsed);
-      if (elapsed >= RESOLUTION_BEAT_MS) this.finalizeBeat();
-      return;
-    }
-    if (this.beatKind === "close") {
-      if (elapsed >= CLOSE_BEAT_MS) this.finalizeBeat();
-      return;
-    }
-    // disengage
-    if (elapsed >= DISENGAGE_BEAT_MS) this.finalizeBeat();
-  }
-
-  /** Transition an exchange that killed/escaped the UFO into a short resolution beat. */
-  private startResolutionBeat(now: number): void {
-    this.beatKind = "resolution";
-    this.beatStartMs = now;
-    // On a stern-chase escape, surface the "UFO outran [craft]" report line as the
-    // escape streak plays (the campaign log is gone once the encounter resolves).
-    if (this.beatEscapeReport && this.interceptLogLine) {
-      this.interceptLogLine.textContent = this.beatEscapeReport;
-    }
-    if (this.beatTerminal === "crashed") {
-      // Crash-fall: a heavy explosion at the UFO + hard camera kick.
-      this.fireExplosion(this.ufoMarker.position, now);
-      this.kickCameraHard();
-      this.opts.onInterceptorSfx?.("explosion");
-    }
-  }
-
-  /** Animate the terminal outcome: UFO crash-falls toward the surface, or streaks away. */
-  private updateResolutionBeat(now: number, elapsed: number): void {
-    const t = Math.min(1, elapsed / RESOLUTION_BEAT_MS);
-    if (!this.ufoMarker.visible) return;
-    if (this.beatTerminal === "crashed") {
-      // Sink the marker toward the surface with a spin as it falls.
-      const radius = EARTH_RADIUS + 0.13 - 0.11 * t;
-      this.scratchA.copy(this.ufoN0).multiplyScalar(radius);
-      this.ufoMarker.position.copy(this.scratchA);
-      this.ufoMarker.scale.setScalar(Math.max(0.2, 1 - t * 0.7));
-    } else if (this.beatTerminal === "escaped") {
-      // Streak away fast along the heading and fade by shrinking.
-      const driftAngle = PURSUIT_MAX_DRIFT_RAD + t * 0.5;
-      this.scratchA.copy(this.ufoN0).applyAxisAngle(this.pursuitAxis, driftAngle).normalize();
-      this.ufoMarker.position.copy(this.scratchA).multiplyScalar(EARTH_RADIUS + 0.13);
-      this.ufoMarker.scale.setScalar(Math.max(0.2, 1 - t * 0.6));
-    }
-  }
-
-  /** Apply the real campaign result (deferred until the beat finished) + reset beat state. */
-  private finalizeBeat(): void {
-    const action = this.beatAction;
-    this.resetBeatState();
     this.opts.onInterceptionAction?.(action); // main applies + calls update() -> refresh()
   }
 
-  private resetBeatState(): void {
-    this.beatActive = false;
-    this.beatReturnFired = false;
-    this.beatUfoReturns = false;
-    this.beatIntDmg = 0;
-    this.beatTerminal = null;
-    this.beatRangeTarget = null;
-    this.beatEscapeReport = null;
-    this.ufoMarker.scale.setScalar(1);
-  }
-
-  /** Crisp DOM layer above the canvas for floating "-N" damage numbers. */
-  private buildDamageLayer(): void {
-    const layer = el("div", "geo-damage-layer");
-    this.canvasWrap.appendChild(layer);
-    this.damageLayer = layer;
-    // Persistent full-canvas red pulse, lit by flashThreat() when the interceptor is hit.
-    const flash = el("div", "geo-threat-flash");
-    this.canvasWrap.appendChild(flash);
-    this.threatFlash = flash;
-    // Screen-space callout pinned to the active UFO marker (positioned each frame).
+  /** Screen-space callout layer above the canvas, pinned to the active UFO marker. */
+  private buildContactLabel(): void {
     const label = el("div", "geo-contact-label");
     label.style.display = "none";
     this.canvasWrap.appendChild(label);
@@ -3985,50 +3707,11 @@ export class GeoscapeView {
   }
 
   /**
-   * Allocate the reusable interception combat-FX objects once and parent them to
-   * earthGroup (so they share the globe's frame as the markers). All start hidden;
-   * per-hit triggers reposition + reactivate them. Disposed via disposeObject(scene).
+   * Allocate the reusable pursuit-chase FX (thruster contrails) once and parent
+   * them to earthGroup (so they share the globe's frame as the markers). Disposed
+   * via disposeObject(scene).
    */
-  private buildCombatFx(): void {
-    // Interceptor tracer beam: interceptor -> UFO (teal additive line, faded per shot).
-    const tracerGeo = new BufferGeometry();
-    tracerGeo.setAttribute("position", new Float32BufferAttribute(new Float32Array(6), 3));
-    this.tracerLineFx = new Line(
-      tracerGeo,
-      new LineBasicMaterial({ color: 0x38e8d2, transparent: true, opacity: 0, blending: AdditiveBlending }),
-    );
-    this.tracerLineFx.frustumCulled = false;
-    this.tracerLineFx.visible = false;
-    this.earthGroup.add(this.tracerLineFx);
-
-    // UFO return-fire bolt: UFO -> interceptor (signal-red additive line).
-    const boltGeo = new BufferGeometry();
-    boltGeo.setAttribute("position", new Float32BufferAttribute(new Float32Array(6), 3));
-    this.ufoBoltLineFx = new Line(
-      boltGeo,
-      new LineBasicMaterial({ color: 0xff4a3a, transparent: true, opacity: 0, blending: AdditiveBlending }),
-    );
-    this.ufoBoltLineFx.frustumCulled = false;
-    this.ufoBoltLineFx.visible = false;
-    this.earthGroup.add(this.ufoBoltLineFx);
-
-    // Muzzle flash at the interceptor nose (teal-white to match the tracer).
-    this.muzzleFlash = new Mesh(
-      new SphereGeometry(0.022, 10, 8),
-      new MeshBasicMaterial({ color: 0xaef7ec, transparent: true, opacity: 0, blending: AdditiveBlending }),
-    );
-    this.muzzleFlash.visible = false;
-    this.earthGroup.add(this.muzzleFlash);
-
-    this.ufoBurst = this.makeBurst(0xfb923c, this.ufoBurstVel);
-    this.interceptorBurst = this.makeBurst(0xfb7185, this.interceptorBurstVel);
-    this.earthGroup.add(this.ufoBurst, this.interceptorBurst);
-
-    // Larger explosion/debris burst for amplified dogfight impacts + the kill.
-    this.explosionBurst = this.makeBurstN(0xfdba74, this.explosionBurstVel, EXPLOSION_PARTICLES, 0.05);
-    this.earthGroup.add(this.explosionBurst);
-
-    // Thruster contrails (ring-buffered Points) streaming behind each craft.
+  private buildChaseFx(): void {
     this.interceptorContrail = this.makeContrail(0x67e8f9);
     this.ufoContrail = this.makeContrail(0xfb7185);
     this.earthGroup.add(this.interceptorContrail, this.ufoContrail);
@@ -4065,189 +3748,6 @@ export class GeoscapeView {
     return points;
   }
 
-  /** Particle burst (additive Points) with deterministic precomputed spark directions. */
-  private makeBurst(color: number, velocities: Float32Array): Points {
-    return this.makeBurstN(color, velocities, BURST_PARTICLES, 0.03);
-  }
-
-  /** Sized variant of makeBurst for the larger dogfight explosion/debris burst. */
-  private makeBurstN(color: number, velocities: Float32Array, count: number, size: number): Points {
-    const positions = new Float32Array(count * 3);
-    const geo = new BufferGeometry();
-    geo.setAttribute("position", new Float32BufferAttribute(positions, 3));
-    for (let i = 0; i < count; i++) {
-      const ax = Math.sin(i * 52.13) * 43758.5453;
-      const ay = Math.sin(i * 91.7) * 24634.6345;
-      const az = Math.sin(i * 17.39) * 13579.1234;
-      const dx = (ax - Math.floor(ax)) * 2 - 1;
-      const dy = (ay - Math.floor(ay)) * 2 - 1;
-      const dz = (az - Math.floor(az)) * 2 - 1;
-      const len = Math.hypot(dx, dy, dz) || 1;
-      velocities[i * 3] = dx / len;
-      velocities[i * 3 + 1] = dy / len;
-      velocities[i * 3 + 2] = dz / len;
-    }
-    const points = new Points(
-      geo,
-      new PointsMaterial({
-        color,
-        size,
-        transparent: true,
-        opacity: 0,
-        blending: AdditiveBlending,
-        sizeAttenuation: true,
-      }),
-    );
-    points.frustumCulled = false;
-    points.visible = false;
-    return points;
-  }
-
-  /**
-   * Diff the encounter HP versus the previous render and fire combat FX for any
-   * damage dealt. An "attack" round decreases both ufoHp (interceptor volley) and
-   * interceptorHp (UFO return fire) in the same update, so both sides can light up
-   * together. The terminal round resolves the encounter (clears `interception`),
-   * so a just-resolved transition plays the finishing volley from prevUfoHp.
-   */
-  private detectEncounterDamage(): void {
-    const enc = this.campaign?.interception;
-    const engaging = this.isEngaging();
-    if (engaging && enc) {
-      if (this.prevUfoHp !== null && this.prevInterceptorHp !== null) {
-        const ufoDmg = this.prevUfoHp - enc.ufoHp;
-        const intDmg = this.prevInterceptorHp - enc.interceptorHp;
-        if (ufoDmg > 0) this.triggerInterceptorVolley(ufoDmg);
-        if (intDmg > 0) this.triggerInterceptorHit(intDmg);
-      }
-      this.prevUfoHp = enc.ufoHp;
-      this.prevInterceptorHp = enc.interceptorHp;
-      return;
-    }
-    // Encounter just resolved this update (was engaging, now cleared): play the
-    // killing volley on the UFO using its last known HP as the finishing damage,
-    // plus an amplified kill explosion + heavy shake for the cinematic finish.
-    if (this.wasEngaging && this.prevUfoHp !== null && this.prevUfoHp > 0) {
-      this.triggerInterceptorVolley(this.prevUfoHp);
-      this.fireExplosion(this.ufoMarker.position, performance.now());
-      this.kickCameraHard();
-    }
-    this.prevUfoHp = null;
-    this.prevInterceptorHp = null;
-  }
-
-  /**
-   * Interceptor deals damage to the UFO: a multi-round cannon volley (tracer +
-   * bigger muzzle flash per round), an impact burst, and an amplified explosion/
-   * debris burst at the UFO. The damage number floats once per volley; subsequent
-   * rounds (scheduled in updateCombatFx) replay the tracer/muzzle/burst visuals.
-   */
-  private triggerInterceptorVolley(dmg: number): void {
-    const now = performance.now();
-    this.volleyDamageShown = false;
-    this.volleyRounds = VOLLEY_ROUNDS - 1; // remaining rounds after this one
-    this.volleyNextMs = now + VOLLEY_ROUND_MS;
-    this.fireVolleyRound(dmg, now);
-  }
-
-  /** Fire one tracer round: interceptor muzzle → UFO impact + explosion burst. */
-  private fireVolleyRound(dmg: number, now: number): void {
-    const from = this.interceptorMarker.position;
-    const to = this.ufoMarker.position;
-    const attr = this.tracerLineFx.geometry.getAttribute("position") as Float32BufferAttribute;
-    const arr = attr.array as Float32Array;
-    arr[0] = from.x; arr[1] = from.y; arr[2] = from.z;
-    arr[3] = to.x; arr[4] = to.y; arr[5] = to.z;
-    attr.needsUpdate = true;
-    (this.tracerLineFx.material as LineBasicMaterial).opacity = 0.95;
-    this.tracerLineFx.visible = true;
-    this.fxTracerStartMs = now;
-    this.fxTracerActive = true;
-
-    // Bigger muzzle flash for the dogfight cannon.
-    this.muzzleFlash.position.copy(from);
-    (this.muzzleFlash.material as MeshBasicMaterial).opacity = 1;
-    this.muzzleFlash.scale.setScalar(1.9);
-    this.muzzleFlash.visible = true;
-    this.fxMuzzleStartMs = now;
-    this.fxMuzzleActive = true;
-
-    this.fireBurst(this.ufoBurst, to, now);
-    this.fxUfoBurstActive = true;
-    this.fireExplosion(to, now);
-    this.opts.onInterceptorSfx?.("cannon");
-    if (!this.volleyDamageShown && dmg > 0) {
-      this.spawnDamageNumber(this.ufoMarker, Math.round(dmg), "ufo");
-      this.volleyDamageShown = true;
-    }
-    this.kickCamera();
-  }
-
-  /** Amplified explosion/debris burst at `pos` (larger particle count + wider spread). */
-  private fireExplosion(pos: Vector3, now: number): void {
-    this.fireBurst(this.explosionBurst, pos, now);
-    this.fxExplosionActive = true;
-  }
-
-  /** UFO return fire hits the interceptor: red bolt + impact burst + threat flash + shake. */
-  private triggerInterceptorHit(dmg: number): void {
-    const now = performance.now();
-    // Red bolt streaks from the UFO back to the interceptor (the visible "shoot back").
-    const from = this.ufoMarker.position;
-    const to = this.interceptorMarker.position;
-    const attr = this.ufoBoltLineFx.geometry.getAttribute("position") as Float32BufferAttribute;
-    const arr = attr.array as Float32Array;
-    arr[0] = from.x; arr[1] = from.y; arr[2] = from.z;
-    arr[3] = to.x; arr[4] = to.y; arr[5] = to.z;
-    attr.needsUpdate = true;
-    (this.ufoBoltLineFx.material as LineBasicMaterial).opacity = 0.95;
-    this.ufoBoltLineFx.visible = true;
-    this.ufoBoltStartMs = now;
-    this.ufoBoltActive = true;
-    this.opts.onInterceptorSfx?.("bolt");
-    this.fireBurst(this.interceptorBurst, this.interceptorMarker.position, now);
-    this.fxInterceptorBurstActive = true;
-    if (dmg > 0) this.spawnDamageNumber(this.interceptorMarker, Math.round(dmg), "interceptor");
-    this.flashThreat();
-    this.kickCamera();
-  }
-
-  /** Reset a burst to `pos` and arm it; particles radiate from local origin over FX_BURST_MS. */
-  private fireBurst(burst: Points, pos: Vector3, now: number): void {
-    const attr = burst.geometry.getAttribute("position") as Float32BufferAttribute;
-    (attr.array as Float32Array).fill(0);
-    attr.needsUpdate = true;
-    burst.position.copy(pos);
-    (burst.material as PointsMaterial).opacity = 1;
-    burst.scale.setScalar(1);
-    burst.visible = true;
-    this.fxBurstStartMs = now;
-  }
-
-  /** Arm a decaying camera shake at standard magnitude (applied each frame). */
-  private kickCamera(): void {
-    this.shakeMagnitude = FX_SHAKE_MAGNITUDE;
-    this.shakeStartMs = performance.now();
-    this.shakeActive = true;
-  }
-
-  /** Heavier shake for kills / large explosions. */
-  private kickCameraHard(): void {
-    this.shakeMagnitude = FX_SHAKE_MAGNITUDE * 2.4;
-    this.shakeStartMs = performance.now();
-    this.shakeActive = true;
-  }
-
-  /** Pulse the "taking fire" threat overlay when the interceptor is hit. */
-  private flashThreat(): void {
-    if (!this.threatFlash) return;
-    this.threatFlash.classList.add("active");
-    if (this.threatFlashTimer !== undefined) window.clearTimeout(this.threatFlashTimer);
-    this.threatFlashTimer = window.setTimeout(() => {
-      this.threatFlash?.classList.remove("active");
-    }, THREAT_FLASH_MS);
-  }
-
   /** Flowing time: advance game hours on a timer scaled by the chosen speed. */
   private advanceFlowingTime(now: number): void {
     const speed = this.timeSpeed;
@@ -4272,121 +3772,16 @@ export class GeoscapeView {
     }
   }
 
-  /** Advance every active combat effect one frame; deactivate each when it expires. */
-  private updateCombatFx(now: number): void {
-    if (this.fxTracerActive) {
-      const t = (now - this.fxTracerStartMs) / FX_TRACER_MS;
-      if (t >= 1) {
-        this.fxTracerActive = false;
-        this.tracerLineFx.visible = false;
-      } else {
-        (this.tracerLineFx.material as LineBasicMaterial).opacity = 0.95 * (1 - t);
-      }
-    }
-    if (this.ufoBoltActive) {
-      const t = (now - this.ufoBoltStartMs) / FX_TRACER_MS;
-      if (t >= 1) {
-        this.ufoBoltActive = false;
-        this.ufoBoltLineFx.visible = false;
-      } else {
-        (this.ufoBoltLineFx.material as LineBasicMaterial).opacity = 0.95 * (1 - t);
-      }
-    }
-    if (this.fxMuzzleActive) {
-      const t = (now - this.fxMuzzleStartMs) / FX_MUZZLE_MS;
-      if (t >= 1) {
-        this.fxMuzzleActive = false;
-        this.muzzleFlash.visible = false;
-      } else {
-        (this.muzzleFlash.material as MeshBasicMaterial).opacity = 1 - t;
-        this.muzzleFlash.scale.setScalar(1 + t * 1.8);
-      }
-    }
-    // Both bursts share fxBurstStartMs (an exchange fires them together).
-    this.fxUfoBurstActive = this.advanceBurst(this.ufoBurst, this.ufoBurstVel, BURST_PARTICLES, this.fxUfoBurstActive, now);
-    this.fxInterceptorBurstActive = this.advanceBurst(
-      this.interceptorBurst,
-      this.interceptorBurstVel,
-      BURST_PARTICLES,
-      this.fxInterceptorBurstActive,
-      now,
-    );
-    this.fxExplosionActive = this.advanceBurst(
-      this.explosionBurst,
-      this.explosionBurstVel,
-      EXPLOSION_PARTICLES,
-      this.fxExplosionActive,
-      now,
-    );
-    // Multi-round volley: fire the next cannon round on the stagger schedule.
-    if (this.volleyRounds > 0 && now >= this.volleyNextMs) {
-      this.volleyRounds--;
-      this.volleyNextMs = now + VOLLEY_ROUND_MS;
-      if (this.isEngaging()) this.fireVolleyRound(0, now);
-      else this.volleyRounds = 0;
-    }
-  }
-
-  private advanceBurst(
-    burst: Points,
-    vel: Float32Array,
-    count: number,
-    active: boolean,
-    now: number,
-  ): boolean {
-    if (!active) return false;
-    const t = (now - this.fxBurstStartMs) / FX_BURST_MS;
-    if (t >= 1) {
-      burst.visible = false;
-      return false;
-    }
-    const attr = burst.geometry.getAttribute("position") as Float32BufferAttribute;
-    const arr = attr.array as Float32Array;
-    const spread = 0.05 * t;
-    for (let i = 0; i < count; i++) {
-      const vx = vel[i * 3] ?? 0;
-      const vy = vel[i * 3 + 1] ?? 0;
-      const vz = vel[i * 3 + 2] ?? 0;
-      arr[i * 3] = vx * spread;
-      arr[i * 3 + 1] = vy * spread;
-      arr[i * 3 + 2] = vz * spread;
-    }
-    attr.needsUpdate = true;
-    (burst.material as PointsMaterial).opacity = 1 - t;
-    burst.scale.setScalar(1 + t * 0.6);
-    return true;
-  }
-
   /**
-   * Offset the camera by a decaying tremor for the render only; the caller restores
-   * the base position afterward so OrbitControls' internal state never drifts.
-   */
-  private applyCameraShake(now: number): void {
-    if (!this.shakeActive) return;
-    const t = (now - this.shakeStartMs) / FX_SHAKE_MS;
-    if (t >= 1) {
-      this.shakeActive = false;
-      return;
-    }
-    const decay = 1 - t;
-    // Deterministic sin-based jitter reads as a hit bump without per-frame randomness.
-    // Skipped entirely under prefers-reduced-motion (screen shake is a classic trigger).
-    if (this.reducedMotion) return;
-    this.scratchA
-      .set(Math.sin(now * 0.13), Math.sin(now * 0.091), Math.cos(now * 0.117))
-      .normalize();
-    this.camera.position.addScaledVector(this.scratchA, this.shakeMagnitude * decay);
-  }
-
-  /**
-   * Stream thruster contrails behind the interceptor + UFO while an engagement is
+   * Stream thruster contrails behind the interceptor + UFO while the pursuit is
    * live. Each frame one particle is emitted at each craft's world position
    * (converted into earthGroup-local space); per-vertex color fades the ring
    * bright (head) → dark (tail) so it reads as a glowing exhaust trail. Ring
-   * buffers are pooled — no per-frame allocation. Trails are hidden outside combat.
+   * buffers are pooled — no per-frame allocation. Reduced-motion-gated decoration:
+   * hidden outright for prefers-reduced-motion, and outside the chase.
    */
-  private updateContrails(now: number): void {
-    if (!this.isEngaging()) {
+  private updateContrails(): void {
+    if (this.reducedMotion || !this.isEngaging()) {
       this.interceptorContrail.visible = false;
       this.ufoContrail.visible = false;
       return;
@@ -4452,31 +3847,8 @@ export class GeoscapeView {
   }
 
   /**
-   * Project a marker's world position to screen space and float a "-N" damage chip
-   * that removes itself after the CSS animation. Color is paired with the "UFO"/
-   * "Interceptor" label context so the target is never conveyed by color alone.
-   */
-  private spawnDamageNumber(marker: Group, amount: number, kind: "ufo" | "interceptor"): void {
-    if (!this.damageLayer || amount <= 0) return;
-    marker.getWorldPosition(this.scratchProject);
-    this.scratchProject.project(this.camera);
-    const rect = this.canvasWrap.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return;
-    const x = (this.scratchProject.x * 0.5 + 0.5) * rect.width;
-    const y = (-this.scratchProject.y * 0.5 + 0.5) * rect.height;
-    const node = el("div", `geo-dmg ${kind}`);
-    node.textContent = `-${amount}`;
-    node.style.left = `${x}px`;
-    node.style.top = `${y}px`;
-    this.damageLayer.appendChild(node);
-    window.setTimeout(() => {
-      node.remove();
-    }, 950);
-  }
-
-  /**
    * Pin the contact callout to the active UFO marker so the player sees where to
-   * act. Mirrors {@link spawnDamageNumber}'s projection; the label text is cached
+   * act. Projects the marker to screen space each frame; the label text is cached
    * so the DOM text node is only rewritten when the contact actually changes.
    */
   private updateContactLabel(contact: UfoContact | null | undefined): void {
@@ -5103,13 +4475,12 @@ export class GeoscapeView {
       this.hqMarker.scale.setScalar(1 + (this.reducedMotion ? 0 : Math.sin(now * 0.014) * 0.26));
     }
     this.updateContactLabel(contact);
-    // Interception theater: drift the pursued UFO, fly the interceptor out, run the
-    // active combat beat, and advance/decay all combat FX + contrails.
+    // Pursuit theater: drift the pursued UFO, fly the interceptor out, ease the
+    // displayed km range, and stream the chase contrails.
     this.applyPursuitDrift(now);
     this.animateInterceptor(now);
-    this.updateInterceptionBeat(now);
-    this.updateCombatFx(now);
-    this.updateContrails(now);
+    this.easePursuitRange();
+    this.updateContrails();
     this.advanceFlowingTime(now);
     // onAdvanceTime may synchronously dispose+remount this view (current controller);
     // bail before touching the disposed renderer/controls in that case.
@@ -5126,11 +4497,6 @@ export class GeoscapeView {
     if (this.cloudMesh) this.cloudMesh.rotation.y += 0.00018;
     this.updateChaseCamera();
     this.controls.update();
-    // Camera shake: offset around the controls-derived base, then restore so the
-    // next controls.update() is unaffected (no drift into OrbitControls state).
-    this.cameraBase.copy(this.camera.position);
-    this.applyCameraShake(now);
     this.renderer.render(this.scene, this.camera);
-    this.camera.position.copy(this.cameraBase);
   };
 }

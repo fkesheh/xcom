@@ -17,6 +17,7 @@ import {
   PerspectiveCamera,
   Points,
   PointsMaterial,
+  Quaternion,
   RingGeometry,
   Scene,
   SphereGeometry,
@@ -25,27 +26,36 @@ import {
   WebGLRenderer,
 } from "three";
 import type { CampaignState, InterceptionEncounter } from "../campaign/types";
-import { type InterceptionAction, ufoTypeInfo } from "../campaign/geoscape";
+import {
+  type InterceptionAction,
+  type InterceptionOutcome,
+  ufoTypeInfo,
+  ENGAGEMENT_RANGE_KM,
+  POINT_BLANK_KM,
+  CLOSE_STEP_KM,
+} from "../campaign/geoscape";
+import { type AirWeapon, airWeapon } from "../campaign/airWeapons";
 import { UI_TOKENS, UI_BASE, UI_COMPONENTS, UI_PRIMITIVES } from "./uiTheme";
+import { ratioToPercent } from "./uiFormat";
 
 /**
- * Sealed, self-contained 3D dogfight screen (NOT the geoscape). Mirrors the
- * classic X-COM interception interface: large interceptor + UFO models on a dark
- * space stage, a Long/Medium/Short/Point-blank range indicator, HP bars, a
- * scrolling combat log, Close/Attack/Disengage actions, and pooled additive
- * combat FX (muzzle flash, tracer beam, impact/explosion bursts, screen shake)
- * fired on detected HP deltas. The craft shapes are copied from geoscape's
- * buildInterceptorMarker/buildUfoMarker (no import) and rescaled for the stage.
+ * Sealed, self-contained 3D dogfight screen (NOT the geoscape) — THE ZOOM. Mounted
+ * once pursuit closes to <= ENGAGEMENT_RANGE_KM. Mirrors the classic X-COM
+ * interception interface (interceptor + UFO on a dark space stage, HP bars, a
+ * scrolling combat log) but replaces the old abstract Long/Medium/Short/Point-blank
+ * band + single "Attack" button with the real weapon model: one fire button PER
+ * carried weapon (missiles + cannon), each gated by its own km range and ammo pool,
+ * a live km range readout, lock-on tension for heavy ordnance, and a hit/miss reveal
+ * (UFO evasion) rather than a guaranteed exchange. Craft shapes are copied from
+ * geoscape's buildInterceptorMarker/buildUfoMarker (no import) and rescaled for the
+ * stage. Pure presentation: all combat math lives in campaign/geoscape.ts.
  */
 
-/** Maximum engagement range (matches campaign/geoscape ENCOUNTER_START_RANGE). */
-const ENCOUNTER_START_RANGE = 3;
-
 /** Interception combat-FX durations, in milliseconds. */
-const FX_TRACER_MS = 200;
 const FX_MUZZLE_MS = 150;
 const FX_BURST_MS = 460;
 const FX_EXPLOSION_MS = 720;
+const FX_VAPORIZE_MS = 900;
 const FX_SHAKE_MS = 260;
 /** Camera shake magnitude (world units) at hit onset; decays over FX_SHAKE_MS. */
 const FX_SHAKE_MAGNITUDE = 0.035;
@@ -53,8 +63,15 @@ const FX_SHAKE_MAGNITUDE = 0.035;
 const FX_SHAKE_KILL_MULT = 2.4;
 /** Ms the kill explosion plays before onResolve returns the player to the geoscape. */
 const RESOLVE_DELAY_MS = 950;
-/** Ms the "Disengaged" overlay shows before onResolve (no kill FX to wait for). */
-const RESOLVE_DISENGAGE_DELAY_MS = 500;
+/** Ms the "Disengaged"/"Broke off" overlay shows before onResolve (no kill FX to wait for). */
+const RESOLVE_DISENGAGE_DELAY_MS = 550;
+/** Ms an evasion MISS reveal holds before the beam/dodge FX clears. */
+const FX_MISS_MS = 520;
+/** Fade time for a beam shown with no travel tween (reducedMotion — see fireShot). */
+const FX_BEAM_STATIC_MS = 260;
+
+/** Missile/cannon travel time by weapon class (ms) — heavy telegraphs, cannon is instant. */
+const TRAVEL_MS: Record<AirWeapon["cls"], number> = { heavy: 900, light: 560, cannon: 160 };
 
 /** Pooled particle counts (ring/velocity buffers sized to these at build time). */
 const BURST_PARTICLES = 22;
@@ -62,37 +79,42 @@ const EXPLOSION_PARTICLES = 34;
 /** Deterministic starfield point count for the deep-space backdrop. */
 const STAR_COUNT = 640;
 
-/** Stage separation between the two craft at Long range (world units). */
-const SEPARATION_LONG = 3.4;
-/** Stage separation between the two craft at Point-blank range. */
+/** Stage separation between the two craft at max engagement range (world units). */
+const SEPARATION_FAR = 3.4;
+/** Stage separation between the two craft at point-blank range. */
 const SEPARATION_CLOSE = 1.15;
 /** Radius of the slow dramatic camera orbit around the engagement midpoint. */
 const CAMERA_ORBIT_RADIUS = 3.0;
 /** Height of the orbiting camera above the engagement midpoint. */
 const CAMERA_ORBIT_HEIGHT = 1.1;
-/** Radians per second the camera orbits (slow, for drama). */
+/** Radians per second the camera orbits (slow, for drama). Frozen under reducedMotion. */
 const CAMERA_ORBIT_RATE = 0.12;
 /** Camera field of view (deg). Wider frames both craft large at close orbit. */
 const CAMERA_FOV = 52;
 
 const STYLE_ID = "plane-combat-style";
 
-/** Classic X-COM engagement range bands; range decreases as the player closes. */
-interface RangeInfo {
-  index: number;
-  label: string;
-}
-const RANGE_BANDS = ["Point-blank", "Short", "Medium", "Long"] as const;
-
-function rangeInfo(range: number): RangeInfo {
-  const clamped = Math.max(0, Math.min(ENCOUNTER_START_RANGE, Math.round(range)));
-  return { index: clamped, label: RANGE_BANDS[clamped]! };
+function clamp01(v: number): number {
+  return Math.max(0, Math.min(1, v));
 }
 
-/** Separation between the two craft derived from the current engagement range. */
-function separationFor(range: number): number {
-  const t = 1 - Math.max(0, Math.min(ENCOUNTER_START_RANGE, range)) / ENCOUNTER_START_RANGE;
-  return SEPARATION_LONG + (SEPARATION_CLOSE - SEPARATION_LONG) * t;
+/** Separation between the two craft derived from the current engagement range (km). */
+function separationForKm(rangeKm: number): number {
+  const span = Math.max(1, ENGAGEMENT_RANGE_KM - POINT_BLANK_KM);
+  const t = 1 - clamp01((rangeKm - POINT_BLANK_KM) / span);
+  return SEPARATION_FAR + (SEPARATION_CLOSE - SEPARATION_FAR) * t;
+}
+
+/** Display glyph + label per weapon class. */
+function weaponBadge(cls: AirWeapon["cls"]): { icon: string; label: string } {
+  switch (cls) {
+    case "heavy":
+      return { icon: "✦", label: "Heavy missile" };
+    case "light":
+      return { icon: "◇", label: "Light missile" };
+    case "cannon":
+      return { icon: "≡", label: "Cannon" };
+  }
 }
 
 /**
@@ -130,12 +152,27 @@ const PLANE_CSS = `
   background-size: 44px 44px, 44px 44px, auto;
   mix-blend-mode: screen;
 }
+#plane-combat .pc-alarm {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  opacity: 0;
+  box-shadow: inset 0 0 0 3px rgba(255,74,58,.55), inset 0 0 90px rgba(255,74,58,.28);
+  transition: opacity .3s;
+}
+#plane-combat .pc-alarm.active { opacity: 1; }
+#plane-combat .pc-alarm.active.pc-anim-pulse { animation: pc-alarm-pulse 1.1s ease-in-out infinite; }
+@keyframes pc-alarm-pulse {
+  0%, 100% { opacity: .45; }
+  50% { opacity: 1; }
+}
 #plane-combat .pc-panel {
   position: absolute;
   z-index: 4;
   display: flex;
   flex-direction: column;
-  width: min(440px, calc(100vw - 28px));
+  width: min(460px, calc(100vw - 28px));
   padding: var(--ui-sp-4);
   border: 1px solid var(--ui-border-console);
   border-radius: var(--ui-radius-sm);
@@ -191,43 +228,45 @@ const PLANE_CSS = `
 #plane-combat .pc-meta b { color: var(--ui-text); font-weight: 800; }
 #plane-combat .pc-range {
   margin: 10px 0 4px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
   color: var(--ui-muted);
   font-family: var(--ui-font-mono);
   font-size: var(--ui-text-xs);
   font-weight: 700;
-  letter-spacing: .14em;
+  letter-spacing: .12em;
   text-transform: uppercase;
 }
-#plane-combat .pc-range-bar {
-  display: flex;
-  gap: 4px;
-  margin-top: 5px;
-}
-#plane-combat .pc-range-seg {
-  flex: 1;
-  height: 8px;
+#plane-combat .pc-range-num { font-size: var(--ui-text-xl); color: var(--ui-cyan); font-weight: 800; letter-spacing: .02em; }
+#plane-combat .pc-range-num span { font-size: var(--ui-text-xs); color: var(--ui-muted); margin-left: 2px; }
+#plane-combat .pc-range-rate { font-size: var(--ui-text-xs); }
+#plane-combat .pc-range-rate.opening { color: var(--ui-red); }
+#plane-combat .pc-range-track {
+  position: relative;
+  height: 10px;
+  margin-top: 6px;
   border: 1px solid rgba(56,232,210,.22);
-  border-radius: 3px;
+  border-radius: 5px;
   background: rgba(56,232,210,.07);
+  overflow: visible;
 }
-#plane-combat .pc-range-seg.active {
-  border-color: var(--ui-cyan);
-  background: linear-gradient(90deg, var(--ui-cyan), #22d3ee);
+#plane-combat .pc-range-fill {
+  height: 100%;
+  border-radius: 5px;
+  background: linear-gradient(90deg, #22d3ee, var(--ui-cyan));
   box-shadow: 0 0 10px rgba(103,232,249,.5);
+  transition: width .2s;
 }
-#plane-combat .pc-range-labels {
-  display: flex;
-  gap: 4px;
-  margin-top: 4px;
-  color: var(--ui-dim);
-  font-family: var(--ui-font-mono);
-  font-size: var(--ui-text-xs);
-  font-weight: 700;
-  letter-spacing: .04em;
-  text-transform: uppercase;
+#plane-combat .pc-range-tick {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 16px;
+  background: var(--ui-dim);
+  opacity: .6;
 }
-#plane-combat .pc-range-labels span { flex: 1; text-align: center; }
-#plane-combat .pc-range-labels span.active { color: var(--ui-cyan); }
+#plane-combat .pc-range-tick.in-range { background: var(--ui-amber); opacity: 1; }
 #plane-combat .pc-bar { margin: 8px 0; }
 #plane-combat .pc-bar-label {
   display: flex;
@@ -255,10 +294,52 @@ const PLANE_CSS = `
 }
 #plane-combat .pc-bar-fill.ufo { background: linear-gradient(90deg, var(--ui-red), #f43f5e); }
 #plane-combat .pc-bar-fill.interceptor { background: linear-gradient(90deg, var(--ui-cyan), #22d3ee); }
+#plane-combat .pc-weapons { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 4px; }
+#plane-combat .pc-weapon {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--ui-sp-2);
+  padding: 6px 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-sm);
+  background: rgba(4,7,13,.35);
+}
+#plane-combat .pc-weapon.locking { border-color: var(--ui-amber); }
+#plane-combat .pc-weapon.locking.pc-anim-pulse { animation: pc-lock-pulse 1s ease-in-out infinite; }
+@keyframes pc-lock-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(251,191,36,0); }
+  50% { box-shadow: 0 0 8px 1px rgba(251,191,36,.55); }
+}
+#plane-combat .pc-weapon-icon { font-size: var(--ui-text-lg); color: var(--ui-cyan); width: 20px; text-align: center; }
+#plane-combat .pc-weapon-info { flex: 1; min-width: 0; }
+#plane-combat .pc-weapon-name {
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-sm);
+  font-weight: 800;
+  color: var(--ui-text);
+  letter-spacing: .02em;
+}
+#plane-combat .pc-weapon-meta {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+  color: var(--ui-muted);
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-xs);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+#plane-combat .pc-weapon-meta .danger { color: var(--ui-red); }
+#plane-combat .pc-weapon-fire {
+  min-width: 92px;
+  padding: 6px 10px;
+  font-size: var(--ui-text-xs);
+}
 #plane-combat .pc-log {
   flex: 1;
-  min-height: 72px;
-  max-height: 156px;
+  min-height: 60px;
+  max-height: 130px;
   margin: 10px 0;
   padding: 8px 10px;
   overflow-y: auto;
@@ -271,6 +352,7 @@ const PLANE_CSS = `
   line-height: 1.45;
 }
 #plane-combat .pc-log p { margin: 0 0 4px; }
+#plane-combat .pc-log p.miss { color: var(--ui-red); font-weight: 700; }
 #plane-combat .pc-actions { display: flex; gap: var(--ui-sp-2); }
 #plane-combat .pc-actions button { flex: 1; }
 #plane-combat .pc-titlebar {
@@ -293,6 +375,26 @@ const PLANE_CSS = `
   text-transform: uppercase;
   white-space: nowrap;
 }
+#plane-combat .pc-miss-flag {
+  position: absolute;
+  top: 44%;
+  right: max(24px, env(safe-area-inset-right));
+  z-index: 5;
+  padding: 6px 14px;
+  border: 1px solid var(--ui-red);
+  border-radius: var(--ui-radius-sm);
+  background: rgba(20,4,6,.7);
+  color: var(--ui-red);
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-lg);
+  font-weight: 800;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  opacity: 0;
+  transition: opacity .18s;
+  pointer-events: none;
+}
+#plane-combat .pc-miss-flag.active { opacity: 1; }
 #plane-combat .pc-resolve {
   position: absolute;
   inset: 0;
@@ -306,18 +408,31 @@ const PLANE_CSS = `
   background: radial-gradient(circle at 50% 50%, rgba(255,74,58,.16), transparent 60%);
 }
 #plane-combat .pc-resolve.active { opacity: 1; }
-#plane-combat .pc-resolve b {
+#plane-combat .pc-resolve .pc-resolve-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
   padding: 14px 30px;
   border: 1px solid var(--ui-border-console);
   border-radius: var(--ui-radius);
   background: var(--ui-panel-glass);
   -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
+}
+#plane-combat .pc-resolve b {
   color: #ffe4e6;
   font-family: var(--ui-font-mono);
   font-size: var(--ui-text-2xl);
   font-weight: 800;
   letter-spacing: .1em;
+  text-transform: uppercase;
+}
+#plane-combat .pc-resolve span {
+  color: var(--ui-muted);
+  font-family: var(--ui-font-mono);
+  font-size: var(--ui-text-sm);
+  letter-spacing: .06em;
   text-transform: uppercase;
 }
 #plane-combat .pc-help {
@@ -360,7 +475,7 @@ const PLANE_CSS = `
 }
 #plane-combat .pc-help-overlay.show { display: flex; }
 #plane-combat .pc-help-card {
-  width: min(520px, 100%);
+  width: min(540px, 100%);
   padding: clamp(20px, 4vw, 32px);
   border: 1px solid var(--ui-border-console);
   border-radius: var(--ui-radius-lg);
@@ -371,7 +486,7 @@ const PLANE_CSS = `
 }
 #plane-combat .pc-help-card p.lede {
   margin: 0 0 4px;
-  max-width: 460px;
+  max-width: 480px;
   color: var(--ui-muted);
   font-family: var(--ui-font-ui);
   font-size: var(--ui-text-sm);
@@ -400,7 +515,7 @@ const PLANE_CSS = `
 #plane-combat .pc-help-actions button { min-width: 130px; }
 @media (max-width: 560px) {
   #plane-combat .pc-panel { width: calc(100vw - 24px); }
-  #plane-combat .pc-log { max-height: 110px; }
+  #plane-combat .pc-log { max-height: 100px; }
   #plane-combat .pc-titlebar { font-size: var(--ui-text-xs); padding: 7px 12px; }
 }
 `;
@@ -410,7 +525,13 @@ const CSS = `${UI_TOKENS}\n${UI_BASE}\n${UI_COMPONENTS}\n${UI_PRIMITIVES}\n${PLA
 export interface PlaneCombatOptions {
   campaign: CampaignState;
   onAction: (action: InterceptionAction) => void;
-  onResolve: () => void;
+  onResolve: (outcome: InterceptionOutcome) => void;
+  /**
+   * Dogfight sound cue for a combat event: missile/cannon on the interceptor's own fire,
+   * bolt on UFO return fire, explosion on a kill/vaporize. Optional so the view (and its
+   * tests) can run silently; main wires it to `sfx.interception`.
+   */
+  onSfx?: (kind: "cannon" | "missile" | "bolt" | "explosion") => void;
 }
 
 export class PlaneCombatView {
@@ -430,23 +551,36 @@ export class PlaneCombatView {
   private campaign: CampaignState;
   /** Whether an encounter was active on the previous render (drives resolve detection). */
   private wasEngaging: boolean;
-  /** Schedules onResolve once the kill explosion has played. */
+  /** Schedules onResolve once the outcome FX has played. */
   private resolveTimer: number | undefined;
+  /** Captured once at construction: true when the OS/browser asks for reduced motion.
+   *  Freezes camera orbit/shake/pulses/beam-travel; essential HP/log/outcome state
+   *  still updates instantly. */
+  private readonly reducedMotion: boolean =
+    typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   // --- HUD nodes (rebuilt per refresh except the log, which scrolls) ---
   private readonly contactHeading: HTMLHeadingElement;
   private readonly roundsValue: HTMLElement;
-  private readonly rangeSegments: HTMLDivElement[] = [];
-  private readonly rangeLabels: HTMLSpanElement[] = [];
+  private readonly rangeNum: HTMLElement;
+  private readonly rangeRate: HTMLElement;
+  private readonly rangeFill: HTMLDivElement;
+  private readonly rangeTrack: HTMLDivElement;
   private readonly interceptorFill: HTMLDivElement;
   private readonly interceptorValue: HTMLElement;
   private readonly ufoFill: HTMLDivElement;
   private readonly ufoValue: HTMLElement;
+  private readonly weaponsBox: HTMLDivElement;
   private readonly logBox: HTMLDivElement;
-  private readonly actionButtons: HTMLButtonElement[] = [];
+  private readonly closeBtn: HTMLButtonElement;
+  private readonly disengageBtn: HTMLButtonElement;
+  private readonly alarmEl: HTMLDivElement;
+  private readonly missFlagEl: HTMLDivElement;
+  private missFlagTimer: number | undefined;
   private readonly resolveOverlay: HTMLDivElement;
-  /** Label inside the resolve overlay; updated per outcome (crashed/lost/disengaged). */
+  /** Label + detail inside the resolve overlay; updated per outcome. */
   private readonly resolveText: HTMLElement;
+  private readonly resolveDetail: HTMLElement;
   /** Concise dogfight HELP overlay (controls + outcomes reference). */
   private helpOverlay: HTMLDivElement | null = null;
   private readonly onKeydown = (e: KeyboardEvent): void => {
@@ -470,29 +604,49 @@ export class PlaneCombatView {
   private readonly explosionBurstPos = new Float32Array(EXPLOSION_PARTICLES * 3);
   private prevUfoHp: number | null;
   private prevInterceptorHp: number | null;
-  private fxTracerStartMs = 0;
+  private prevAmmo: Record<string, number> | null;
+
+  // Traveling-beam state: armed on fire, cleared once travel completes.
+  private beamActive = false;
+  private beamStartMs = 0;
+  private beamTravelMs = TRAVEL_MS.cannon;
+  private beamHit = false;
+  private beamFrom: "interceptor" | "ufo" = "interceptor";
+  private beamResolved = false;
+
   private fxMuzzleStartMs = 0;
-  private fxBurstStartMs = 0;
-  private fxExplosionStartMs = 0;
-  private fxTracerActive = false;
   private fxMuzzleActive = false;
-  private fxBurstSide: "ufo" | "interceptor" | null = null;
+  // UFO-hit and interceptor-return-fire bursts are tracked independently (not a
+  // shared single-slot flag) — the UFO burst is deferred until missile/cannon
+  // travel completes while a return-fire burst starts immediately, so the two
+  // can legitimately overlap in time (e.g. a fast cannon round).
+  private ufoBurstActive = false;
+  private ufoBurstStartMs = 0;
+  private interceptorBurstActive = false;
+  private interceptorBurstStartMs = 0;
   private fxExplosionActive = false;
+  private fxExplosionStartMs = 0;
+  private fxExplosionKind: "explosion" | "vaporize" = "explosion";
   private shakeStartMs = 0;
   private shakeActive = false;
   private shakeMagnitude = FX_SHAKE_MAGNITUDE;
+  /** UFO evasive-jink offset (world units); decays back to zero. Frozen (0) under reducedMotion. */
+  private jinkStartMs = 0;
+  private jinkActive = false;
 
   // Reusable scratch (no per-frame allocation).
   private readonly scratchA = new Vector3();
-  private readonly scratchB = new Vector3();
+  private readonly scratchQuat = new Quaternion();
+  private readonly unitY = new Vector3(0, 1, 0);
   private readonly cameraBase = new Vector3();
-  // Traveling-beam endpoints (cached on fire) + per-frame scratch for center/dir.
+  // Traveling-beam endpoints (cached on fire) + per-frame scratch for center/dir/end —
+  // the fix for the previously-dead beam transform: every frame the cylinders are
+  // repositioned from these (position+quaternion+scale), not just faded in place.
   private readonly fxTracerFrom = new Vector3();
   private readonly fxTracerTo = new Vector3();
   private readonly beamEnd = new Vector3();
   private readonly beamCenter = new Vector3();
   private readonly beamDir = new Vector3();
-  private readonly beamUp = new Vector3(0, 1, 0);
   private startTimeMs = 0;
 
   constructor(private readonly opts: PlaneCombatOptions) {
@@ -502,6 +656,7 @@ export class PlaneCombatView {
     this.wasEngaging = enc !== null;
     this.prevUfoHp = enc?.ufoHp ?? null;
     this.prevInterceptorHp = enc?.interceptorHp ?? null;
+    this.prevAmmo = enc ? { ...enc.ammo } : null;
 
     this.root = el("div");
     this.root.id = "plane-combat";
@@ -516,16 +671,23 @@ export class PlaneCombatView {
     const panels = this.buildHud();
     this.contactHeading = panels.heading;
     this.roundsValue = panels.rounds;
-    this.rangeSegments = panels.rangeSegments;
-    this.rangeLabels = panels.rangeLabels;
+    this.rangeNum = panels.rangeNum;
+    this.rangeRate = panels.rangeRate;
+    this.rangeFill = panels.rangeFill;
+    this.rangeTrack = panels.rangeTrack;
     this.interceptorFill = panels.interceptorFill;
     this.interceptorValue = panels.interceptorValue;
     this.ufoFill = panels.ufoFill;
     this.ufoValue = panels.ufoValue;
+    this.weaponsBox = panels.weaponsBox;
     this.logBox = panels.log;
-    this.actionButtons = panels.actions;
+    this.closeBtn = panels.closeBtn;
+    this.disengageBtn = panels.disengageBtn;
+    this.alarmEl = panels.alarm;
+    this.missFlagEl = panels.missFlag;
     this.resolveOverlay = panels.resolve;
     this.resolveText = panels.resolveText;
+    this.resolveDetail = panels.resolveDetail;
     this.refresh();
   }
 
@@ -540,11 +702,11 @@ export class PlaneCombatView {
     this.frame();
   }
 
-  /** Swap the live campaign state and re-render; detects HP deltas + resolve. */
+  /** Swap the live campaign state and re-render; detects fires/damage/lock/resolve. */
   update(campaign: CampaignState): void {
     if (this.disposed) return;
     this.campaign = campaign;
-    this.detectEncounterDamage();
+    this.detectEncounterEvents();
     this.refresh();
   }
 
@@ -553,6 +715,7 @@ export class PlaneCombatView {
     this.disposed = true;
     cancelAnimationFrame(this.raf);
     if (this.resolveTimer !== undefined) window.clearTimeout(this.resolveTimer);
+    if (this.missFlagTimer !== undefined) window.clearTimeout(this.missFlagTimer);
     window.removeEventListener("resize", this.resize);
     window.removeEventListener("keydown", this.onKeydown);
     disposeObject(this.scene);
@@ -730,9 +893,10 @@ export class PlaneCombatView {
   // --------------------------------------------------------------------------
 
   private buildCombatFx(): void {
-    // Traveling beam: a glowing additive cylinder that grows from the interceptor
-    // nose toward the UFO over the tracer lifetime (a moving tracer reads as a
-    // "shot"). Built once and pooled; only its transform/opacity update per frame.
+    // Traveling shot: a glowing additive cylinder that grows from the shooter toward
+    // the target over the weapon's travel time — reads as a missile/burst actually
+    // crossing the gap rather than an instant tracer. Built once and pooled; only
+    // its transform/opacity update per frame (see updateBeam).
     // Unit height (y spans -0.5..0.5) so scale.y maps directly to beam length.
     this.tracerBeamCore = new Mesh(
       new CylinderGeometry(0.022, 0.022, 1, 8, 1, true),
@@ -812,75 +976,97 @@ export class PlaneCombatView {
   }
 
   /**
-   * Diff the encounter HP versus the previous render and fire combat FX for any
-   * damage dealt. An "attack" round decreases both ufoHp (interceptor volley)
-   * and interceptorHp (UFO return fire) in the same update, so both sides can
-   * light up together. When the encounter clears this update (resolved), the FX
-   * + resolve overlay branch on the post-resolve outcome (read from ufoContact):
-   * a crashed UFO plays the killing volley + explosion at the UFO, a lost
-   * interceptor explodes at the interceptor anchor with no friendly volley, and
-   * a disengage shows a neutral overlay with no kill FX. onResolve fires after
-   * the FX has played (RESOLVE_DELAY_MS, shorter for disengage).
+   * Diff the encounter against the previous render and fire combat FX for whatever
+   * happened this update: a weapon discharged (ammo pool dropped — trigger the
+   * traveling shot, then reveal HIT or MISS once it lands), UFO return fire landed
+   * (interceptor HP dropped — impact + alarm), or the encounter resolved (read the
+   * terminal outcome from the campaign and play the matching FX + overlay, then
+   * call onResolve once it has played).
    */
-  private detectEncounterDamage(): void {
+  private detectEncounterEvents(): void {
     const enc = this.campaign.interception ?? null;
     if (enc) {
-      if (this.prevUfoHp !== null && this.prevInterceptorHp !== null) {
+      if (this.prevAmmo && this.prevUfoHp !== null && this.prevInterceptorHp !== null) {
+        const firedId = firedWeaponId(this.prevAmmo, enc.ammo);
         const ufoDmg = this.prevUfoHp - enc.ufoHp;
         const intDmg = this.prevInterceptorHp - enc.interceptorHp;
-        if (ufoDmg > 0) this.fireInterceptorVolley(ufoDmg);
-        if (intDmg > 0) this.fireInterceptorHit(intDmg);
+        if (firedId) {
+          const weapon = airWeapon(firedId);
+          this.fireShot(weapon, ufoDmg > 0);
+        }
+        if (intDmg > 0) this.fireInterceptorHit();
       }
       this.prevUfoHp = enc.ufoHp;
       this.prevInterceptorHp = enc.interceptorHp;
+      this.prevAmmo = { ...enc.ammo };
       this.wasEngaging = true;
       return;
     }
     // Encounter just resolved this update: branch the FX + resolve overlay on the
-    // actual post-resolve outcome. The campaign distinguishes the three terminal
-    // states cleanly via ufoContact — crashed (UFO down), undefined (interceptor
-    // lost / UFO escaped), or tracked (player disengaged).
-    if (this.wasEngaging && this.prevUfoHp !== null && this.prevUfoHp > 0) {
-      const ufoContact = this.campaign.ufoContact;
-      if (ufoContact?.status === "tracked") {
-        // Disengage: the UFO survived and stays tracked. No kill FX, brief overlay.
-        this.showResolve("Disengaged");
-        this.scheduleResolve(RESOLVE_DISENGAGE_DELAY_MS);
-      } else if (ufoContact === undefined) {
-        // Interceptor lost / UFO escaped: explode the interceptor, no friendly volley.
-        this.fireExplosion(this.interceptorAnchor, performance.now());
-        this.kickCamera(FX_SHAKE_KILL_MULT);
-        this.showResolve("Interceptor lost");
-        this.scheduleResolve(RESOLVE_DELAY_MS);
-      } else {
-        // UFO forced down: full kill sequence (volley + explosion) at the UFO anchor.
-        this.fireInterceptorVolley(this.prevUfoHp);
-        this.fireExplosion(this.ufoAnchor, performance.now());
-        this.kickCamera(FX_SHAKE_KILL_MULT);
-        this.showResolve("Target destroyed");
-        this.scheduleResolve(RESOLVE_DELAY_MS);
-      }
+    // report's outcome (authoritative — see campaign/geoscape.ts InterceptionReport).
+    if (this.wasEngaging) {
+      const report = this.campaign.lastInterceptionReport;
+      const outcome: InterceptionOutcome =
+        report?.outcome !== undefined
+          ? { kind: report.outcome, salvageQuality: report.salvageQuality ?? 0 }
+          : { kind: "escaped", salvageQuality: 0 };
+      this.playOutcome(outcome);
     }
     this.prevUfoHp = null;
     this.prevInterceptorHp = null;
+    this.prevAmmo = null;
     this.wasEngaging = false;
   }
 
-  /** Interceptor volley: traveling beam + muzzle flash + impact burst at the UFO. */
-  private fireInterceptorVolley(dmg: number): void {
+  private playOutcome(outcome: InterceptionOutcome): void {
+    switch (outcome.kind) {
+      case "crashed":
+        this.opts.onSfx?.("explosion");
+        this.fireExplosion(this.ufoAnchor, performance.now(), "explosion");
+        this.kickCamera(FX_SHAKE_KILL_MULT);
+        this.showResolve("Target destroyed", `Crash-site salvage ${ratioToPercent(outcome.salvageQuality)}`);
+        this.scheduleResolve(RESOLVE_DELAY_MS, outcome);
+        break;
+      case "vaporized":
+        this.opts.onSfx?.("explosion");
+        this.fireExplosion(this.ufoAnchor, performance.now(), "vaporize");
+        this.kickCamera(FX_SHAKE_KILL_MULT * 1.3);
+        this.showResolve("Vaporized", "Overkill — no wreckage recovered");
+        this.scheduleResolve(RESOLVE_DELAY_MS, outcome);
+        break;
+      case "brokeOff":
+        this.showResolve("Broke off", "Interceptor damaged — returning to base");
+        this.scheduleResolve(RESOLVE_DISENGAGE_DELAY_MS, outcome);
+        break;
+      case "escaped":
+      default:
+        this.showResolve("UFO escaped", "Contact lost");
+        this.scheduleResolve(RESOLVE_DISENGAGE_DELAY_MS, outcome);
+        break;
+    }
+  }
+
+  /** Arm the traveling shot FX for a fired weapon; hit/miss revealed once it lands. */
+  private fireShot(weapon: AirWeapon | undefined, hit: boolean): void {
+    // Weapon-fire cue: the metallic cannon bark vs the heavier missile whoosh.
+    this.opts.onSfx?.(weapon?.cls === "cannon" ? "cannon" : "missile");
     const now = performance.now();
-    // Cache endpoints; the beam grows from `from` to `to` over FX_TRACER_MS in
-    // updateCombatFx — a tracer that travels toward the UFO reads as a real shot.
     this.fxTracerFrom.copy(this.interceptorAnchor);
     this.fxTracerTo.copy(this.ufoAnchor);
+    this.beamFrom = "interceptor";
+    this.beamHit = hit;
+    this.beamResolved = false;
+    // Gate the traveling-growth animation under reducedMotion (Style Bible §2 /
+    // mandatory fix): reduced-motion users get the shot rendered fully extended
+    // and simply fading, not an animated crossing.
+    this.beamTravelMs = this.reducedMotion ? 0 : (weapon ? TRAVEL_MS[weapon.cls] : TRAVEL_MS.cannon);
+    this.beamStartMs = now;
+    this.beamActive = true;
     (this.tracerBeamCore.material as MeshBasicMaterial).opacity = 1;
     (this.tracerBeamGlow.material as MeshBasicMaterial).opacity = 0.6;
     this.tracerBeamCore.visible = true;
     this.tracerBeamGlow.visible = true;
-    this.fxTracerStartMs = now;
-    this.fxTracerActive = true;
 
-    // Muzzle flash just ahead of the interceptor nose (toward the UFO).
     this.scratchA.copy(this.fxTracerTo).sub(this.fxTracerFrom).normalize().multiplyScalar(0.9).add(this.fxTracerFrom);
     this.muzzleFlash.position.copy(this.scratchA);
     (this.muzzleFlash.material as MeshBasicMaterial).opacity = 1;
@@ -888,22 +1074,48 @@ export class PlaneCombatView {
     this.muzzleFlash.visible = true;
     this.fxMuzzleStartMs = now;
     this.fxMuzzleActive = true;
-
-    this.fireBurst(this.ufoBurst, this.ufoBurstPos, this.ufoAnchor, now);
-    this.fxBurstSide = "ufo";
-    if (dmg > 0) this.kickCamera(1);
   }
 
-  /** UFO return fire: impact burst at the interceptor + shake. */
-  private fireInterceptorHit(_dmg: number): void {
-    this.fireBurst(this.interceptorBurst, this.interceptorBurstPos, this.interceptorAnchor, performance.now());
-    this.fxBurstSide = "interceptor";
+  /** Called once the traveling shot reaches its target: hit flash or a dramatic miss. */
+  private resolveShotArrival(): void {
+    const now = performance.now();
+    if (this.beamHit) {
+      this.fireBurst(this.ufoBurst, this.ufoBurstPos, this.ufoAnchor, now);
+      this.ufoBurstActive = true;
+      this.ufoBurstStartMs = now;
+      this.kickCamera(1);
+    } else {
+      this.showMiss();
+      this.jinkStartMs = now;
+      this.jinkActive = true;
+    }
+  }
+
+  private showMiss(): void {
+    this.missFlagEl.textContent = "EVADED";
+    this.missFlagEl.classList.add("active");
+    if (this.missFlagTimer !== undefined) window.clearTimeout(this.missFlagTimer);
+    this.missFlagTimer = window.setTimeout(() => {
+      this.missFlagEl.classList.remove("active");
+    }, FX_MISS_MS);
+  }
+
+  /** UFO return fire: impact burst at the interceptor + shake + hull-drop alarm. */
+  private fireInterceptorHit(): void {
+    // UFO return-fire zap landing on the interceptor.
+    this.opts.onSfx?.("bolt");
+    const now = performance.now();
+    this.fireBurst(this.interceptorBurst, this.interceptorBurstPos, this.interceptorAnchor, now);
+    this.interceptorBurstActive = true;
+    this.interceptorBurstStartMs = now;
     this.kickCamera(1);
   }
 
-  /** Amplified explosion/debris burst at `pos`. */
-  private fireExplosion(pos: Vector3, now: number): void {
+  /** Amplified explosion/debris burst at `pos`; vaporize kind runs longer + brighter. */
+  private fireExplosion(pos: Vector3, now: number, kind: "explosion" | "vaporize"): void {
     this.fireBurst(this.explosionBurst, this.explosionBurstPos, pos, now);
+    (this.explosionBurst.material as PointsMaterial).color.set(kind === "vaporize" ? 0xffffff : 0xfdba74);
+    this.fxExplosionKind = kind;
     this.fxExplosionStartMs = now;
     this.fxExplosionActive = true;
   }
@@ -918,43 +1130,34 @@ export class PlaneCombatView {
     (burst.material as PointsMaterial).opacity = 1;
     burst.scale.setScalar(1);
     burst.visible = true;
-    this.fxBurstStartMs = now;
   }
 
-  /** Arm a decaying camera shake; `mult` scales magnitude (kills hit harder). */
+  /** Arm a decaying camera shake (frozen under reducedMotion); `mult` scales magnitude. */
   private kickCamera(mult: number): void {
+    if (this.reducedMotion) return;
     this.shakeMagnitude = FX_SHAKE_MAGNITUDE * mult;
     this.shakeStartMs = performance.now();
     this.shakeActive = true;
   }
 
-  private showResolve(label: string): void {
+  private showResolve(label: string, detail: string): void {
     this.resolveText.textContent = label;
+    this.resolveDetail.textContent = detail;
     this.resolveOverlay.classList.add("active");
     this.setActionsEnabled(false);
   }
 
   /** Schedule onResolve after the resolve FX has played; replaces any prior timer. */
-  private scheduleResolve(delayMs: number): void {
+  private scheduleResolve(delayMs: number, outcome: InterceptionOutcome): void {
     if (this.resolveTimer !== undefined) window.clearTimeout(this.resolveTimer);
     this.resolveTimer = window.setTimeout(() => {
-      this.opts.onResolve();
+      this.opts.onResolve(outcome);
     }, delayMs);
   }
 
-  /** Per-frame FX evolution: fade tracers/flashes, advance burst particles, shake. */
+  /** Per-frame FX evolution: advance the traveling beam, fade flashes/bursts, shake. */
   private updateCombatFx(now: number): void {
-    if (this.fxTracerActive) {
-      const t = (now - this.fxTracerStartMs) / FX_TRACER_MS;
-      if (t >= 1) {
-        this.fxTracerActive = false;
-        this.tracerBeamCore.visible = false;
-        this.tracerBeamGlow.visible = false;
-      } else {
-        (this.tracerBeamCore.material as MeshBasicMaterial).opacity = 0.95 * (1 - t);
-        (this.tracerBeamGlow.material as MeshBasicMaterial).opacity = 0.6 * (1 - t);
-      }
-    }
+    this.updateBeam(now);
     if (this.fxMuzzleActive) {
       const t = (now - this.fxMuzzleStartMs) / FX_MUZZLE_MS;
       if (t >= 1) {
@@ -965,21 +1168,69 @@ export class PlaneCombatView {
         this.muzzleFlash.scale.setScalar(1 + t * 2.2);
       }
     }
-    if (this.fxBurstSide) {
-      const burst = this.fxBurstSide === "ufo" ? this.ufoBurst : this.interceptorBurst;
-      const vel = this.fxBurstSide === "ufo" ? this.ufoBurstVel : this.interceptorBurstVel;
-      const pos = this.fxBurstSide === "ufo" ? this.ufoBurstPos : this.interceptorBurstPos;
-      this.advanceBurst(burst, vel, pos, BURST_PARTICLES, this.fxBurstStartMs, now, FX_BURST_MS);
-      if ((now - this.fxBurstStartMs) / FX_BURST_MS >= 1) {
-        this.fxBurstSide = null;
-        burst.visible = false;
+    if (this.ufoBurstActive) {
+      this.advanceBurst(this.ufoBurst, this.ufoBurstVel, this.ufoBurstPos, BURST_PARTICLES, this.ufoBurstStartMs, now, FX_BURST_MS);
+      if ((now - this.ufoBurstStartMs) / FX_BURST_MS >= 1) {
+        this.ufoBurstActive = false;
+        this.ufoBurst.visible = false;
+      }
+    }
+    if (this.interceptorBurstActive) {
+      this.advanceBurst(this.interceptorBurst, this.interceptorBurstVel, this.interceptorBurstPos, BURST_PARTICLES, this.interceptorBurstStartMs, now, FX_BURST_MS);
+      if ((now - this.interceptorBurstStartMs) / FX_BURST_MS >= 1) {
+        this.interceptorBurstActive = false;
+        this.interceptorBurst.visible = false;
       }
     }
     if (this.fxExplosionActive) {
-      this.advanceBurst(this.explosionBurst, this.explosionBurstVel, this.explosionBurstPos, EXPLOSION_PARTICLES, this.fxExplosionStartMs, now, FX_EXPLOSION_MS);
-      if ((now - this.fxExplosionStartMs) / FX_EXPLOSION_MS >= 1) {
+      const dur = this.fxExplosionKind === "vaporize" ? FX_VAPORIZE_MS : FX_EXPLOSION_MS;
+      this.advanceBurst(this.explosionBurst, this.explosionBurstVel, this.explosionBurstPos, EXPLOSION_PARTICLES, this.fxExplosionStartMs, now, dur);
+      if ((now - this.fxExplosionStartMs) / dur >= 1) {
         this.fxExplosionActive = false;
         this.explosionBurst.visible = false;
+      }
+    }
+  }
+
+  /**
+   * Position + orient + scale the traveling-shot cylinders every frame from the
+   * cached endpoints (fxTracerFrom -> fxTracerTo), growing the travel point toward
+   * the target over beamTravelMs (0 under reducedMotion — the shot then appears
+   * fully extended and simply fades, no animated crossing). This replaces the prior
+   * dead transform: the beam previously only faded opacity in place at the origin.
+   */
+  private updateBeam(now: number): void {
+    if (!this.beamActive) return;
+    const t = this.beamTravelMs > 0 ? clamp01((now - this.beamStartMs) / this.beamTravelMs) : 1;
+    this.beamEnd.copy(this.fxTracerFrom).lerp(this.fxTracerTo, t);
+    this.beamCenter.copy(this.fxTracerFrom).add(this.beamEnd).multiplyScalar(0.5);
+    this.beamDir.copy(this.beamEnd).sub(this.fxTracerFrom);
+    const length = this.beamDir.length();
+    if (length > 1e-4) {
+      this.beamDir.normalize();
+      this.scratchQuat.setFromUnitVectors(this.unitY, this.beamDir);
+      this.tracerBeamCore.quaternion.copy(this.scratchQuat);
+      this.tracerBeamGlow.quaternion.copy(this.scratchQuat);
+    }
+    this.tracerBeamCore.position.copy(this.beamCenter);
+    this.tracerBeamGlow.position.copy(this.beamCenter);
+    this.tracerBeamCore.scale.set(1, Math.max(length, 1e-3), 1);
+    this.tracerBeamGlow.scale.set(1, Math.max(length, 1e-3), 1);
+
+    if (t >= 1) {
+      if (!this.beamResolved) {
+        this.beamResolved = true;
+        this.resolveShotArrival();
+      }
+      const fadeMs = this.beamTravelMs > 0 ? FX_MUZZLE_MS : FX_BEAM_STATIC_MS;
+      const fadeT = clamp01((now - (this.beamStartMs + this.beamTravelMs)) / fadeMs);
+      if (fadeT >= 1) {
+        this.beamActive = false;
+        this.tracerBeamCore.visible = false;
+        this.tracerBeamGlow.visible = false;
+      } else {
+        (this.tracerBeamCore.material as MeshBasicMaterial).opacity = 0.95 * (1 - fadeT);
+        (this.tracerBeamGlow.material as MeshBasicMaterial).opacity = 0.6 * (1 - fadeT);
       }
     }
   }
@@ -1015,17 +1266,27 @@ export class PlaneCombatView {
   private buildHud(): {
     heading: HTMLHeadingElement;
     rounds: HTMLElement;
-    rangeSegments: HTMLDivElement[];
-    rangeLabels: HTMLSpanElement[];
+    rangeNum: HTMLElement;
+    rangeRate: HTMLElement;
+    rangeFill: HTMLDivElement;
+    rangeTrack: HTMLDivElement;
     interceptorFill: HTMLDivElement;
     interceptorValue: HTMLElement;
     ufoFill: HTMLDivElement;
     ufoValue: HTMLElement;
+    weaponsBox: HTMLDivElement;
     log: HTMLDivElement;
-    actions: HTMLButtonElement[];
+    closeBtn: HTMLButtonElement;
+    disengageBtn: HTMLButtonElement;
+    alarm: HTMLDivElement;
+    missFlag: HTMLDivElement;
     resolve: HTMLDivElement;
     resolveText: HTMLElement;
+    resolveDetail: HTMLElement;
   } {
+    const alarm = el("div", "pc-alarm");
+    this.root.append(alarm);
+
     const left = el("section", "pc-panel pc-left");
     const eye = el("div", "eyebrow");
     eye.textContent = "▲ Interceptor engagement";
@@ -1039,36 +1300,34 @@ export class PlaneCombatView {
     meta.append(rounds, threat);
 
     const rangeTitle = el("div", "pc-range");
-    rangeTitle.textContent = "Weapons range";
-    const rangeBar = el("div", "pc-range-bar");
-    const rangeLabelsRow = el("div", "pc-range-labels");
-    // RANGE_BANDS = [Point-blank(0), Short(1), Medium(2), Long(3)] — render Long..Point-blank left→right.
-    for (let band = ENCOUNTER_START_RANGE; band >= 0; band--) {
-      const seg = el("div", "pc-range-seg");
-      rangeBar.append(seg);
-      const label = el("span");
-      label.textContent = RANGE_BANDS[band]!;
-      rangeLabelsRow.append(label);
-    }
-    const rangeSegments = Array.from(rangeBar.children) as HTMLDivElement[];
-    const rangeLabels = Array.from(rangeLabelsRow.children) as HTMLSpanElement[];
+    const rangeLabel = el("span");
+    rangeLabel.textContent = "Range";
+    const rangeNum = el("span", "pc-range-num");
+    const rangeRate = el("span", "pc-range-rate");
+    rangeTitle.append(rangeLabel, rangeNum, rangeRate);
+    const rangeTrack = el("div", "pc-range-track");
+    const rangeFill = el("div", "pc-range-fill");
+    rangeTrack.append(rangeFill);
 
-    left.append(eye, heading, meta, rangeTitle, rangeBar, rangeLabelsRow);
+    left.append(eye, heading, meta, rangeTitle, rangeTrack);
     const interceptorBar = this.hpBar("Interceptor", "interceptor");
     const ufoBar = this.hpBar("UFO", "ufo");
     left.append(interceptorBar.wrap, ufoBar.wrap);
+
+    const weaponsBox = el("div", "pc-weapons");
+    left.append(weaponsBox);
 
     const log = el("div", "pc-log");
     left.append(log);
 
     const actions = el("div", "pc-actions");
     const closeBtn = el("button", "ui-btn");
-    closeBtn.textContent = "Close";
-    const attackBtn = el("button", "ui-btn ui-btn--danger");
-    attackBtn.textContent = "Attack";
-    const disengageBtn = el("button", "ui-btn");
+    closeBtn.type = "button";
+    closeBtn.textContent = `Close (−${CLOSE_STEP_KM}km)`;
+    const disengageBtn = el("button", "ui-btn ui-btn--danger");
+    disengageBtn.type = "button";
     disengageBtn.textContent = "Disengage";
-    actions.append(closeBtn, attackBtn, disengageBtn);
+    actions.append(closeBtn, disengageBtn);
     left.append(actions);
     this.root.append(left);
 
@@ -1076,10 +1335,16 @@ export class PlaneCombatView {
     titlebar.textContent = "● Live dogfight";
     this.root.append(titlebar);
 
+    const missFlag = el("div", "pc-miss-flag");
+    this.root.append(missFlag);
+
     const resolve = el("div", "pc-resolve");
+    const resolveCard = el("div", "pc-resolve-card");
     const resolveText = el("b");
     resolveText.textContent = "Target destroyed";
-    resolve.append(resolveText);
+    const resolveDetail = el("span");
+    resolveCard.append(resolveText, resolveDetail);
+    resolve.append(resolveCard);
     this.root.append(resolve);
 
     const help = el("button", "pc-help");
@@ -1098,23 +1363,28 @@ export class PlaneCombatView {
     const ufoValue = ufoBar.value;
 
     closeBtn.addEventListener("click", () => this.opts.onAction("close"));
-    attackBtn.addEventListener("click", () => this.opts.onAction("attack"));
     disengageBtn.addEventListener("click", () => this.opts.onAction("disengage"));
-    const actionButtons = [closeBtn, attackBtn, disengageBtn];
 
     return {
       heading,
       rounds,
-      rangeSegments,
-      rangeLabels,
+      rangeNum,
+      rangeRate,
+      rangeFill,
+      rangeTrack,
       interceptorFill,
       interceptorValue,
       ufoFill,
       ufoValue,
+      weaponsBox,
       log,
-      actions: actionButtons,
+      closeBtn,
+      disengageBtn,
+      alarm,
+      missFlag,
       resolve,
       resolveText,
+      resolveDetail,
     };
   }
 
@@ -1134,15 +1404,15 @@ export class PlaneCombatView {
     title.textContent = "Interception";
     const lede = el("p", "lede");
     lede.textContent =
-      "Your interceptor duels a hostile UFO across four range bands. Manage the range, trade fire, and bring it down before it brings you down.";
+      "Your interceptor duels a hostile UFO at real range. Close the gap, fire the right weapon for the moment, and bring it down before it brings you down.";
     const list = el("ul");
     const tips: Array<[string, string]> = [
-      ["Close", "drops the range one band — closing raises both sides' hit odds and damage."],
-      ["Attack", "exchanges fire at the current range: your volley hits the UFO, then it shoots back."],
-      ["Disengage", "breaks off the chase and sends the interceptor home, leaving the UFO tracked."],
-      ["Range bands", "Long → Medium → Short → Point-blank; the closer you get, the deadlier for both."],
-      ["UFO down", "drop the UFO to 0 HP and it crashes to Earth, opening a recovery assault mission."],
-      ["Interceptor lost", "if your craft hits 0 HP first, the UFO escapes and the interceptor is destroyed."],
+      ["Heavy missile", "longest reach, devastating damage, slow lock — but can vaporize a small hull (no salvage)."],
+      ["Light missile", "shorter reach, moderate damage — preserves the wreck for a clean recovery."],
+      ["Cannon", "point-blank, sustained bursts — inside the UFO's own return-fire envelope."],
+      ["Close", "cuts the range so shorter-legged weapons come into play."],
+      ["Evasion", "every shot can be dodged — the UFO jinks harder at long range and with an agile hull."],
+      ["Disengage", "breaks off the chase; the interceptor returns to base, UFO stays tracked."],
     ];
     for (const [head, copy] of tips) {
       const li = el("li");
@@ -1184,7 +1454,11 @@ export class PlaneCombatView {
   }
 
   private setActionsEnabled(enabled: boolean): void {
-    for (const btn of this.actionButtons) btn.disabled = !enabled;
+    this.closeBtn.disabled = !enabled;
+    this.disengageBtn.disabled = !enabled;
+    for (const btn of this.weaponsBox.querySelectorAll("button")) {
+      (btn as HTMLButtonElement).disabled = !enabled;
+    }
   }
 
   /** Re-render every HUD field + reposition the craft from the live encounter. */
@@ -1194,24 +1468,123 @@ export class PlaneCombatView {
       const ufoInfo = ufoTypeInfo(this.campaign.ufoContact?.ufoType);
       this.contactHeading.textContent = `${ufoInfo.label} · ${enc.contactId}`;
       this.roundsValue.innerHTML = `ROUND <b>${enc.roundsElapsed + 1}</b>`;
-      const info = rangeInfo(enc.range);
-      // Segments are laid out Long(left) → Point-blank(right); flip index to column.
-      const activeCol = ENCOUNTER_START_RANGE - info.index;
-      for (let i = 0; i < this.rangeSegments.length; i++) {
-        const on = i === activeCol;
-        this.rangeSegments[i]!.classList.toggle("active", on);
-        this.rangeLabels[i]!.classList.toggle("active", on);
-      }
+      this.refreshRange(enc);
       this.updateHp(this.interceptorFill, this.interceptorValue, enc.interceptorHp, enc.interceptorHpMax);
       this.updateHp(this.ufoFill, this.ufoValue, enc.ufoHp, enc.ufoHpMax);
+      this.refreshWeapons(enc);
       this.refreshLog(enc);
+      this.refreshAlarm(enc);
       this.setActionsEnabled(true);
+      this.closeBtn.disabled = enc.phase === "pursuit";
       this.resolveOverlay.classList.remove("active");
     } else {
       // Resolved: leave the last log + dim the actions (resolve overlay shown by detect path).
       this.setActionsEnabled(false);
     }
     this.placeCraft(enc);
+  }
+
+  private refreshRange(enc: InterceptionEncounter): void {
+    this.rangeNum.innerHTML = `${Math.round(enc.rangeKm)}<span>km</span>`;
+    if (enc.closingSpeedKmH > 0) {
+      this.rangeRate.textContent = `closing ${Math.round(enc.closingSpeedKmH)} km/h`;
+      this.rangeRate.classList.remove("opening");
+    } else {
+      this.rangeRate.textContent = "UFO outrunning — gap opening";
+      this.rangeRate.classList.add("opening");
+    }
+    const span = Math.max(1, ENGAGEMENT_RANGE_KM - POINT_BLANK_KM);
+    const filled = clamp01((ENGAGEMENT_RANGE_KM - enc.rangeKm) / span);
+    this.rangeFill.style.width = `${filled * 100}%`;
+    this.refreshRangeTicks(enc);
+  }
+
+  /** Rebuild the weapon-range tick marks on the gauge (rare — only on weapon-set change). */
+  private refreshRangeTicks(enc: InterceptionEncounter): void {
+    const existing = this.rangeTrack.querySelectorAll(".pc-range-tick");
+    const ids = Object.keys(enc.ammo);
+    if (existing.length === ids.length) {
+      // Cheap path: just refresh in-range state, positions don't move.
+      let i = 0;
+      for (const id of ids) {
+        const weapon = airWeapon(id);
+        const tick = existing[i] as HTMLDivElement | undefined;
+        if (tick && weapon) tick.classList.toggle("in-range", enc.rangeKm <= weapon.rangeKm);
+        i++;
+      }
+      return;
+    }
+    for (const node of Array.from(existing)) node.remove();
+    const span = Math.max(1, ENGAGEMENT_RANGE_KM - POINT_BLANK_KM);
+    for (const id of ids) {
+      const weapon = airWeapon(id);
+      if (!weapon) continue;
+      const tick = el("div", "pc-range-tick");
+      const pos = clamp01((ENGAGEMENT_RANGE_KM - weapon.rangeKm) / span);
+      tick.style.left = `${pos * 100}%`;
+      tick.classList.toggle("in-range", enc.rangeKm <= weapon.rangeKm);
+      this.rangeTrack.append(tick);
+    }
+  }
+
+  /** Rebuild the weapon action rows from the encounter's live ammo/lock state. */
+  private refreshWeapons(enc: InterceptionEncounter): void {
+    this.weaponsBox.replaceChildren();
+    for (const id of Object.keys(enc.ammo)) {
+      const weapon = airWeapon(id);
+      if (!weapon) continue;
+      const shots = enc.ammo[id] ?? 0;
+      const inRange = enc.rangeKm <= weapon.rangeKm;
+      const locking = enc.lockingWeaponId === id && enc.lockBeatsLeft > 0;
+      const canFire = inRange && shots > 0 && enc.phase === "engagement";
+
+      const row = el("div", "pc-weapon");
+      row.classList.toggle("locking", locking);
+      if (locking && !this.reducedMotion) row.classList.add("pc-anim-pulse");
+      const badge = weaponBadge(weapon.cls);
+      const icon = el("div", "pc-weapon-icon");
+      icon.textContent = badge.icon;
+      const info = el("div", "pc-weapon-info");
+      const name = el("div", "pc-weapon-name");
+      name.textContent = weapon.name;
+      const meta = el("div", "pc-weapon-meta");
+      const rangeSpan = el("span");
+      rangeSpan.textContent = `${weapon.rangeKm}km`;
+      const ammoSpan = el("span");
+      ammoSpan.textContent = `${shots} left`;
+      meta.append(rangeSpan, ammoSpan);
+      if (weapon.cls === "cannon") {
+        const dangerSpan = el("span", "danger");
+        dangerSpan.textContent = "return-fire range";
+        meta.append(dangerSpan);
+      }
+      info.append(name, meta);
+
+      const fireBtn = el("button", "ui-btn ui-btn--danger pc-weapon-fire");
+      fireBtn.type = "button";
+      if (locking) {
+        fireBtn.textContent = `Lock ${enc.lockBeatsLeft}…`;
+      } else if (!inRange) {
+        fireBtn.textContent = "Out of range";
+      } else if (shots <= 0) {
+        fireBtn.textContent = "Dry";
+      } else {
+        fireBtn.textContent = "Fire";
+      }
+      fireBtn.disabled = !canFire;
+      fireBtn.addEventListener("click", () => this.opts.onAction(`fire:${id}`));
+
+      row.append(icon, info, fireBtn);
+      this.weaponsBox.append(row);
+    }
+  }
+
+  /** Pulses (static ring under reducedMotion) a red screen-edge alarm as hull drops. */
+  private refreshAlarm(enc: InterceptionEncounter): void {
+    const frac = enc.interceptorHpMax > 0 ? enc.interceptorHp / enc.interceptorHpMax : 1;
+    const critical = frac <= 0.35;
+    this.alarmEl.classList.toggle("active", critical);
+    this.alarmEl.classList.toggle("pc-anim-pulse", critical && !this.reducedMotion);
   }
 
   private updateHp(fill: HTMLDivElement, value: HTMLElement, hp: number, hpMax: number): void {
@@ -1229,16 +1602,17 @@ export class PlaneCombatView {
     this.logBox.replaceChildren();
     for (const line of lines) {
       const entry = el("p");
+      if (/evad|miss|jink/i.test(line)) entry.classList.add("miss");
       entry.textContent = line;
       this.logBox.append(entry);
     }
     this.logBox.scrollTop = this.logBox.scrollHeight;
   }
 
-  /** Position the two craft from the engagement range (closer range = closer together). */
+  /** Position the two craft from the engagement range (closer km = closer together). */
   private placeCraft(enc: InterceptionEncounter | null): void {
-    const range = enc?.range ?? ENCOUNTER_START_RANGE;
-    const sep = separationFor(range);
+    const rangeKm = enc?.rangeKm ?? ENGAGEMENT_RANGE_KM;
+    const sep = separationForKm(rangeKm);
     // Interceptor left-front, UFO right-back: 3/4 chase framing.
     this.interceptorAnchor.set(-sep / 2, -0.18, 0.55);
     this.ufoAnchor.set(sep / 2, 0.42, -0.45);
@@ -1264,39 +1638,67 @@ export class PlaneCombatView {
     this.raf = requestAnimationFrame(this.frame);
     const now = performance.now();
 
-    // Slow dramatic orbit around the engagement midpoint.
-    const angle = (now - this.startTimeMs) * 0.001 * CAMERA_ORBIT_RATE;
-    this.cameraBase.set(
-      Math.sin(angle) * CAMERA_ORBIT_RADIUS,
-      CAMERA_ORBIT_HEIGHT,
-      Math.cos(angle) * CAMERA_ORBIT_RADIUS,
-    );
-    // Apply a decaying screen shake on top of the orbit base.
-    if (this.shakeActive) {
-      const t = (now - this.shakeStartMs) / FX_SHAKE_MS;
-      if (t >= 1) {
-        this.shakeActive = false;
-        this.camera.position.copy(this.cameraBase);
-      } else {
-        const decay = 1 - t;
-        const mag = this.shakeMagnitude * decay;
-        this.scratchA.set(
-          (Math.sin(now * 0.073) + Math.sin(now * 0.019)) * 0.5 * mag,
-          (Math.cos(now * 0.061) + Math.sin(now * 0.027)) * 0.5 * mag,
-          (Math.sin(now * 0.043)) * mag,
-        );
-        this.camera.position.copy(this.cameraBase).add(this.scratchA);
-      }
+    if (this.reducedMotion) {
+      // Frozen dramatic angle: no orbit, no shake (decorative motion gated).
+      this.camera.position.copy(this.cameraBase.set(0, CAMERA_ORBIT_HEIGHT, CAMERA_ORBIT_RADIUS));
     } else {
-      this.camera.position.copy(this.cameraBase);
+      // Slow dramatic orbit around the engagement midpoint.
+      const angle = (now - this.startTimeMs) * 0.001 * CAMERA_ORBIT_RATE;
+      this.cameraBase.set(
+        Math.sin(angle) * CAMERA_ORBIT_RADIUS,
+        CAMERA_ORBIT_HEIGHT,
+        Math.cos(angle) * CAMERA_ORBIT_RADIUS,
+      );
+      // Decaying screen shake on top of the orbit base. Lateral (X/Y) only — the
+      // prior Z-axis term read as a backward-recoil jolt toward/away from camera
+      // and has been removed entirely.
+      if (this.shakeActive) {
+        const t = (now - this.shakeStartMs) / FX_SHAKE_MS;
+        if (t >= 1) {
+          this.shakeActive = false;
+          this.camera.position.copy(this.cameraBase);
+        } else {
+          const decay = 1 - t;
+          const mag = this.shakeMagnitude * decay;
+          this.scratchA.set(
+            (Math.sin(now * 0.073) + Math.sin(now * 0.019)) * 0.5 * mag,
+            (Math.cos(now * 0.061) + Math.sin(now * 0.027)) * 0.5 * mag,
+            0,
+          );
+          this.camera.position.copy(this.cameraBase).add(this.scratchA);
+        }
+      } else {
+        this.camera.position.copy(this.cameraBase);
+      }
     }
     this.camera.lookAt(this.midpoint);
 
-    // Gentle craft bob + saucer spin for life.
-    const bob = Math.sin(now * 0.0021) * 0.05;
-    this.interceptorMarker.position.y = this.interceptorAnchor.y + bob;
-    this.ufoMarker.position.y = this.ufoAnchor.y - Math.sin(now * 0.0017) * 0.06;
-    this.ufoMarker.rotation.y = now * 0.0006;
+    if (this.reducedMotion) {
+      this.interceptorMarker.position.y = this.interceptorAnchor.y;
+      this.ufoMarker.position.y = this.ufoAnchor.y;
+    } else {
+      // Gentle craft bob + saucer spin for life (pure decoration — gated above).
+      const bob = Math.sin(now * 0.0021) * 0.05;
+      this.interceptorMarker.position.y = this.interceptorAnchor.y + bob;
+      this.ufoMarker.position.y = this.ufoAnchor.y - Math.sin(now * 0.0017) * 0.06;
+      this.ufoMarker.rotation.y = now * 0.0006;
+    }
+
+    // Evasive jink: a quick lateral dodge on a revealed MISS. Essential-state FX
+    // (a miss must read as dodged), so it plays even under reducedMotion but as a
+    // single instantaneous snap-back rather than an animated slide.
+    if (this.jinkActive) {
+      const t = clamp01((now - this.jinkStartMs) / FX_MISS_MS);
+      if (t >= 1) {
+        this.jinkActive = false;
+        this.ufoMarker.position.x = this.ufoAnchor.x;
+      } else if (this.reducedMotion) {
+        this.ufoMarker.position.x = this.ufoAnchor.x;
+      } else {
+        const swing = Math.sin(t * Math.PI) * 0.4;
+        this.ufoMarker.position.x = this.ufoAnchor.x + swing;
+      }
+    }
 
     this.updateCombatFx(now);
     this.renderer.render(this.scene, this.camera);
@@ -1306,6 +1708,16 @@ export class PlaneCombatView {
 // --------------------------------------------------------------------------
 // Module-private helpers (self-contained; geoscape's are not exported).
 // --------------------------------------------------------------------------
+
+/** The single weapon id whose ammo pool decreased between two encounter snapshots. */
+function firedWeaponId(prev: Record<string, number>, next: Record<string, number>): string | null {
+  for (const id of Object.keys(prev)) {
+    const before = prev[id] ?? 0;
+    const after = next[id] ?? before;
+    if (after < before) return id;
+  }
+  return null;
+}
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,

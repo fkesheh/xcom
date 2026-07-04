@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   advanceGeoscape,
+  autoResolveInterception,
   canResolveInterception,
   executeInterceptionAction,
   interceptionForecast,
   interceptionSpeedAdvantage,
+  interceptUfo,
   startInterceptionEncounter,
   UFO_TYPE_PROFILES,
 } from "../src/campaign/geoscape";
@@ -127,6 +129,7 @@ describe("craft speed + combat stats round-trip save/load", () => {
       speedDegPerHour: 64.3,
       hullPoints: 140,
       weaponPower: 1.5,
+      loadout: ["avalanche", "stingray", "cannon"],
     };
     const campaign: CampaignState = {
       ...createCampaign(BASE, SEED),
@@ -139,11 +142,15 @@ describe("craft speed + combat stats round-trip save/load", () => {
 
     const raptor = loaded!.fleet!.find((craft) => craft.id === "int-1")!;
     expect(raptor.speedDegPerHour).toBe(36.2);
+    // The air-combat loadout is a new Craft field — it must survive the reload
+    // (the loadCampaign field-list gotcha), not be silently dropped.
+    expect(raptor.loadout).toEqual(["stingray", "cannon"]);
 
     const restored = loaded!.fleet!.find((craft) => craft.id === "phantom-1")!;
     expect(restored.speedDegPerHour).toBe(64.3);
     expect(restored.hullPoints).toBe(140);
     expect(restored.weaponPower).toBe(1.5);
+    expect(restored.loadout).toEqual(["avalanche", "stingray", "cannon"]);
   });
 
   it("keeps a manufactured Phantom's stats through a save/load after it takes a sortie", () => {
@@ -164,6 +171,7 @@ describe("craft speed + combat stats round-trip save/load", () => {
     expect(restored!.speedDegPerHour).toBe(built.speedDegPerHour);
     expect(restored!.hullPoints).toBe(built.hullPoints);
     expect(restored!.weaponPower).toBe(built.weaponPower);
+    expect(restored!.loadout).toEqual(["avalanche", "stingray", "cannon"]);
   });
 });
 
@@ -245,41 +253,33 @@ describe("interceptionSpeedAdvantage classification", () => {
 // ===========================================================================
 
 describe("stern chase: a Raptor cannot catch a battleship", () => {
-  it("opens the range on every attack and finally lets the battleship escape", () => {
+  it("is a losing stern chase — the gap opens and the battleship escapes", () => {
     const campaign = withContact(createCampaign(BASE, SEED), trackedContact("battleship", 18));
-    let state = startInterceptionEncounter(campaign);
-    expect(state.interception?.range).toBe(3);
+    const started = startInterceptionEncounter(campaign);
+    // A battleship (54.3) outruns a Raptor (36.2): a negative closing speed, phase pursuit.
+    expect(started.interception?.phase).toBe("pursuit");
+    expect(started.interception!.closingSpeedKmH).toBeLessThan(0);
 
-    const ranges: number[] = [];
-    let guard = 0;
-    while (canResolveInterception(state) && guard < 20) {
-      state = executeInterceptionAction(state, "attack");
-      if (state.interception) ranges.push(state.interception.range);
-      guard += 1;
-    }
-
-    // The range strictly widened each beat (never closed) until the break-off.
-    for (let i = 1; i < ranges.length; i++) {
-      expect(ranges[i]!).toBeGreaterThan(ranges[i - 1]!);
-    }
-    // The UFO escaped — a stern chase lost.
+    const { campaign: state, outcome } = autoResolveInterception(started);
+    expect(outcome.kind).toBe("escaped");
     expect(state.interception).toBeUndefined();
     expect(state.ufoContact).toBeUndefined();
     expect(state.lastInterceptionReport?.result).toBe("escaped");
   });
 
-  it("cannot close the range on a faster UFO — Close only holds station and burns fuel", () => {
+  it("keepChasing never closes the gap on a faster UFO — it only opens or breaks off", () => {
     const campaign = withContact(createCampaign(BASE, SEED), trackedContact("battleship", 18));
     const started = startInterceptionEncounter(campaign);
-    const engaging = chooseInterceptor(campaign)!;
-    const fuelBefore = campaign.fleet!.find((c) => c.id === engaging.id)!.fuel!;
+    const rangeBefore = started.interception!.rangeKm;
 
-    const closed = executeInterceptionAction(started, "close");
-    // A slower craft physically cannot claw the gap shut: the range holds (honoring the
-    // forecast's "cannot be forced down" gate) while the afterburner still burns fuel.
-    expect(closed.interception?.range).toBe(3);
-    const fuelAfter = closed.fleet!.find((c) => c.id === engaging.id)!.fuel!;
-    expect(fuelAfter).toBeLessThan(fuelBefore);
+    const chased = executeInterceptionAction(started, "keepChasing");
+    if (chased.interception) {
+      // Still in the chase: the range grew, never shrank.
+      expect(chased.interception.rangeKm).toBeGreaterThanOrEqual(rangeBefore);
+    } else {
+      // Or it already broke off — a stern chase lost, never a crash.
+      expect(chased.lastInterceptionReport?.result).toBe("escaped");
+    }
   });
 });
 
@@ -287,35 +287,23 @@ describe("stern chase: a Raptor cannot catch a battleship", () => {
 // 4b. STERN CHASE — an outrun UFO honors the forecast's "cannot force down" gate
 // ===========================================================================
 
-describe("an outrun UFO cannot be forced down interactively", () => {
-  it("closes the alternating Attack/Close pin — a terror ship always escapes, never crashes", () => {
+describe("an outrun UFO cannot be forced down", () => {
+  it("a terror ship always escapes, never crashes, however you press it", () => {
     const campaign = withContact(createCampaign(BASE, SEED), trackedContact("terror", 18));
-    // The forecast declares it uncatchable; the interactive encounter must agree.
+    // The forecast declares it uncatchable; the encounter must agree.
     expect(interceptionForecast(campaign)?.succeeds).toBe(false);
 
     let state = startInterceptionEncounter(campaign);
     let guard = 0;
-    // Alternating Attack/Close was the exploit that pinned the range at a lethal band.
-    while (canResolveInterception(state) && guard < 200) {
-      state = executeInterceptionAction(state, guard % 2 === 0 ? "attack" : "close");
+    // Any mix of pressing the chase / closing / firing still ends in an escape.
+    while (canResolveInterception(state) && guard < 500) {
+      const action = guard % 3 === 0 ? "attack" : guard % 3 === 1 ? "keepChasing" : "close";
+      state = executeInterceptionAction(state, action);
       guard += 1;
     }
+    expect(guard).toBeLessThan(500); // terminated, not an unbounded loop
     expect(state.ufoContact?.status).not.toBe("crashed");
     expect(state.lastInterceptionReport?.result).not.toBe("crashed");
-  });
-
-  it("breaks off the pursuit when the engaging craft runs its tank dry", () => {
-    // Close against a faster UFO only burns fuel; spamming it must eventually strand the
-    // craft (fuel is a real limiter), not spin forever at a clamped-zero tank.
-    const campaign = withContact(createCampaign(BASE, SEED), trackedContact("battleship", 18));
-    let state = startInterceptionEncounter(campaign);
-    let guard = 0;
-    while (canResolveInterception(state) && guard < 500) {
-      state = executeInterceptionAction(state, "close");
-      guard += 1;
-    }
-    expect(guard).toBeLessThan(500); // terminated (broke off), not an unbounded loop
-    expect(state.ufoContact?.status).not.toBe("crashed");
   });
 });
 
@@ -505,30 +493,20 @@ describe("Phantom progression arc", () => {
     // Same battleship contact, two fleets: Raptor-only loses, Phantom wins.
     const battleship = trackedContact("battleship", 40);
 
-    // Raptor-only: stern chase -> escape.
+    // Raptor-only: outrun -> stern chase -> escape.
     const raptorRun = withContact(createCampaign(BASE, SEED), battleship);
-    let rState = startInterceptionEncounter(raptorRun);
-    let guard = 0;
-    while (canResolveInterception(rState) && guard < 20) {
-      rState = executeInterceptionAction(rState, "attack");
-      guard += 1;
-    }
+    const rState = interceptUfo(raptorRun);
     expect(rState.lastInterceptionReport?.result).toBe("escaped");
 
-    // Phantom: advantage -> close then hammer -> forced down.
+    // Phantom: fast enough to run it down -> ZOOM -> forced down.
     let phantomCampaign = completeResearch(completeResearch(richCampaign(), "alienBiotech"), "alienPropulsion");
     phantomCampaign = startManufacturing(phantomCampaign, "phantom");
     phantomCampaign = advanceGeoscape(phantomCampaign, manufacturingDuration(phantomCampaign, "phantom"));
     const phantomRun = withContact(phantomCampaign, { ...battleship, detectedAtHour: phantomCampaign.clock.elapsedHours, expiresAtHour: phantomCampaign.clock.elapsedHours + 96 });
     expect(interceptionSpeedAdvantage(phantomRun, phantomRun.ufoContact!)).toBe("advantage");
+    expect(startInterceptionEncounter(phantomRun).interception!.closingSpeedKmH).toBeGreaterThan(0);
 
-    let pState = startInterceptionEncounter(phantomRun);
-    guard = 0;
-    while (canResolveInterception(pState) && guard < 40) {
-      const range = pState.interception!.range;
-      pState = executeInterceptionAction(pState, range > 0 ? "close" : "attack");
-      guard += 1;
-    }
+    const pState = interceptUfo(phantomRun);
     expect(pState.ufoContact?.status).toBe("crashed");
     expect(pState.lastInterceptionReport?.result).toBe("crashed");
   });

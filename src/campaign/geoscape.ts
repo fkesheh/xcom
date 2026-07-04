@@ -8,6 +8,8 @@ import type {
   Craft,
   FundingReport,
   InterceptionEncounter,
+  InterceptionOutcome,
+  InterceptionOutcomeKind,
   InterceptionReport,
   InterceptionResult,
   MissionType,
@@ -16,6 +18,13 @@ import type {
   UfoContact,
   UfoType,
 } from "./types";
+export type { InterceptionOutcome, InterceptionOutcomeKind } from "./types";
+// Per-hull agility now lives in types.ts (the dependency leaf) as the single source of
+// truth shared with the save-load normalizer; re-export here to keep the frozen
+// contract surface (`import { UFO_AGILITY } from ".../geoscape"`) intact.
+import { UFO_AGILITY } from "./types";
+export { UFO_AGILITY };
+import { airWeapon, ammoFor, craftLoadout, resolveShot, type AirWeapon } from "./airWeapons";
 import { summarizeBaseFacilities } from "./base";
 import { isLand } from "./landMask";
 import {
@@ -114,13 +123,30 @@ export const INTERCEPTOR_REPAIR_MAX_HOURS = 72;
 const INTERCEPTOR_BASE_SCORE = 74;
 const UFO_BASE_SCORE = 40;
 
-/** Starting engagement range for an interactive interception encounter. */
-const ENCOUNTER_START_RANGE = 3;
-/**
- * Range at which a stern chase breaks off: when the UFO outruns the pursuer, every
- * Attack beat OPENS the range by one; once it reaches this value the UFO escapes.
- */
-const ENCOUNTER_STERN_ESCAPE_RANGE = ENCOUNTER_START_RANGE + 3;
+// ---------------------------------------------------------------------------
+// AIR-COMBAT REDESIGN — engagement geometry (real km).
+// Pursuit-on-globe (km) -> ZOOM at <=100km -> cinematic dogfight (missiles/cannon).
+// ---------------------------------------------------------------------------
+/** THE ZOOM threshold: pursuit -> engagement transition. */
+export const ENGAGEMENT_RANGE_KM = 100;
+/** Floor rangeKm can close to inside the dogfight. */
+export const POINT_BLANK_KM = 5;
+/** km an engagement "close" (afterburner) beat cuts, when not outrun. */
+export const CLOSE_STEP_KM = 18;
+/** Pursuit rangeKm past which an outrun UFO breaks contact (stern-chase escape). */
+export const STERN_ESCAPE_KM = 140;
+/** Fixed great-circle deg -> km conversion. */
+export const DEG_TO_KM = 111.19;
+/** Heaviest hull an overkilling heavy missile can vaporize (scout 30 / harvester 50). */
+export const VAPORIZE_HULL_CAP = 55;
+/** Blow >= ufoHpMax * this on a vaporizable hull leaves no crash site. */
+export const VAPORIZE_FACTOR = 1.4;
+/** Below this salvage quality the elerium core is damaged/lost. */
+export const CORE_RECOVER_THRESHOLD = 0.5;
+
+// UFO_AGILITY is imported from and re-exported at the top of this module (it lives in
+// types.ts now so storage.ts can derive the same value without a circular import).
+
 /** Classification thresholds for craftSpeed / ufoSpeed. */
 const SPEED_ADVANTAGE_RATIO = 1.05;
 const SPEED_OUTRUN_RATIO = 0.95;
@@ -487,15 +513,22 @@ export function interceptionForecast(campaign: CampaignState): InterceptionForec
 }
 
 /**
- * Shared outcome resolver for both the instant auto-resolve (`interceptUfo`) and
- * the terminal transitions of an interactive encounter. Applies the interceptor's
- * final damage, records the report, and mutates strategic/regional state per the
- * result. A resolved outcome always clears any active encounter.
+ * Shared outcome resolver for both the headless auto-resolve (`interceptUfo`) and the
+ * terminal transitions of an interactive encounter. Applies the interceptor's final
+ * damage, records the report (with the richer outcome kind + salvageQuality), and
+ * mutates strategic/regional state per the outcome. Always clears any active encounter.
+ *
+ * Outcome mapping:
+ *  - crashed:   UFO forced down -> a recoverable crash site carrying salvageQuality.
+ *  - vaporized: a KILL by heavy ordnance on a small hull -> no site (contact cleared),
+ *               only a small debris credit; a distinct report.
+ *  - escaped:   UFO outran the pursuit or survived to break-off -> contact cleared.
+ *  - brokeOff:  the interceptor was destroyed (0 HP) -> UFO gets away, contact cleared.
  */
 function applyInterceptionOutcome(
   campaign: CampaignState,
   contact: UfoContact,
-  result: InterceptionResult,
+  outcome: InterceptionOutcome,
   finalInterceptorDamage: number,
   reportDamage: number,
 ): CampaignState {
@@ -503,10 +536,41 @@ function applyInterceptionOutcome(
   // Route the damage onto the engaging craft (and keep the legacy interceptor field in sync).
   const chosen = chooseInterceptor(campaign);
   const afterCraft = chosen ? damageCraft(campaign, chosen.id, totalDamage) : campaign;
-  // A UFO forced down over open ocean is lost — no assault mission can reach the wreck.
-  const overOcean = result === "crashed" && !isLand(contact.lat, contact.lon);
-  const report = makeInterceptionReport(contact, result, reportDamage, afterCraft.clock.elapsedHours, overOcean);
-  if (result === "escaped") {
+  const kind = outcome.kind;
+
+  // A KILL leaving nothing to recover: the small hull was vaporized by heavy ordnance.
+  if (kind === "vaporized") {
+    const cfg = difficultyConfig(campaign);
+    const report: InterceptionReport = {
+      contactId: contact.id,
+      result: "crashed",
+      region: contact.region,
+      strength: contact.strength,
+      interceptorDamage: reportDamage,
+      completedAtHour: afterCraft.clock.elapsedHours,
+      summary: `${contact.id} VAPORIZED over ${contact.region} — heavy ordnance left no crash site. Only scattered debris recovered.`,
+      outcome: "vaporized",
+      salvageQuality: 0,
+    };
+    return {
+      ...afterCraft,
+      clock: { ...afterCraft.clock, lastContactHour: afterCraft.clock.elapsedHours },
+      lastInterceptionReport: report,
+      strategic: { ...afterCraft.strategic, score: afterCraft.strategic.score + 25 },
+      // A confirmed kill still relieves regional panic like a shoot-down.
+      regionalPanic: adjustRegionalPanic(afterCraft.regionalPanic, contact.region, -4, 0, cfg.panicMult),
+      resources: { ...afterCraft.resources, credits: afterCraft.resources.credits + 30 },
+      ufoContact: undefined,
+      interception: undefined,
+    };
+  }
+
+  // The UFO got away (outran the pursuit, or the interceptor was forced to break off).
+  if (kind === "escaped" || kind === "brokeOff") {
+    const overOcean = false;
+    const report = makeInterceptionReport(contact, "escaped", reportDamage, afterCraft.clock.elapsedHours, overOcean);
+    report.outcome = kind;
+    report.salvageQuality = 0;
     const cfg = difficultyConfig(campaign);
     const regionalPanic = adjustRegionalPanic(afterCraft.regionalPanic, contact.region, 8, 1, cfg.panicMult);
     const strategic = statusAfterStrategicChange({ ...afterCraft, regionalPanic }, {
@@ -525,6 +589,13 @@ function applyInterceptionOutcome(
       interception: undefined,
     };
   }
+
+  // CRASHED: a recoverable wreck. A UFO forced down over open ocean is lost at sea.
+  const overOcean = !isLand(contact.lat, contact.lon);
+  const report = makeInterceptionReport(contact, "crashed", reportDamage, afterCraft.clock.elapsedHours, overOcean);
+  const salvageQuality = Math.max(0, Math.min(1, outcome.salvageQuality));
+  report.outcome = "crashed";
+  report.salvageQuality = salvageQuality;
   return {
     ...afterCraft,
     lastInterceptionReport: report,
@@ -543,22 +614,42 @@ function applyInterceptionOutcome(
         : afterCraft.clock.elapsedHours + CRASH_SITE_LIFETIME_HOURS,
       interceptorDamage: reportDamage,
       overOcean,
+      salvageQuality,
     },
     interception: undefined,
   };
 }
 
+/**
+ * Headless interception: begin the encounter and auto-resolve it to a terminal outcome
+ * using the same deterministic resolver the interactive dogfight uses. Keeps its legacy
+ * signature (the balance harness entry point). No-op unless a tracked crashSite contact
+ * can be launched against.
+ */
 export function interceptUfo(campaign: CampaignState): CampaignState {
-  const forecast = interceptionForecast(campaign);
-  if (!forecast?.canLaunch) return campaign;
-  const contact = campaign.ufoContact!;
-  const result: InterceptionResult = forecast.succeeds ? "crashed" : "escaped";
-  const finalDamage = Math.min(100, engagingDamage(campaign) + forecast.damage);
-  return applyInterceptionOutcome(campaign, contact, result, finalDamage, forecast.damage);
+  if (!canLaunchInterceptor(campaign)) return campaign;
+  const started = startInterceptionEncounter(campaign);
+  if (!started.interception) return campaign;
+  return autoResolveInterception(started).campaign;
 }
 
-/** Player choice during an interactive interception encounter. */
-export type InterceptionAction = "close" | "attack" | "disengage";
+// ---------------------------------------------------------------------------
+// Air-combat action model (frozen contract). String union so the geoscape
+// beat-preview + existing harness paths keep working. `fire:<weaponId>` fires a
+// specific weapon; "attack" auto-fires the best in-range weapon (harness/legacy
+// convenience); "keepChasing" is the pursuit-only advance.
+// ---------------------------------------------------------------------------
+export type InterceptionAction =
+  | "keepChasing"
+  | "close"
+  | "attack"
+  | "disengage"
+  | `fire:${string}`;
+
+/** Convenience: fire a specific weapon by id (equivalent to `fire:<id>`). */
+export function fireWeapon(campaign: CampaignState, weaponId: string): CampaignState {
+  return executeInterceptionAction(campaign, `fire:${weaponId}` as InterceptionAction);
+}
 
 function rollFraction(seed: number): number {
   return (hash(seed) >>> 0) / 0x100000000;
@@ -568,21 +659,91 @@ function encounterRoundSeed(campaign: CampaignState, contact: UfoContact, round:
   return (campaign.seed ^ (contact.missionSeed >>> 0) ^ (Math.max(0, round) * 0x9e3779b9)) >>> 0;
 }
 
-/**
- * Outgoing interceptor damage at the current range; closer range hits harder and
- * the engaging craft's weaponPower (>1 for advanced interceptors) scales it.
- */
-function interceptorAttackDamage(range: number, mult: number, roundSeed: number, power: number): number {
-  const base = 10 + (ENCOUNTER_START_RANGE - range) * 8;
-  const factor = 0.6 + 0.4 * rollFraction(hash(roundSeed ^ ENCOUNTER_INTERCEPTOR_SALT));
-  return Math.max(1, Math.round(base * factor * mult * power));
+/** Deterministic per-weapon salt (FNV-1a of the id) so each weapon's shot roll is independent. */
+function weaponSalt(id: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < id.length; i++) {
+    h = (h ^ id.charCodeAt(i)) >>> 0;
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
 }
 
-/** Incoming UFO return fire at the current range; closer range is deadlier both ways. */
-function ufoReturnFireDamage(range: number, strength: number, mult: number, roundSeed: number): number {
-  const base = 5 + strength * 2 + (ENCOUNTER_START_RANGE - range) * 3;
+/** The UFO returns fire only when the interceptor is inside this envelope (cannon sits inside). */
+function returnEnvelopeKm(strength: number): number {
+  return 12 + strength * 4;
+}
+
+/** Incoming UFO return fire; deadlier the closer the interceptor sits inside the envelope. */
+function ufoReturnFireDamageKm(
+  rangeKm: number,
+  strength: number,
+  mult: number,
+  roundSeed: number,
+  envelope: number,
+): number {
+  const closeness = Math.max(0, Math.min(1, 1 - rangeKm / Math.max(1, envelope)));
+  const base = 3 + strength * 2 + closeness * 8;
   const factor = 0.6 + 0.4 * rollFraction(hash(roundSeed ^ ENCOUNTER_UFO_SALT));
   return Math.max(1, Math.round(base * factor * mult));
+}
+
+/** Air-combat weapons the engaging craft brings to the encounter. */
+function engagingLoadout(campaign: CampaignState): AirWeapon[] {
+  const craft = chooseInterceptor(campaign);
+  return craft ? craftLoadout(craft) : [];
+}
+
+/** A named weapon from the engaging loadout (or the catalog fallback). */
+function loadoutWeapon(campaign: CampaignState, id: string): AirWeapon | undefined {
+  return engagingLoadout(campaign).find((w) => w.id === id) ?? airWeapon(id);
+}
+
+/** Highest-damage carried weapon that is in range at the current gap and still has ammo. */
+function bestInRangeWeapon(
+  campaign: CampaignState,
+  encounter: InterceptionEncounter,
+): AirWeapon | undefined {
+  let best: AirWeapon | undefined;
+  for (const w of engagingLoadout(campaign)) {
+    if (w.rangeKm < encounter.rangeKm) continue;
+    if ((encounter.ammo[w.id] ?? 0) <= 0) continue;
+    if (!best || w.damage > best.damage) best = w;
+  }
+  return best;
+}
+
+/** Total shots left across every carried weapon this encounter (0 = Winchester). */
+function remainingAmmo(encounter: InterceptionEncounter): number {
+  return Object.values(encounter.ammo).reduce((sum, n) => sum + Math.max(0, n), 0);
+}
+
+/** Real great-circle km gap between the engaging craft's current flight position and the UFO. */
+export function interceptionRangeKm(campaign: CampaignState): number {
+  const contact = campaign.ufoContact;
+  if (!contact) return 0;
+  const craft = chooseInterceptor(campaign);
+  let lat = campaign.base.lat;
+  let lon = campaign.base.lon;
+  if (craft) {
+    const flight = (campaign.activeFlights ?? []).find(
+      (f) => f.craftId === craft.id && f.id.startsWith(PATROL_ID_PREFIX) && f.id.endsWith(`:${contact.id}`),
+    );
+    if (flight) {
+      const pos = activeFlightPosition(flight);
+      lat = pos.lat;
+      lon = pos.lon;
+    }
+  }
+  return greatCircleDistanceDeg(lat, lon, contact.lat, contact.lon) * DEG_TO_KM;
+}
+
+/** craftSpeedKmH - ufoSpeedKmH; <=0 means a stern chase the pursuer loses. */
+function closingSpeedKmHFor(campaign: CampaignState, contact: UfoContact): number {
+  const craft = chooseInterceptor(campaign);
+  const craftSpeed = craft ? craftSpeedDegPerHour(craft) : DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR;
+  const ufoSpeed = contactSpeedDegPerHour(contact);
+  return (craftSpeed - ufoSpeed) * DEG_TO_KM;
 }
 
 function encounterUfoHpMax(contact: UfoContact): number {
@@ -612,8 +773,10 @@ export function canResolveInterception(campaign: CampaignState): boolean {
 }
 
 /**
- * Begins an interactive interception against a tracked crash-site contact. Scales
- * UFO HP from the contact's strength and interceptor HP from its current condition.
+ * Begins an interception against a tracked crash-site contact. Starts as a PURSUIT at
+ * the real km gap (interceptionRangeKm); if the interceptor is already within
+ * ENGAGEMENT_RANGE_KM it drops straight into the dogfight. UFO HP scales from strength,
+ * interceptor HP from its current condition, ammo is seeded from the craft's loadout.
  * No-op unless the contact is a tracked crashSite and the interceptor is ready.
  */
 export function startInterceptionEncounter(campaign: CampaignState): CampaignState {
@@ -623,14 +786,22 @@ export function startInterceptionEncounter(campaign: CampaignState): CampaignSta
   if (!isInterceptorReady(campaign)) return campaign;
   const ufoHpMax = encounterUfoHpMax(contact);
   const interceptorHp = encounterInterceptorHp(campaign);
+  const rawRangeKm = Math.max(POINT_BLANK_KM, interceptionRangeKm(campaign));
+  const phase: InterceptionEncounter["phase"] = rawRangeKm <= ENGAGEMENT_RANGE_KM ? "engagement" : "pursuit";
   const encounter: InterceptionEncounter = {
     contactId: contact.id,
+    phase,
+    rangeKm: phase === "engagement" ? Math.min(rawRangeKm, ENGAGEMENT_RANGE_KM) : rawRangeKm,
+    closingSpeedKmH: closingSpeedKmHFor(campaign, contact),
     ufoHp: ufoHpMax,
     ufoHpMax,
     interceptorHp,
     interceptorHpMax: engagingHullPoints(campaign),
-    range: ENCOUNTER_START_RANGE,
+    ammo: ammoFor(engagingLoadout(campaign)),
+    lockBeatsLeft: 0,
+    overkillMargin: 0,
     roundsElapsed: 0,
+    ufoAgility: UFO_AGILITY[ufoTypeOf(contact)],
     log: ["Interception engaged"],
   };
   return {
@@ -645,26 +816,249 @@ function encounterDamagePercent(interceptorHp: number, hull: number): number {
   return Math.max(0, Math.min(100, Math.round((1 - interceptorHp / Math.max(1, hull)) * 100)));
 }
 
+/** Killing-blow classification: heavy overkill on a small hull VAPORIZES; else CRASHED. */
+function classifyKillingBlow(
+  weapon: AirWeapon,
+  blowDmg: number,
+  hpBefore: number,
+  ufoHpMax: number,
+): { kind: "crashed" | "vaporized"; overkillMargin: number; salvageQuality: number } {
+  const overkillMargin = Math.max(0, (blowDmg - hpBefore) / Math.max(1, ufoHpMax));
+  if (weapon.canVaporize && ufoHpMax <= VAPORIZE_HULL_CAP && blowDmg >= ufoHpMax * VAPORIZE_FACTOR) {
+    return { kind: "vaporized", overkillMargin, salvageQuality: 0 };
+  }
+  return { kind: "crashed", overkillMargin, salvageQuality: Math.max(0.2, Math.min(1, 1 - overkillMargin)) };
+}
+
 /**
- * Resolves one round of an active encounter. "close" cuts range (improving future
- * damage), "attack" exchanges fire at the current range, "disengage" returns the
- * UFO to tracked without further interceptor damage.
- *
- * STERN CHASE: when the UFO outruns the engaging craft (interceptionSpeedAdvantage
- * === "outrun"), every Attack beat OPENS the range by one and "close" CANNOT reduce
- * it — a slower craft physically cannot close the gap, it can only burn afterburner
- * fuel to hold station. So the range only ever grows: after at most a few firing
- * passes (each at longer, weaker range) the UFO reaches ENCOUNTER_STERN_ESCAPE_RANGE
- * and breaks off. This makes the interactive encounter honor the forecast's hard gate
- * — an outrun UFO genuinely cannot be forced down at any score (matching
- * interceptionForecast), so a battleship really is uncatchable with a slow Raptor.
- *
- * FUEL: attack and afterburner-close burn the engaging craft's fuel. A craft that can
- * no longer afford a round breaks off and returns to base — fuel is a real limiter on
- * how long a pursuit can be pressed, not a value that silently clamps at zero.
- *
- * Terminal outcomes (UFO down or interceptor lost) reuse the shared auto-resolve
- * resolver. No-op without an active engaging encounter.
+ * Terminal interceptor damage for a resolved encounter: the actual hull lost this
+ * fight, floored at a deterministic baseline so a clean long-range kill still costs the
+ * interceptor a real (repair-scheduling) dent. Returns { finalDamage (absolute), reportDamage (new) }.
+ */
+function resolveInterceptorDamage(
+  campaign: CampaignState,
+  contact: UfoContact,
+  interceptorHp: number,
+  hull: number,
+  crashed: boolean,
+): { finalDamage: number; reportDamage: number } {
+  const beforeDmg = engagingDamage(campaign);
+  const absolute = encounterDamagePercent(interceptorHp, hull);
+  const baseline = interceptionDamage(campaign, contact, crashed);
+  const finalDamage = Math.min(100, Math.max(absolute, beforeDmg + baseline));
+  return { finalDamage, reportDamage: Math.max(0, finalDamage - beforeDmg) };
+}
+
+/** A UFO that outran the pursuit (or a matched chase lost). Contact escapes. */
+function resolveEscape(campaign: CampaignState, contact: UfoContact, encounter: InterceptionEncounter): CampaignState {
+  const dmg = resolveInterceptorDamage(campaign, contact, encounter.interceptorHp, encounter.interceptorHpMax, false);
+  return applyInterceptionOutcome(campaign, contact, { kind: "escaped", salvageQuality: 0 }, dmg.finalDamage, dmg.reportDamage);
+}
+
+/**
+ * Advances one PURSUIT beat: the real km gap closes at the closing speed (or OPENS
+ * against a faster UFO). Crossing <=ENGAGEMENT_RANGE_KM is THE ZOOM (phase -> engagement);
+ * an outrun UFO that opens past STERN_ESCAPE_KM breaks contact. Fire/attack beats burn a
+ * fuel pass (an afterburner ranging run); keepChasing/close are free.
+ */
+function executePursuitBeat(
+  campaign: CampaignState,
+  encounter: InterceptionEncounter,
+  contact: UfoContact,
+  action: InterceptionAction,
+): CampaignState {
+  const round = encounter.roundsElapsed;
+  const closing = encounter.closingSpeedKmH;
+  const outrun = closing <= 0;
+  const burns = action === "attack" || (typeof action === "string" && action.startsWith("fire:"));
+  // Bingo fuel on a fuel-burning beat: the interceptor must RTB — the UFO slips away.
+  if (burns && bingoFuel(campaign)) return resolveEscape(campaign, contact, encounter);
+  const afterFuel = burns ? burnEngagingFuel(campaign) : campaign;
+
+  if (outrun) {
+    const rangeKm = encounter.rangeKm + Math.abs(closing);
+    if (rangeKm >= STERN_ESCAPE_KM) {
+      return resolveEscape(afterFuel, contact, encounter);
+    }
+    return {
+      ...afterFuel,
+      interception: {
+        ...encounter,
+        rangeKm,
+        roundsElapsed: round + 1,
+        log: [...encounter.log, `Pursuit: ${contact.id} pulls away — range opens to ${Math.round(rangeKm)} km.`],
+      },
+    };
+  }
+
+  const rangeKm = encounter.rangeKm - closing;
+  if (rangeKm <= ENGAGEMENT_RANGE_KM) {
+    return {
+      ...afterFuel,
+      interception: {
+        ...encounter,
+        phase: "engagement",
+        rangeKm: ENGAGEMENT_RANGE_KM,
+        roundsElapsed: round + 1,
+        log: [...encounter.log, `THE ZOOM — closed to engagement range (${ENGAGEMENT_RANGE_KM} km).`],
+      },
+    };
+  }
+  return {
+    ...afterFuel,
+    interception: {
+      ...encounter,
+      rangeKm,
+      roundsElapsed: round + 1,
+      log: [...encounter.log, `Pursuit: closing — range ${Math.round(rangeKm)} km.`],
+    },
+  };
+}
+
+/** Advances one ENGAGEMENT (dogfight) beat: close the gap, or fire a weapon. */
+function executeEngagementBeat(
+  campaign: CampaignState,
+  encounter: InterceptionEncounter,
+  contact: UfoContact,
+  action: InterceptionAction,
+): CampaignState {
+  const round = encounter.roundsElapsed;
+  const outrun = encounter.closingSpeedKmH <= 0;
+
+  const explicitId =
+    typeof action === "string" && action.startsWith("fire:") ? action.slice(5) : undefined;
+  const weapon = explicitId ? loadoutWeapon(campaign, explicitId) : bestInRangeWeapon(campaign, encounter);
+  const canFire =
+    !!weapon && weapon.rangeKm >= encounter.rangeKm && (encounter.ammo[weapon.id] ?? 0) > 0;
+
+  // A plain "close", or an auto "attack" with nothing in range: afterburner nudge (free).
+  // An explicit out-of-range/empty fire is a no-op (the button is disabled in the view).
+  if (action === "close" || action === "keepChasing" || (action === "attack" && !canFire)) {
+    return closeEngagementGap(campaign, encounter, contact, outrun, round);
+  }
+  if (explicitId && !canFire) {
+    return campaign;
+  }
+
+  // FIRE. `weapon` is fireable at this range with ammo.
+  const w = weapon!;
+  // A fire/lock beat burns fuel; bingo fuel forces the interceptor to break off before
+  // the shot leaves — the UFO escapes. Restores fuel as a real terminal (see bingoFuel).
+  if (bingoFuel(campaign)) return resolveEscape(campaign, contact, encounter);
+  const mult = difficultyConfig(campaign).interceptionDamageMult;
+  const roundSeed = encounterRoundSeed(campaign, contact, round);
+
+  // Heavy ordnance must burn its lock beats before the shot leaves the rail.
+  if (w.lockBeats > 0) {
+    const currentLeft = encounter.lockingWeaponId === w.id ? encounter.lockBeatsLeft : w.lockBeats;
+    const nextLeft = currentLeft - 1;
+    if (nextLeft > 0) {
+      const afterFuel = burnEngagingFuel(campaign);
+      return {
+        ...afterFuel,
+        interception: {
+          ...encounter,
+          lockingWeaponId: w.id,
+          lockBeatsLeft: nextLeft,
+          roundsElapsed: round + 1,
+          log: [...encounter.log, `Acquiring lock on ${contact.id} — ${nextLeft} beat${nextLeft === 1 ? "" : "s"} to launch.`],
+        },
+      };
+    }
+  }
+
+  const roll = rollFraction(roundSeed ^ weaponSalt(w.id));
+  const shot = resolveShot(w, encounter.rangeKm, encounter.ufoAgility, roll, engagingWeaponPower(campaign), mult);
+  const ammo = { ...encounter.ammo, [w.id]: Math.max(0, (encounter.ammo[w.id] ?? 0) - 1) };
+  const hpBefore = encounter.ufoHp;
+  const ufoHp = shot.hit ? Math.max(0, hpBefore - shot.damage) : hpBefore;
+
+  // UFO return fire only when the interceptor is inside its envelope.
+  const envelope = returnEnvelopeKm(contact.strength);
+  const ufoDmg = encounter.rangeKm <= envelope ? ufoReturnFireDamageKm(encounter.rangeKm, contact.strength, mult, roundSeed, envelope) : 0;
+  const interceptorHp = Math.max(0, encounter.interceptorHp - ufoDmg);
+  const hull = encounter.interceptorHpMax;
+  const afterFuel = burnEngagingFuel(campaign);
+  const log = [
+    ...encounter.log,
+    shot.hit
+      ? `${w.name} hits ${contact.id} for ${Math.round(shot.damage)}${ufoDmg > 0 ? `; ${contact.id} returns ${ufoDmg}` : ""}.`
+      : `${contact.id} jinks — ${w.name} misses${ufoDmg > 0 ? `; ${contact.id} returns ${ufoDmg}` : ""}.`,
+  ];
+
+  // Terminal: UFO destroyed.
+  if (ufoHp <= 0) {
+    const cls = classifyKillingBlow(w, shot.damage, hpBefore, encounter.ufoHpMax);
+    const dmg = resolveInterceptorDamage(afterFuel, contact, interceptorHp, hull, cls.kind === "crashed");
+    return applyInterceptionOutcome(
+      afterFuel,
+      contact,
+      { kind: cls.kind, salvageQuality: cls.salvageQuality },
+      dmg.finalDamage,
+      dmg.reportDamage,
+    );
+  }
+  // Terminal: interceptor destroyed -> forced to break off, UFO escapes.
+  if (interceptorHp <= 0) {
+    const beforeDmg = engagingDamage(afterFuel);
+    return applyInterceptionOutcome(afterFuel, contact, { kind: "brokeOff", salvageQuality: 0 }, 100, Math.max(0, 100 - beforeDmg));
+  }
+
+  return {
+    ...afterFuel,
+    interception: {
+      ...encounter,
+      ufoHp,
+      interceptorHp,
+      ammo,
+      lockingWeaponId: undefined,
+      lockBeatsLeft: 0,
+      roundsElapsed: round + 1,
+      log,
+    },
+  };
+}
+
+/** Afterburner close inside the dogfight: cut CLOSE_STEP_KM, or open it against a faster UFO. */
+function closeEngagementGap(
+  campaign: CampaignState,
+  encounter: InterceptionEncounter,
+  contact: UfoContact,
+  outrun: boolean,
+  round: number,
+): CampaignState {
+  if (outrun) {
+    const rangeKm = encounter.rangeKm + CLOSE_STEP_KM;
+    if (rangeKm >= STERN_ESCAPE_KM) {
+      return resolveEscape(campaign, contact, encounter);
+    }
+    return {
+      ...campaign,
+      interception: {
+        ...encounter,
+        rangeKm,
+        roundsElapsed: round + 1,
+        log: [...encounter.log, `${contact.id} pulls away — range opens to ${Math.round(rangeKm)} km.`],
+      },
+    };
+  }
+  const rangeKm = Math.max(POINT_BLANK_KM, encounter.rangeKm - CLOSE_STEP_KM);
+  return {
+    ...campaign,
+    interception: {
+      ...encounter,
+      rangeKm,
+      roundsElapsed: round + 1,
+      log: [...encounter.log, `Closing to ${Math.round(rangeKm)} km.`],
+    },
+  };
+}
+
+/**
+ * Single pure entry point for an interception beat. Branches by encounter.phase:
+ * pursuit (keep chasing / disengage) or engagement (fire / close / disengage).
+ * "disengage" breaks off cleanly (UFO back to tracked, no strategic change).
+ * Terminal outcomes reuse the shared resolver. No-op without an active engaging encounter.
  */
 export function executeInterceptionAction(
   campaign: CampaignState,
@@ -674,10 +1068,6 @@ export function executeInterceptionAction(
   const contact = campaign.ufoContact;
   if (!encounter || !contact || contact.status !== "engaging") return campaign;
 
-  const round = encounter.roundsElapsed;
-  const roundLabel = `Round ${round + 1}`;
-  const outrun = interceptionSpeedAdvantage(campaign, contact) === "outrun";
-
   if (action === "disengage") {
     return {
       ...campaign,
@@ -686,102 +1076,68 @@ export function executeInterceptionAction(
     };
   }
 
-  // A fuel-burning beat (any Attack, or an afterburner Close against a faster UFO)
-  // needs at least one round's fuel in the tank. Out of fuel, the interceptor cannot
-  // sustain the chase: it breaks off and the UFO drops back to tracked (the patrol
-  // layer then flies the empty craft home to refuel).
-  const burnsFuel = action === "attack" || (action === "close" && outrun);
-  if (burnsFuel) {
-    const engaging = chooseInterceptor(campaign);
-    if (engaging && craftFuel(engaging) < ENCOUNTER_FUEL_PER_ATTACK) {
-      return {
-        ...campaign,
-        ufoContact: { ...contact, status: "tracked" },
-        interception: undefined,
-      };
+  if (encounter.phase === "pursuit") {
+    return executePursuitBeat(campaign, encounter, contact, action);
+  }
+  return executeEngagementBeat(campaign, encounter, contact, action);
+}
+
+/**
+ * Headless drive of an in-progress encounter to a terminal outcome: keep chasing in
+ * pursuit; in engagement fire the best in-range weapon, close when nothing is in range,
+ * and (when outrun) open the gap into a stern-chase escape. Exposed for tests + the
+ * balance harness. Deterministic.
+ */
+export function autoResolveInterception(campaign: CampaignState): {
+  campaign: CampaignState;
+  outcome: InterceptionOutcome;
+} {
+  let state = campaign;
+  let guard = 0;
+  while (state.interception && state.ufoContact?.status === "engaging" && guard < 5000) {
+    const enc = state.interception;
+    let action: InterceptionAction;
+    if (enc.phase === "pursuit") {
+      action = "keepChasing";
+    } else if (enc.closingSpeedKmH <= 0) {
+      action = "close";
+    } else {
+      const w = bestInRangeWeapon(state, enc);
+      if (w) {
+        action = `fire:${w.id}` as InterceptionAction;
+      } else if (remainingAmmo(enc) > 0) {
+        // Ammo left but out of range — close the gap into weapon reach.
+        action = "close";
+      } else {
+        // Winchester (out of ammo) with the UFO still alive: the interceptor cannot
+        // finish the kill and breaks off — the UFO escapes. Without this terminal the
+        // loop would close-to-point-blank forever, exit on the guard, and derive the
+        // outcome from a STALE prior report (a zombie "engaging" contact).
+        state = resolveEscape(state, state.ufoContact!, enc);
+        break;
+      }
     }
-  }
-
-  if (action === "close") {
-    // Against a faster UFO the range cannot be reduced — closing only holds station
-    // and burns afterburner fuel; against a matched/slower UFO a Close cuts the range
-    // (and costs no fuel) to set up a harder-hitting pass.
-    const range = outrun ? encounter.range : Math.max(0, encounter.range - 1);
-    const afterFuel = outrun ? burnEngagingFuel(campaign) : campaign;
-    return {
-      ...afterFuel,
-      interception: {
-        ...encounter,
-        range,
-        roundsElapsed: round + 1,
-        log: [
-          ...encounter.log,
-          outrun
-            ? `${roundLabel}: burning fuel to hold at range ${range}, but ${contact.id} is faster — the gap will not close.`
-            : `${roundLabel}: closing to range ${range}.`,
-        ],
-      },
-    };
-  }
-
-  const mult = difficultyConfig(campaign).interceptionDamageMult;
-  const roundSeed = encounterRoundSeed(campaign, contact, round);
-  const power = engagingWeaponPower(campaign);
-  const interceptorDmg = interceptorAttackDamage(encounter.range, mult, roundSeed, power);
-  const ufoDmg = ufoReturnFireDamage(encounter.range, contact.strength, mult, roundSeed);
-  const ufoHp = Math.max(0, encounter.ufoHp - interceptorDmg);
-  const interceptorHp = Math.max(0, encounter.interceptorHp - ufoDmg);
-  const hull = encounter.interceptorHpMax;
-  const log = [
-    ...encounter.log,
-    `${roundLabel}: interceptor hits ${contact.id} for ${interceptorDmg}; UFO returns ${ufoDmg}.`,
-  ];
-
-  // Each Attack round burns fuel from the engaging interceptor.
-  const afterFuel = burnEngagingFuel(campaign);
-
-  // A simultaneous kill is resolved in the interceptor's favor (UFO forced down).
-  if (ufoHp <= 0) {
-    const finalInterceptorDamage = encounterDamagePercent(interceptorHp, hull);
-    const reportDamage = Math.max(0, finalInterceptorDamage - engagingDamage(afterFuel));
-    return applyInterceptionOutcome(afterFuel, contact, "crashed", finalInterceptorDamage, reportDamage);
-  }
-  if (interceptorHp <= 0) {
-    const reportDamage = Math.max(0, 100 - engagingDamage(afterFuel));
-    return applyInterceptionOutcome(afterFuel, contact, "escaped", 100, reportDamage);
-  }
-
-  // STERN CHASE: the UFO is faster, so a fire pass lets it open the gap. When the
-  // range widens past the break-off threshold the UFO escapes with the interceptor
-  // carrying whatever damage it took during the pursuit.
-  if (outrun) {
-    const openedRange = encounter.range + 1;
-    if (openedRange >= ENCOUNTER_STERN_ESCAPE_RANGE) {
-      const finalInterceptorDamage = encounterDamagePercent(interceptorHp, hull);
-      const reportDamage = Math.max(0, finalInterceptorDamage - engagingDamage(afterFuel));
-      return applyInterceptionOutcome(afterFuel, contact, "escaped", finalInterceptorDamage, reportDamage);
+    const next = executeInterceptionAction(state, action);
+    if (next === state) {
+      // Defensive: an action that made no progress would otherwise spin the guard —
+      // force a clean break-off so the harness never returns a live encounter.
+      state = resolveEscape(state, state.ufoContact!, enc);
+      break;
     }
-    return {
-      ...afterFuel,
-      interception: {
-        ...encounter,
-        ufoHp,
-        interceptorHp,
-        range: openedRange,
-        roundsElapsed: round + 1,
-        log: [...log, `${roundLabel}: ${contact.id} outruns the pursuit — range opens to ${openedRange}.`],
-      },
-    };
+    state = next;
+    guard += 1;
   }
-
+  // Defensive net: if the guard tripped with the encounter still live, resolve it as an
+  // escape so we NEVER attribute a stale, previously-persisted report to this fight.
+  if (state.interception && state.ufoContact?.status === "engaging") {
+    state = resolveEscape(state, state.ufoContact, state.interception);
+  }
+  const rep = state.lastInterceptionReport;
   return {
-    ...afterFuel,
-    interception: {
-      ...encounter,
-      ufoHp,
-      interceptorHp,
-      roundsElapsed: round + 1,
-      log,
+    campaign: state,
+    outcome: {
+      kind: rep?.outcome ?? "escaped",
+      salvageQuality: rep?.salvageQuality ?? 0,
     },
   };
 }
@@ -1330,6 +1686,18 @@ function refuelAtBase(fleet: readonly Craft[], flights: readonly ActiveFlight[],
     return { ...craft, fuel, maxFuel };
   });
   return changed ? refueled : [...fleet];
+}
+
+/**
+ * True when the engaging interceptor lacks the fuel for one more combat beat and must
+ * bingo out (return to base). Fuel is a REAL limiter again: a fuel-burning beat checks
+ * this BEFORE burning and breaks off when the tank can't cover it, so a long pursuit or
+ * dogfight can no longer run indefinitely on an empty tank (see burnEngagingFuel — it
+ * clamps at 0 with no side effect, so without this guard the encounter never ends).
+ */
+function bingoFuel(campaign: CampaignState): boolean {
+  const engaging = chooseInterceptor(campaign);
+  return !!engaging && craftFuel(engaging) < ENCOUNTER_FUEL_PER_ATTACK;
 }
 
 /** Burns one Attack round's worth of fuel from the engaging interceptor. */

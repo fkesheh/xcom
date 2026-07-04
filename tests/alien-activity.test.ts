@@ -64,7 +64,14 @@ describe("un-addressed UFOs carry out their mission and cause terror", () => {
     // Seed 12345 spawns a tracked crashSite contact at hour 18 that interceptUfo forces down.
     const detected = advanceGeoscape(freshCampaign(12345), 18);
     expect(detected.ufoContact?.status).toBe("tracked");
-    const shot = interceptUfo(detected);
+    // This test is about the terror penalty on a CRASHED contact, not about fuel. The
+    // engaging interceptor arrives mid-patrol with a half-drained tank; top the fleet up
+    // so a jinky scout can't shake it via the (now real) bingo-fuel limiter and escape.
+    const fueled: CampaignState = {
+      ...detected,
+      fleet: (detected.fleet ?? []).map((c) => ({ ...c, fuel: c.maxFuel ?? 100 })),
+    };
+    const shot = interceptUfo(fueled);
     expect(shot.ufoContact?.status).toBe("crashed");
 
     const region = shot.ufoContact!.region;

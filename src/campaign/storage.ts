@@ -39,6 +39,12 @@ import type {
   UfoContact,
   UfoType,
 } from "./types";
+// UFO_AGILITY is a runtime value (per-hull dodge scalar) — imported here so the
+// interception normalizer re-derives it from the contact's ufoType (the source of
+// truth), never trusting a persisted/tampered value. Lives in types.ts (the leaf) to
+// avoid a circular import with geoscape.ts.
+import { UFO_AGILITY } from "./types";
+import { airWeapon } from "./airWeapons";
 import {
   BASE_FACILITIES,
   CONTAINMENT_FACILITY_ID,
@@ -134,8 +140,8 @@ export const STARTING_INTERCEPTOR: InterceptorState = {
  * Mirrors the original game's starting complement.
  */
 export const STARTING_FLEET: readonly Craft[] = [
-  { id: "int-1", kind: "interceptor", name: "Raptor-1", damage: 0, sorties: 0, fuel: 100, maxFuel: 100, speedDegPerHour: 36.2 },
-  { id: "int-2", kind: "interceptor", name: "Raptor-2", damage: 0, sorties: 0, fuel: 100, maxFuel: 100, speedDegPerHour: 36.2 },
+  { id: "int-1", kind: "interceptor", name: "Raptor-1", damage: 0, sorties: 0, fuel: 100, maxFuel: 100, speedDegPerHour: 36.2, loadout: ["stingray", "cannon"] },
+  { id: "int-2", kind: "interceptor", name: "Raptor-2", damage: 0, sorties: 0, fuel: 100, maxFuel: 100, speedDegPerHour: 36.2, loadout: ["stingray", "cannon"] },
   { id: "sky-1", kind: "transport", name: "Skyranger", damage: 0, sorties: 0, fuel: 100, maxFuel: 100, speedDegPerHour: 24.6 },
 ];
 
@@ -724,6 +730,8 @@ export interface ManufacturedCraftSpec {
   hullPoints: number;
   weaponPower: number;
   maxFuel: number;
+  /** Air-combat loadout (AIR_WEAPONS ids) the fabricated craft joins the fleet with. */
+  loadout: string[];
 }
 
 export type ManufacturingProduct =
@@ -994,6 +1002,7 @@ export const MANUFACTURING_PROJECTS: readonly ManufacturingProject[] = [
         hullPoints: 140,
         weaponPower: 1.5,
         maxFuel: 120,
+        loadout: ["avalanche", "stingray", "cannon"],
       },
     },
     title: "Phantom interceptor",
@@ -1975,6 +1984,7 @@ function addManufacturedCraft(campaign: CampaignState, spec: ManufacturedCraftSp
     speedDegPerHour: spec.speedDegPerHour,
     hullPoints: spec.hullPoints,
     weaponPower: spec.weaponPower,
+    ...(spec.loadout.length ? { loadout: [...spec.loadout] } : {}),
   };
   return { ...campaign, fleet: [...fleet, built] };
 }
@@ -2855,6 +2865,25 @@ export function loadCampaign(): CampaignState | null {
     const completedResearch = normalizeResearch(parsed.completedResearch);
     const armory = normalizeArmory(parsed.armory, soldiers, completedResearch);
     const interceptor = normalizeInterceptor(parsed.interceptor, clock);
+    // Reconcile the contact/encounter pair on load. The interception wire schema changed
+    // (abstract `range` band -> real `rangeKm`, plus new required fields), so a save
+    // captured mid-engagement on a previous build normalizes to a DROPPED interception
+    // while ufoContact.status stays "engaging" — a stuck contact that can neither be
+    // re-engaged (startInterceptionEncounter needs "tracked") nor act, sitting inert
+    // until it expires and wrongly penalizes the player. Keep the encounter only when it
+    // forms a valid engaging pair; otherwise reopen the contact to "tracked" and drop the
+    // orphan. (Cross-version recovery, not a hard version bump — a v2 gate would discard
+    // every otherwise-good save.)
+    let ufoContact = normalizeUfoContact(parsed.ufoContact, clock);
+    let interception = normalizeInterception(parsed.interception, ufoContact);
+    const validEngagement =
+      ufoContact?.status === "engaging" &&
+      interception !== undefined &&
+      interception.contactId === ufoContact.id;
+    if (!validEngagement) {
+      if (ufoContact?.status === "engaging") ufoContact = { ...ufoContact, status: "tracked" };
+      interception = undefined;
+    }
     const normalized: CampaignState = {
       version: 1,
       id: parsed.id,
@@ -2870,8 +2899,8 @@ export function loadCampaign(): CampaignState | null {
       fleet: normalizeFleet(parsed.fleet, interceptor, clock),
       activeFlights: normalizeActiveFlights(parsed.activeFlights),
       lastInterceptionReport: normalizeInterceptionReport(parsed.lastInterceptionReport),
-      ufoContact: normalizeUfoContact(parsed.ufoContact, clock),
-      interception: normalizeInterception(parsed.interception),
+      ufoContact,
+      interception,
       resources,
       armory,
       market: normalizeMarket(parsed.market),
@@ -3035,6 +3064,13 @@ function normalizeInterceptionReport(value: unknown): InterceptionReport | undef
   ) {
     return undefined;
   }
+  const outcome =
+    maybe.outcome === "crashed" ||
+    maybe.outcome === "vaporized" ||
+    maybe.outcome === "escaped" ||
+    maybe.outcome === "brokeOff"
+      ? maybe.outcome
+      : undefined;
   return {
     contactId: maybe.contactId,
     result: maybe.result,
@@ -3043,6 +3079,10 @@ function normalizeInterceptionReport(value: unknown): InterceptionReport | undef
     interceptorDamage: Math.max(0, Math.min(100, Math.floor(maybe.interceptorDamage))),
     completedAtHour: Math.max(0, Math.floor(maybe.completedAtHour)),
     summary: maybe.summary,
+    ...(outcome ? { outcome } : {}),
+    ...(typeof maybe.salvageQuality === "number" && Number.isFinite(maybe.salvageQuality)
+      ? { salvageQuality: Math.max(0, Math.min(1, maybe.salvageQuality)) }
+      : {}),
   };
 }
 
@@ -3169,10 +3209,16 @@ function normalizeCraft(value: unknown, clock: CampaignClock): Craft | undefined
     typeof maybe.hullPoints === "number" && maybe.hullPoints > 0 ? Math.floor(maybe.hullPoints) : undefined;
   const weaponPower =
     typeof maybe.weaponPower === "number" && maybe.weaponPower > 0 ? maybe.weaponPower : undefined;
+  // Air-combat loadout is a new Craft field: per the loadCampaign field-list gotcha it is
+  // SILENTLY DROPPED on reload unless reconstructed here. Keep only known weapon ids.
+  const loadout = Array.isArray(maybe.loadout)
+    ? maybe.loadout.filter((w): w is string => typeof w === "string" && airWeapon(w) !== undefined)
+    : undefined;
   const combatStats = {
     ...(speedDegPerHour !== undefined ? { speedDegPerHour } : {}),
     ...(hullPoints !== undefined ? { hullPoints } : {}),
     ...(weaponPower !== undefined ? { weaponPower } : {}),
+    ...(loadout && loadout.length ? { loadout } : {}),
   };
   // A repair whose scheduled time has already passed is treated as complete.
   if (repairedAtHour !== undefined && repairedAtHour <= clock.elapsedHours) {
@@ -3268,6 +3314,12 @@ function normalizeUfoContact(value: unknown, clock: CampaignClock): UfoContact |
     // Consumers derive the current speed from ufoType (contactSpeedDegPerHour), so a
     // reloaded contact always cruises/classifies against the live profile.
     overOcean: typeof maybe.overOcean === "boolean" ? maybe.overOcean : undefined,
+    // Crash-site salvage condition (0..1) set at shoot-down; drives crash loot + core
+    // recovery. A new UfoContact field — reconstruct it or it is dropped on reload.
+    salvageQuality:
+      typeof maybe.salvageQuality === "number" && Number.isFinite(maybe.salvageQuality)
+        ? Math.max(0, Math.min(1, maybe.salvageQuality))
+        : undefined,
   };
 }
 
@@ -3456,7 +3508,10 @@ function normalizeMarket(value: unknown): EquipmentMarket {
   return { stock, restockTimerHours };
 }
 
-function normalizeInterception(value: unknown): InterceptionEncounter | undefined {
+function normalizeInterception(
+  value: unknown,
+  contact: UfoContact | undefined,
+): InterceptionEncounter | undefined {
   if (!value || typeof value !== "object") return undefined;
   const maybe = value as Partial<InterceptionEncounter>;
   if (
@@ -3465,20 +3520,49 @@ function normalizeInterception(value: unknown): InterceptionEncounter | undefine
     typeof maybe.ufoHpMax !== "number" ||
     typeof maybe.interceptorHp !== "number" ||
     typeof maybe.interceptorHpMax !== "number" ||
-    typeof maybe.range !== "number" ||
+    typeof maybe.rangeKm !== "number" ||
     typeof maybe.roundsElapsed !== "number" ||
     !Array.isArray(maybe.log)
   ) {
     return undefined;
   }
+  // Ammo is a weaponId -> shots map; keep only known weapon ids with a finite count.
+  const ammo: Record<string, number> = {};
+  if (maybe.ammo && typeof maybe.ammo === "object") {
+    for (const [id, count] of Object.entries(maybe.ammo as Record<string, unknown>)) {
+      if (airWeapon(id) !== undefined && typeof count === "number" && Number.isFinite(count)) {
+        ammo[id] = Math.max(0, Math.floor(count));
+      }
+    }
+  }
+  const lockingWeaponId =
+    typeof maybe.lockingWeaponId === "string" && airWeapon(maybe.lockingWeaponId) !== undefined
+      ? maybe.lockingWeaponId
+      : undefined;
   return {
     contactId: maybe.contactId,
+    phase: maybe.phase === "pursuit" ? "pursuit" : "engagement",
+    rangeKm: Math.max(0, maybe.rangeKm),
+    closingSpeedKmH: typeof maybe.closingSpeedKmH === "number" ? maybe.closingSpeedKmH : 0,
     ufoHp: Math.max(0, Math.floor(maybe.ufoHp)),
     ufoHpMax: Math.max(1, Math.floor(maybe.ufoHpMax)),
     interceptorHp: Math.max(0, Math.floor(maybe.interceptorHp)),
     interceptorHpMax: Math.max(1, Math.floor(maybe.interceptorHpMax)),
-    range: Math.max(0, Math.floor(maybe.range)),
+    ammo,
+    ...(lockingWeaponId ? { lockingWeaponId } : {}),
+    lockBeatsLeft: typeof maybe.lockBeatsLeft === "number" ? Math.max(0, Math.floor(maybe.lockBeatsLeft)) : 0,
+    overkillMargin: typeof maybe.overkillMargin === "number" ? Math.max(0, maybe.overkillMargin) : 0,
     roundsElapsed: Math.max(0, Math.floor(maybe.roundsElapsed)),
+    // Derive agility from the contact's ufoType (the source of truth) rather than
+    // rehydrating the persisted number — same rule as `speed` on UfoContact. A save
+    // that predates/omits ufoAgility (or carries a tampered value) would otherwise
+    // resolve shots against a wrong dodge chance (0.5 for every hull), diverging a
+    // reloaded dogfight from the same fight in-memory. Falls back only if no contact.
+    ufoAgility: contact
+      ? UFO_AGILITY[contact.ufoType ?? "harvester"]
+      : typeof maybe.ufoAgility === "number"
+        ? maybe.ufoAgility
+        : 0.5,
     log: maybe.log.filter((line): line is string => typeof line === "string"),
   };
 }

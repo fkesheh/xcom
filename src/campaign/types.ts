@@ -45,6 +45,19 @@ export type DifficultyLevel = "rookie" | "veteran" | "commander";
 export type MissionType = "crashSite" | "terror" | "landedUfo" | "baseDefense" | "alienBaseAssault";
 /** Classification of a detected UFO, driving its strength / speed / lifetime profile. */
 export type UfoType = "scout" | "harvester" | "terror" | "battleship";
+/**
+ * Per-hull agility (dodge scalar): scout jinks easily, a battleship is a barn. A shot's
+ * evasion chance scales UP with range and this agility (see airWeapons.evasionChance).
+ * Lives here beside UfoType — the single source of truth — so both the geoscape combat
+ * model (re-exports it) and the save-load normalizer derive the SAME value from a
+ * contact's ufoType, with no circular import between geoscape.ts and storage.ts.
+ */
+export const UFO_AGILITY: Readonly<Record<UfoType, number>> = {
+  scout: 0.9,
+  harvester: 0.55,
+  terror: 0.4,
+  battleship: 0.15,
+};
 export type CouncilRegion =
   | "North America"
   | "South America"
@@ -134,6 +147,11 @@ export interface Craft {
   hullPoints?: number;
   /** Multiplier on this craft's outgoing damage in an air-combat encounter (default 1). */
   weaponPower?: number;
+  /**
+   * Ordered air-combat weapon ids (AIR_WEAPONS keys). Absent => the kind default from
+   * craftLoadout() (interceptor -> ["stingray","cannon"]; transport -> []).
+   */
+  loadout?: string[];
 }
 
 /** A friendly craft in transit on the globe (patrol toward UFO, return to base). */
@@ -181,9 +199,20 @@ export interface UfoContact {
   speed?: number;
   /** A UFO shot down over the ocean is lost (no assault mission). */
   overOcean?: boolean;
+  /** 0..1 crash-site condition set at shoot-down; drives crash-site loot + core recovery. Absent => 1 (clean). */
+  salvageQuality?: number;
 }
 
 export type InterceptionResult = "crashed" | "escaped";
+
+/** Terminal air-combat outcome kinds (richer than the legacy crashed|escaped result). */
+export type InterceptionOutcomeKind = "crashed" | "vaporized" | "escaped" | "brokeOff";
+
+export interface InterceptionOutcome {
+  kind: InterceptionOutcomeKind;
+  /** Meaningful only when kind === "crashed" (0..1); else 0. */
+  salvageQuality: number;
+}
 
 export interface InterceptionReport {
   contactId: string;
@@ -193,6 +222,10 @@ export interface InterceptionReport {
   interceptorDamage: number;
   completedAtHour: number;
   summary: string;
+  /** Richer terminal classification (crashed/vaporized/escaped/brokeOff). */
+  outcome?: InterceptionOutcomeKind;
+  /** Crash-site salvage condition (0..1), surfaced verbatim in the debrief copy. */
+  salvageQuality?: number;
 }
 
 /** Buyable equipment market: per-item stock and hours until restock. */
@@ -201,16 +234,34 @@ export interface EquipmentMarket {
   restockTimerHours: Record<string, number>;
 }
 
-/** In-progress interactive interception encounter (choice-based, deterministic). */
+/**
+ * In-progress interactive interception encounter (choice-based, deterministic).
+ * Two acts: a pursuit on the globe (real km gap) that ZOOMs at <=100km into a
+ * cinematic dogfight (missiles/cannon). The abstract 0..3 range band is gone.
+ */
 export interface InterceptionEncounter {
   contactId: string;
+  /** The two acts of an interception. */
+  phase: "pursuit" | "engagement";
+  /** Real great-circle km gap (source of truth). */
+  rangeKm: number;
+  /** craftSpeedKmH - ufoSpeedKmH; <=0 means a stern chase the pursuer loses. */
+  closingSpeedKmH: number;
   ufoHp: number;
   ufoHpMax: number;
   interceptorHp: number;
   interceptorHpMax: number;
-  /** Engagement range in arbitrary units (0 = point-blank; affects hit odds). */
-  range: number;
+  /** Remaining shots per weapon id (seeded via ammoFor). */
+  ammo: Record<string, number>;
+  /** Heavy weapon currently acquiring lock (engagement). */
+  lockingWeaponId?: string;
+  /** Beats remaining on the active lock (0 = ready). */
+  lockBeatsLeft: number;
+  /** Set on the killing blow: max(0,(blowDmg-hpBeforeBlow)/hpMax). */
+  overkillMargin: number;
   roundsElapsed: number;
+  /** Denormalized hull agility (UFO_AGILITY) for view/evasion. */
+  ufoAgility: number;
   log: string[];
 }
 

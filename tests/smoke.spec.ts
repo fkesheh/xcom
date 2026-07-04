@@ -20,6 +20,7 @@ import type {
   BaseLocation,
   CampaignState,
   DifficultyLevel,
+  InterceptionEncounter,
 } from "../src/campaign/types";
 
 const SHOTS_DIR = path.resolve(process.cwd(), "tests", "smoke-shots");
@@ -70,11 +71,39 @@ function crashedCampaign(difficulty: DifficultyLevel = "veteran"): CampaignState
   throw new Error("Unable to build a crashed-contact campaign for smoke test");
 }
 
-/** Build a campaign with an in-progress interactive interception encounter. */
-function engagingCampaign(difficulty: DifficultyLevel = "veteran"): CampaignState {
+/**
+ * Build a campaign whose UFO contact already has an interception encounter past
+ * THE ZOOM (phase "engagement", rangeKm inside weapons reach). Air-combat
+ * redesign v1: pursuit runs on the globe in real km and never fires a shot;
+ * only at rangeKm<=ENGAGEMENT_RANGE_KM does the encounter enter the cinematic
+ * dogfight. main.ts's showGeoscape() resumes straight into PlaneCombatView for
+ * a saved/mid-session encounter already in that phase (see main.ts), so this
+ * fixture drives spec c) end-to-end without depending on a live in-globe
+ * threshold crossing.
+ */
+function dogfightCampaign(difficulty: DifficultyLevel = "veteran"): CampaignState {
   const fresh = createCampaign(BASE, 123, difficulty);
   const tracked = { ...fresh, ufoContact: createUfoContact(fresh, 0) };
-  return startInterceptionEncounter(tracked);
+  const encountering = startInterceptionEncounter(tracked);
+  const contact = encountering.ufoContact;
+  if (!contact) throw new Error("Unable to seed a UFO contact for the dogfight smoke test");
+  const interception: InterceptionEncounter = {
+    contactId: contact.id,
+    phase: "engagement",
+    rangeKm: 40,
+    closingSpeedKmH: 0,
+    ufoHp: 30,
+    ufoHpMax: 30,
+    interceptorHp: 100,
+    interceptorHpMax: 100,
+    ammo: { stingray: 5, cannon: 40 },
+    lockBeatsLeft: 0,
+    overkillMargin: 0,
+    roundsElapsed: 0,
+    ufoAgility: 0.9,
+    log: [],
+  };
+  return { ...encountering, interception };
 }
 
 // ---------------------------------------------------------------------------
@@ -159,24 +188,21 @@ test.describe("Blacksite boot smoke", () => {
     ).toBeEnabled();
   });
 
-  test("c) geoscape interception overlay renders", async ({ page }) => {
-    const campaign = engagingCampaign();
+  test("c) geoscape zoom routes an engaged encounter into the dogfight screen", async ({ page }) => {
+    const campaign = dogfightCampaign();
     await page.addInitScript((state: CampaignState) => {
       window.localStorage.setItem("blacksite.campaign.v1", JSON.stringify(state));
     }, campaign);
     await page.goto("/");
 
-    // Boot with a saved campaign always lands on the base view; the interception
-    // overlay lives on the geoscape, which is now the Command Center room (the
-    // floating "Earth" button is gone).
+    // Boot with a saved campaign always lands on the base view; the Command
+    // Center room mounts the geoscape (pursuit-on-globe, real km) UNLESS the
+    // saved encounter is already past THE ZOOM (phase "engagement"), in which
+    // case it resumes straight into the cinematic dogfight screen instead.
     await expect(page.locator("#base-view")).toBeVisible();
     await enterRoom(page, "command");
 
-    await expect(page.locator("#geoscape")).toBeVisible();
-    await expect(page.locator("#geoscape canvas")).toBeVisible();
-    // The interception is now a dedicated PlaneCombatView screen (not a geoscape overlay).
-    // For a seeded engaging encounter the PCV may or may not auto-mount depending
-    // on whether main detects the active interception. Either way the geoscape renders.
+    await expect(page.locator("#plane-combat")).toBeVisible();
     await page.screenshot({ path: path.join(SHOTS_DIR, "03-interception.png") });
   });
 

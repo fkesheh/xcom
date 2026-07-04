@@ -247,17 +247,31 @@ export class Sfx {
   }
 
   /**
-   * Geoscape interception beats. launch = interceptor scramble whoosh; cannon =
-   * the interceptor's teal tracer volley; bolt = the UFO's red return-fire zap;
-   * explosion delegates to the shared detonation cue for the kill.
+   * Geoscape / dogfight interception beats. launch = interceptor scramble whoosh;
+   * cannon = the interceptor's teal tracer volley; missile = an interceptor missile
+   * launch (whoosh + igniting motor); bolt = the UFO's red return-fire zap; explosion
+   * delegates to the shared detonation cue for the kill/vaporize.
    */
-  interception(kind: "launch" | "cannon" | "bolt" | "explosion"): void {
+  interception(kind: "launch" | "cannon" | "missile" | "bolt" | "explosion"): void {
     if (kind === "explosion") {
       this.explosion();
       return;
     }
     this.play((ctx, out) => {
-      if (kind === "launch") {
+      if (kind === "missile") {
+        // Missile away: a short airy whoosh over an igniting, climbing motor tone —
+        // heavier and longer than the cannon's metallic bark so ordnance reads distinct.
+        this.noiseBurst(ctx, out, {
+          filterType: "bandpass",
+          f0: 700,
+          f1: 3200,
+          q: 0.8,
+          dur: 0.3,
+          peak: 0.42,
+          attack: 0.006,
+        });
+        this.tone(ctx, out, { type: "triangle", f0: 220, f1: 520, dur: 0.28, peak: 0.3 });
+      } else if (kind === "launch") {
         // Rising jet scramble: swept noise + a climbing body tone.
         this.noiseBurst(ctx, out, {
           filterType: "bandpass",

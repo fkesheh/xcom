@@ -17,6 +17,7 @@
  * campaign + sim APIs and reports the numbers that will inform balance fixes.
  */
 import { describe, it, expect } from "vitest";
+import { appendFileSync } from "node:fs";
 import {
   createCampaign,
   recordMissionResult,

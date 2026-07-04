@@ -56,7 +56,9 @@ import {
   advanceGeoscape,
   startInterceptionEncounter,
   executeInterceptionAction,
+  CORE_RECOVER_THRESHOLD,
   type InterceptionAction,
+  type InterceptionOutcome,
 } from "../campaign/geoscape";
 import { alienBaseCrewRanks, canDeployToOperationSite, generateOperation, launchFinalAssault, ufoCrewRanks } from "../campaign/operations";
 import {
@@ -468,6 +470,14 @@ function buildGeoscapeCallbacks(campaign: CampaignState | null) {
       debouncedSave(currentCampaign);
       geoscape?.update(currentCampaign);
     },
+    onZoomToDogfight: (nextCampaign: CampaignState) => {
+      // THE ZOOM: the pursuit layer fires this the instant interceptionRangeKm
+      // crosses <=ENGAGEMENT_RANGE_KM. Persist immediately (a screen swap is about
+      // to tear the geoscape down) and hand off to the cinematic dogfight screen.
+      currentCampaign = nextCampaign;
+      debouncedSave(currentCampaign);
+      void mountPlaneCombat(currentCampaign);
+    },
     onInterceptorSfx: (kind: "launch" | "cannon" | "bolt" | "explosion") => {
       sfx.interception(kind);
     },
@@ -599,10 +609,52 @@ async function mountGeoscape(campaign: CampaignState | null): Promise<GeoscapeVi
 }
 
 /**
+ * One-time "sortie report" alert for a terminal interception outcome. Pushed
+ * through the same BaseAlert channel as onCampaignEvent so it beacons the next
+ * time the base is mounted; the aircraft card also picks up
+ * `lastInterceptionReport.summary` (campaign layer) for the persistent readout.
+ * A dedicated push is required here (rather than relying on the geoscape's own
+ * before/after snapshot diffing) because returning from the dogfight remounts a
+ * FRESH GeoscapeView whose snapshot already reflects the resolved campaign — the
+ * diff would see no change and stay silent.
+ */
+function queueInterceptionOutcomeAlert(outcome: InterceptionOutcome): void {
+  const pct = Math.round(outcome.salvageQuality * 100);
+  let message: string;
+  switch (outcome.kind) {
+    case "crashed":
+      message =
+        outcome.salvageQuality < CORE_RECOVER_THRESHOLD
+          ? `UFO shot down — crash site salvage ${pct}%, elerium core lost in the wreck.`
+          : `UFO shot down — crash site salvage ${pct}%, core intact for recovery.`;
+      break;
+    case "vaporized":
+      message = "UFO vaporized by overkill fire — no crash site, only scattered debris recovered.";
+      break;
+    case "escaped":
+      message = "UFO outran the intercept — contact lost.";
+      break;
+    case "brokeOff":
+      message = "Interceptor broke off the engagement, damaged — returning to base for repairs.";
+      break;
+    default:
+      // Exhaustiveness guard: keeps `message` definitely-assigned even while
+      // InterceptionOutcomeKind is still mid-rollout upstream (see contract v1).
+      message = "Interception report filed.";
+  }
+  const alert: BaseAlert = { kind: "interceptionReport", message };
+  if (baseView) baseView.pushAlert(alert);
+  else pendingAlerts.push(alert);
+}
+
+/**
  * Dispose the geoscape and mount the dedicated interception dogfight screen for an
  * active encounter. The view's onAction advances the encounter in place and
- * re-renders; onResolve fires once the encounter clears (UFO down, interceptor
- * lost, or disengage), tearing the screen down and returning to the globe.
+ * re-renders; onResolve fires once the encounter reaches a terminal outcome
+ * (crashed/vaporized/escaped/brokeOff), tearing the screen down and returning to
+ * the globe. Crashed contacts remain a deployable crash site; vaporized/escaped
+ * contacts are already cleared by the campaign-layer resolver by the time the
+ * outcome reaches us.
  */
 async function mountPlaneCombat(campaign: CampaignState): Promise<void> {
   geoscape?.dispose();
@@ -619,10 +671,17 @@ async function mountPlaneCombat(campaign: CampaignState): Promise<void> {
         debouncedSave(currentCampaign);
         planeCombat?.update(currentCampaign);
       },
-      onResolve: () => {
+      onResolve: (outcome: InterceptionOutcome) => {
         planeCombat?.dispose();
         planeCombat = null;
+        // Screen transition: persist the terminal campaign immediately rather than
+        // leaving it on the debounce timer.
+        flushSave();
+        queueInterceptionOutcomeAlert(outcome);
         void showGeoscape();
+      },
+      onSfx: (kind: "cannon" | "missile" | "bolt" | "explosion") => {
+        sfx.interception(kind);
       },
     });
     planeCombat.mount(appRoot);
@@ -649,6 +708,15 @@ async function showGeoscape(): Promise<void> {
   baseView = null;
   planeCombat?.dispose();
   planeCombat = null;
+  // A saved encounter already past THE ZOOM (phase "engagement") resumes straight
+  // into the cinematic dogfight instead of re-mounting the globe underneath it —
+  // e.g. a reload mid-engagement, or returning here from the base while an
+  // engagement is still open. onZoomToDogfight only fires the live transition;
+  // this covers every other path back to "the geoscape".
+  if (currentCampaign?.interception?.phase === "engagement") {
+    await mountPlaneCombat(currentCampaign);
+    return;
+  }
   const view = await mountGeoscape(currentCampaign);
   if (view) sfx.startAmbience("geoscape");
 }

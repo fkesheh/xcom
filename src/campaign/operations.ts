@@ -18,6 +18,7 @@ import {
   ALIEN_HQ_CREW_SIZE,
   UFO_CREW_PROFILES,
 } from "./storage";
+import { CORE_RECOVER_THRESHOLD } from "./geoscape";
 
 const THEMES: readonly OperationTheme[] = ["farmland", "urban", "desert", "arctic", "jungle", "forest"];
 const CODE_A = ["Silent", "Ash", "Iron", "Night", "Glass", "Violet", "Black", "Cold"] as const;
@@ -85,6 +86,25 @@ function rewardForMission(
         alienData: 2 + Math.floor(enemyCount / 3),
       };
   }
+}
+
+/**
+ * Scales a mission reward's salvageable materials by the crash-site condition set at
+ * shoot-down (see InterceptionOutcome.salvageQuality). A clean forced landing (q=1)
+ * yields the full haul; a heavy-overkill wreck yields less. Alloys and elerium scale by
+ * (0.4 + 0.6*q) and floor; a wreck below CORE_RECOVER_THRESHOLD has its elerium ("core")
+ * damaged beyond recovery and zeroed. Credits and alien data are unaffected.
+ */
+function scaleSalvage(reward: CampaignResources, quality: number): CampaignResources {
+  const q = Math.max(0, Math.min(1, quality));
+  const mult = 0.4 + 0.6 * q;
+  const coreLost = q < CORE_RECOVER_THRESHOLD;
+  return {
+    credits: reward.credits,
+    alloys: Math.floor(reward.alloys * mult),
+    elerium: coreLost ? 0 : Math.floor(reward.elerium * mult),
+    alienData: reward.alienData,
+  };
 }
 
 function durationFor(enemyCount: number, contactStrength: number): number {
@@ -292,7 +312,14 @@ export function generateOperation(
   );
   const size = Math.min(38, 30 + Math.floor(missionNumber / 3) * 2);
   const codename = `${pick(CODE_A, a)} ${pick(CODE_B, b)}`;
-  const reward = rewardForMission(missionNumber, enemyCount, missionType);
+  // A shot-down wreck's salvage is degraded by overkill (heavy missiles burn the hull
+  // down); a clean forced landing keeps the full haul. Landed/ground contacts carry no
+  // salvageQuality and default to a pristine 1.0.
+  const salvageQuality = contact?.salvageQuality ?? 1;
+  const reward = scaleSalvage(
+    rewardForMission(missionNumber, enemyCount, missionType),
+    salvageQuality,
+  );
   const durationHours = durationFor(enemyCount, contact?.strength ?? 1);
   if (trackingUplink) reward.alienData += 1;
   if (fabricationBay) {
