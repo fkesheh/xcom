@@ -208,10 +208,10 @@ describe("patrol speed comes from the assigned craft (no rubber-band)", () => {
 // ===========================================================================
 
 describe("craftSpeedDegPerHour falls back per craft kind", () => {
-  it("defaults a legacy transport to the Skyranger cruise (0.7), not the interceptor 0.9", () => {
+  it("defaults a legacy transport to the retuned Skyranger cruise (2.5), not the interceptor 0.9", () => {
     const transport: Craft = { id: "sky-legacy", kind: "transport", name: "Skyranger", damage: 0, sorties: 0 };
     const interceptor: Craft = { id: "int-legacy", kind: "interceptor", name: "Raptor", damage: 0, sorties: 0 };
-    expect(craftSpeedDegPerHour(transport)).toBe(0.7);
+    expect(craftSpeedDegPerHour(transport)).toBe(2.5);
     expect(craftSpeedDegPerHour(interceptor)).toBe(0.9);
   });
 });
@@ -441,6 +441,31 @@ describe("legacy save migration: stale contact speed does not invert the air war
     const loaded = reloadWithStaleContact({ ...trackedContact("battleship", 5), speed: 0.15 });
     expect(interceptionSpeedAdvantage(loaded, loaded.ufoContact!)).toBe("outrun");
     expect(interceptionForecast(loaded)?.succeeds).toBe(false);
+  });
+
+  it("migrates a legacy transport persisted at the old 0.7 cruise up to the new 2.5 default", () => {
+    const base = createCampaign(BASE, SEED);
+    const legacyFleet = (base.fleet ?? []).map((craft) =>
+      craft.kind === "transport" ? { ...craft, speedDegPerHour: 0.7 } : craft,
+    );
+    localStorage.setItem(
+      CAMPAIGN_STORAGE_KEY,
+      JSON.stringify(JSON.parse(JSON.stringify({ ...base, fleet: legacyFleet }))),
+    );
+    const loaded = loadCampaign()!;
+    const transport = loaded.fleet!.find((craft) => craft.kind === "transport")!;
+    // The stale 0.7 is dropped, so the craft re-reads the retuned default.
+    expect(craftSpeedDegPerHour(transport)).toBe(2.5);
+    // A non-legacy (faster) transport speed is preserved, not clobbered.
+    const fastFleet = (base.fleet ?? []).map((craft) =>
+      craft.kind === "transport" ? { ...craft, speedDegPerHour: 3.2 } : craft,
+    );
+    localStorage.setItem(
+      CAMPAIGN_STORAGE_KEY,
+      JSON.stringify(JSON.parse(JSON.stringify({ ...base, fleet: fastFleet }))),
+    );
+    const fast = loadCampaign()!.fleet!.find((craft) => craft.kind === "transport")!;
+    expect(craftSpeedDegPerHour(fast)).toBe(3.2);
   });
 });
 

@@ -119,7 +119,7 @@ export const STARTING_INTERCEPTOR: InterceptorState = {
 export const STARTING_FLEET: readonly Craft[] = [
   { id: "int-1", kind: "interceptor", name: "Raptor-1", damage: 0, sorties: 0, fuel: 100, maxFuel: 100, speedDegPerHour: 0.9 },
   { id: "int-2", kind: "interceptor", name: "Raptor-2", damage: 0, sorties: 0, fuel: 100, maxFuel: 100, speedDegPerHour: 0.9 },
-  { id: "sky-1", kind: "transport", name: "Skyranger", damage: 0, sorties: 0, fuel: 100, maxFuel: 100, speedDegPerHour: 0.7 },
+  { id: "sky-1", kind: "transport", name: "Skyranger", damage: 0, sorties: 0, fuel: 100, maxFuel: 100, speedDegPerHour: 2.5 },
 ];
 
 /** Craft id synthesized for the legacy single-interceptor field when no fleet exists. */
@@ -154,11 +154,20 @@ const INTERCEPTOR_DAMAGE_MAX = 100;
 export const DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR = 0.9;
 /**
  * Cruise speed (deg/hour) a TRANSPORT with no explicit speedDegPerHour falls back
- * to — the starting Skyranger's cruise. A transport is slower than an interceptor,
- * so the fallback must be kind-aware: a single interceptor default would make a
- * legacy Skyranger's hangar speed chip read the wrong (faster) number.
+ * to — the starting Skyranger's cruise. Raised from the original 0.7 to 2.5 so a
+ * ~40-degree crossing takes ~16 game-hours (was ~57h — longer than a crash site's
+ * 48h lifetime, so far sites were literally unreachable and the transport looked
+ * frozen at 1x). Still kind-aware and slower than a Phantom's 1.6: a legacy
+ * Skyranger's hangar speed chip must read the transport number, not the interceptor.
  */
-export const DEFAULT_TRANSPORT_SPEED_DEG_PER_HOUR = 0.7;
+export const DEFAULT_TRANSPORT_SPEED_DEG_PER_HOUR = 2.5;
+/**
+ * The original (pre-retune) transport cruise. A legacy save that persisted this exact
+ * value for a transport predates the 2.5 retune; normalizeCraft drops it so the craft
+ * re-reads the new DEFAULT_TRANSPORT_SPEED_DEG_PER_HOUR rather than staying stuck at
+ * the unreachably-slow 0.7. No interceptor migration: 0.9 Raptors are unchanged.
+ */
+export const LEGACY_TRANSPORT_SPEED_DEG_PER_HOUR = 0.7;
 /** Hull points an encounter craft fields when it has no explicit hullPoints. */
 export const DEFAULT_CRAFT_HULL_POINTS = 100;
 
@@ -3127,8 +3136,14 @@ function normalizeCraft(value: unknown, clock: CampaignClock): Craft | undefined
   // Combat/pursuit stats are optional; a missing value falls back to the craft-stat
   // defaults (craftSpeedDegPerHour / craftHullPoints / craftWeaponPower) at read time,
   // so legacy craft keep working. Persist any explicit value so advanced craft survive reload.
-  const speedDegPerHour =
+  // A transport persisted at the pre-retune 0.7 cruise is a legacy save: drop the
+  // explicit value so the craft re-reads the new (faster) DEFAULT_TRANSPORT_SPEED,
+  // migrating far crash sites from "unreachable" to a ~16h crossing. Interceptors and
+  // any faster transport keep their explicit speed.
+  const rawSpeed =
     typeof maybe.speedDegPerHour === "number" && maybe.speedDegPerHour > 0 ? maybe.speedDegPerHour : undefined;
+  const speedDegPerHour =
+    maybe.kind === "transport" && rawSpeed === LEGACY_TRANSPORT_SPEED_DEG_PER_HOUR ? undefined : rawSpeed;
   const hullPoints =
     typeof maybe.hullPoints === "number" && maybe.hullPoints > 0 ? Math.floor(maybe.hullPoints) : undefined;
   const weaponPower =

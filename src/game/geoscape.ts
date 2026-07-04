@@ -223,19 +223,20 @@ const TRAJECTORY_SEGMENTS = 24;
 /**
  * Launch fly-out pacing. The duration derives from the REAL great-circle distance
  * base->UFO (radians) scaled by FLYOUT_MS_PER_RAD, clamped to [MIN,MAX] so a
- * near contact still reads as a proper fly-out (~4s) and a globe-spanning one
- * never drags (~8s). Replaces the old hardcoded 1.3s snap that made the
- * interceptor appear "instantly close to the ufo".
+ * near contact still reads as a proper fly-out (~6s) and a globe-spanning one
+ * never drags (~14s). Slowed from the earlier 3200/4000-8000 pacing so the
+ * cinematic interceptor no longer looks "way too fast" next to the clock-synced
+ * transport transit — the two craft now read at a consistent, unhurried pace.
  */
-const FLYOUT_MS_PER_RAD = 3200;
-const FLYOUT_MIN_MS = 4000;
-const FLYOUT_MAX_MS = 8000;
+const FLYOUT_MS_PER_RAD = 6500;
+const FLYOUT_MIN_MS = 6000;
+const FLYOUT_MAX_MS = 14000;
 /**
  * Upper clamp on the SPEED-SCALED fly-out: when a UFO outruns the pursuer the
  * fly-out is stretched by 1/ratio (a fast target = a visibly slower closure), so
  * the ceiling is higher than the distance-only FLYOUT_MAX_MS to let that read.
  */
-const FLYOUT_SPEED_MAX_MS = 12000;
+const FLYOUT_SPEED_MAX_MS = 18000;
 /** Clamp band for the craft/UFO speed ratio used to pace the pursuit presentation. */
 const PURSUIT_RATIO_MIN = 0.4;
 const PURSUIT_RATIO_MAX = 2.5;
@@ -1161,6 +1162,36 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   box-shadow: 0 0 0 1px var(--ui-amber), 0 8px 24px rgba(0, 0, 0, 0.6);
 }
 #geoscape .geo-speed-btn[data-speed="0"][aria-pressed="true"] .geo-speed-icon { color: var(--ui-bg-deep); }
+/* FAST FORWARD-to-arrival nudge chip, docked beside the speed group during transit. */
+#geoscape .geo-ff-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-sp-2);
+  padding: var(--ui-sp-2) var(--ui-sp-3);
+  color: var(--ui-cyan);
+  border: 1px solid color-mix(in srgb, var(--ui-cyan) 45%, var(--ui-border-console));
+  border-radius: var(--ui-radius);
+  background: color-mix(in srgb, var(--ui-cyan) 12%, var(--ui-panel));
+  cursor: pointer;
+  text-align: left;
+}
+#geoscape .geo-ff-chip:hover { border-color: var(--ui-cyan); background: color-mix(in srgb, var(--ui-cyan) 20%, var(--ui-panel)); }
+#geoscape .geo-ff-icon { font-size: var(--ui-text-lg); line-height: 1; color: var(--ui-cyan); }
+#geoscape .geo-ff-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+#geoscape .geo-ff-label {
+  font: 800 var(--ui-text-sm)/1 var(--ui-font-mono);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+#geoscape .geo-ff-sub { font: 600 var(--ui-text-xs)/1.1 var(--ui-font-mono); color: var(--ui-muted); }
+#geoscape .geo-ff-chip--pulse { animation: geo-ff-pulse 1.6s var(--ui-ease) infinite; }
+@keyframes geo-ff-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ui-cyan) 55%, transparent); }
+  50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--ui-cyan) 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #geoscape .geo-ff-chip--pulse { animation: none; }
+}
 #geoscape .geo-contact .geo-contact-status {
   margin-top: 7px;
   color: var(--ui-amber);
@@ -1659,6 +1690,10 @@ export class GeoscapeView {
    *  replaceChildren and the pointerup was dropped), which froze the speed control
    *  during a deployment transit. Cached in place, the nodes survive every refresh. */
   private speedGroup: HTMLDivElement | null = null;
+  /** "FAST FORWARD to arrival" nudge chip, docked beside the speed group during transit.
+   *  Built once, then shown/hidden by refreshFastForward — it never sets speed on its own
+   *  (the player must click), matching the classic X-COM "you choose to compress" pattern. */
+  private fastForwardChip: HTMLButtonElement | null = null;
   /** Cached base->UFO great-circle route for the current engagement target. */
   private interceptorRoute: { baseN: Vector3; ufoN: Vector3; contactId: string } | null = null;
   /** Directional sun light; orbited each frame by updateTerminator for the day/night cycle. */
@@ -2357,6 +2392,7 @@ export class GeoscapeView {
     this.refreshMarkers();
     this.refreshInterceptor();
     this.refreshSpeedState();
+    this.refreshFastForward();
     this.refreshHint();
     this.refreshOpenModal();
     this.applyCanvasCursor();
@@ -2421,6 +2457,11 @@ export class GeoscapeView {
     this.timeAccumulatorMs = 0;
     this.lastFlowMs = 0;
     this.refreshSpeedState();
+    // Reconcile the FAST FORWARD nudge immediately: engaging 30x must hide it this
+    // frame (not wait for the next flow tick's refresh), and dropping below 30x mid-
+    // transit must bring it back — otherwise a throttled/low-tick session leaves a
+    // stale chip (or misses re-showing it) between refreshes.
+    this.refreshFastForward();
   }
 
   private refreshSpeedState(): void {
@@ -2432,6 +2473,49 @@ export class GeoscapeView {
       const speed = Number(btn.dataset.speed);
       btn.setAttribute("aria-pressed", String(this.timeSpeed === speed));
       btn.disabled = !interactive;
+    }
+  }
+
+  /**
+   * Time-compression nudge (classic X-COM pattern): while the Skyranger is still
+   * IN TRANSIT (not yet on station) and nothing else demands attention — no live
+   * interception, campaign still active — dock a small "FAST FORWARD to arrival"
+   * chip beside the speed controls that jumps to 30x on click. It never changes
+   * speed on its own; the player opts in. Auto-pause on arrival (refreshDeploymentArrival)
+   * then halts the compression. The pulse is suppressed under reducedMotion.
+   */
+  private refreshFastForward(): void {
+    const c = this.campaign;
+    const inTransit = !!c && (c.activeFlights ?? []).some(
+      (f) => f.purpose === "deployment" && f.arrived !== true && f.progress < 1,
+    );
+    // Attention demands that should NOT be steamrolled by a compression nudge: a live
+    // interception, a finished campaign, or already running at max compression.
+    const show =
+      inTransit &&
+      c.strategic.status === "active" &&
+      !this.isEngaging() &&
+      this.timeSpeed !== 30;
+    if (!show) {
+      this.fastForwardChip?.remove();
+      return;
+    }
+    if (!this.fastForwardChip) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "geo-ff-chip";
+      chip.innerHTML =
+        '<span class="geo-ff-icon" aria-hidden="true">⏭</span>' +
+        '<span class="geo-ff-text"><span class="geo-ff-label">Fast forward</span>' +
+        '<span class="geo-ff-sub">to Skyranger arrival · 30×</span></span>';
+      chip.title = "Compress time to 30× until the transport reaches its site (auto-pauses on arrival)";
+      chip.addEventListener("click", () => this.setTimeSpeed(30));
+      this.fastForwardChip = chip;
+    }
+    // Pulse to draw the eye — neutralized for reduced-motion users.
+    this.fastForwardChip.classList.toggle("geo-ff-chip--pulse", !this.reducedMotion);
+    if (this.fastForwardChip.parentElement !== this.speedBar) {
+      this.speedBar.appendChild(this.fastForwardChip);
     }
   }
 
@@ -2793,6 +2877,10 @@ export class GeoscapeView {
         text: `Skyranger on station over ${region} — deploy to begin the assault.`,
         alertKind: "ufoLanded",
       });
+      // Classic X-COM auto-pause: the transport reaching its site is a demand-attention
+      // event, so freeze time (undoing any FAST FORWARD the player engaged) and let them
+      // decide when to click DEPLOY. Fires once per flight (deployArrivedFired guard above).
+      if (this.timeSpeed !== 0) this.setTimeSpeed(0);
       this.opts.onDeploymentArrived?.(flight.id);
     }
   }
