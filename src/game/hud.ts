@@ -190,6 +190,29 @@ const MODE_ICON: Readonly<Record<ShotKind, string>> = {
   auto: "☰",
 };
 const RESERVES: readonly ReserveMode[] = ["none", "snap", "aimed", "auto"];
+/** Icon shown on each reaction-reserve segment (the descriptive name is in its tooltip). */
+const RESERVE_ICON: Readonly<Record<ReserveMode, string>> = {
+  none: "⊘",
+  snap: "»",
+  aimed: "◎",
+  auto: "☰",
+};
+/** Tooltip text for each reaction-reserve segment. */
+const RESERVE_TITLE: Readonly<Record<ReserveMode, string>> = {
+  none: "Reserve: none — spend every TU this turn (no reaction fire held back)",
+  snap: "Reserve: snap — hold back TU for a reaction snap shot on the enemy turn",
+  aimed: "Reserve: aimed — hold back TU for a reaction aimed shot on the enemy turn",
+  auto: "Reserve: auto — hold back TU for a reaction burst on the enemy turn",
+};
+/** Icon shown on each carried-item chip, by item kind. */
+const ITEM_ICON: Readonly<Record<string, string>> = {
+  grenade: "✸",
+  smoke: "☁",
+  proxMine: "◈",
+  scanner: "❂",
+  stunRod: "⚡",
+  medkit: "✚",
+};
 const STYLE_ID = "blacksite-hud-style";
 const LOG_TAIL = 7;
 /** Morale at/above this value reads as "Steady"; below PANIC_THRESHOLD reads as "PANIC". */
@@ -367,40 +390,62 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
 }
 #hud .log .line.current { color: var(--ui-text); }
 
-/* Operative dossier docks TOP-left under the mission card. width 300 keeps its right
-   edge (14+300=314) left of the viewport's 20% line (320 at the 1600 test width) so
-   this persistent panel never intrudes on the battlefield's central 60% column,
-   whatever its height. It shares the left rail with .actions (bottom-anchored); the
-   capped max-heights below guarantee the two never collide. */
+/* Operative card — COMPACT STRIP. At-a-glance only: identity + READY, HP|TU side
+   by side, weapon+ammo, a morale pip, a cover pip. Static-per-turn stats
+   (accuracy/reactions/vision) live in the DETAILS dossier, not here. width 300
+   keeps its right edge (14+300=314) left of the viewport's 20% line (320 at the
+   1600 test width) so it never intrudes on the battlefield's central 60% column.
+   It shares the left rail with .actions (bottom-anchored); the capped max-heights
+   guarantee the two never collide. */
 #hud .unit {
   left: max(14px, env(safe-area-inset-left));
   top: 214px;
   width: 300px;
-  /* Each rail panel gets just under half the viewport height; with .unit anchored at
-     top:214 and .actions anchored to the bottom, this leaves a constant ~32px gap
-     between them at ANY viewport height (unit_bottom = .5h+84, actions_top = .5h+116),
-     so they never collide and neither needs bespoke short-viewport handling. */
   max-height: calc(50vh - 130px);
-  padding: 15px;
+  padding: 11px 13px;
   overflow-y: auto;
 }
-#hud .identity { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 12px; }
-#hud .identity h2 { margin: 3px 0 2px; font-size: 20px; line-height: 1; letter-spacing: .03em; }
-#hud .weapon { color: var(--hud-muted); font-size: 13px; }
-#hud .unit-badge {
-  min-width: 64px;
-  padding: 7px 8px;
-  border-radius: 6px;
+#hud .unit-head { display: flex; align-items: center; gap: 7px; }
+#hud .rank-pip {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-radius: 4px;
   color: var(--hud-cyan);
   background: var(--hud-cyan-soft);
   border: 1px solid rgba(103,232,249,.25);
-  text-align: center;
-  font: 800 12px/1.15 ui-monospace, monospace;
+  font: 800 11px/1 ui-monospace, monospace;
+  letter-spacing: .05em;
+  text-transform: uppercase;
 }
-#hud .meter-head { display: flex; justify-content: space-between; margin-top: 8px; color: var(--hud-muted); font: 700 12px/1 ui-monospace, monospace; letter-spacing: .1em; text-transform: uppercase; }
-#hud .meter-head b { color: var(--hud-text); font-weight: 700; letter-spacing: 0; }
-#hud .meter-right { display: inline-flex; align-items: baseline; gap: 8px; }
-#hud .bar { position: relative; height: 5px; margin-top: 7px; border-radius: 999px; background: rgba(255,255,255,.08); overflow: hidden; }
+#hud .unit-name { flex: 1 1 auto; min-width: 0; margin: 0; font-size: 16px; line-height: 1.1; letter-spacing: .02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Morale pip: one dot; tone tints it and it only grows/pulses when shaken/panicking. */
+#hud .morale-pip { flex: 0 0 auto; width: 11px; height: 11px; border-radius: 50%; background: var(--hud-green); box-shadow: inset 0 0 0 1px rgba(0,0,0,.35); }
+#hud .morale-pip.steady { background: var(--hud-green); }
+#hud .morale-pip.shaken { width: 14px; height: 14px; background: var(--hud-amber); }
+#hud .morale-pip.panic { width: 14px; height: 14px; background: var(--hud-red); animation: panic-pulse 1s ease-in-out infinite; }
+/* Cover pip: shield glyph, shown ONLY when the operative is actually in cover. */
+#hud .cover-pip { flex: 0 0 auto; font: 700 14px/1 ui-monospace, monospace; color: var(--hud-green); }
+#hud .cover-pip.half { color: var(--hud-amber); }
+#hud .cover-pip.full { color: var(--hud-green); }
+#hud .cover-pip[hidden] { display: none; }
+#hud .unit-badge {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border-radius: 5px;
+  color: var(--hud-cyan);
+  background: var(--hud-cyan-soft);
+  border: 1px solid rgba(103,232,249,.25);
+  font: 800 11px/1 ui-monospace, monospace;
+  letter-spacing: .05em;
+}
+#hud .unit-badge.spent { color: var(--hud-amber); background: rgba(251,191,36,.12); border-color: rgba(251,191,36,.32); }
+#hud .details-btn { flex: 0 0 auto; min-height: 24px; min-width: 24px; padding: 0 7px; font-size: 13px; }
+/* HP + TU meters, side by side on one line, numerals beside each bar. */
+#hud .unit-meters { display: flex; gap: 12px; margin-top: 10px; }
+#hud .unit-meters .meter { flex: 1 1 0; min-width: 0; }
+#hud .meter-line { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; margin-bottom: 5px; color: var(--hud-muted); font: 700 11px/1 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+#hud .meter-line b { color: var(--hud-text); font-weight: 700; letter-spacing: 0; }
+#hud .bar { position: relative; height: 5px; border-radius: 999px; background: rgba(255,255,255,.08); overflow: hidden; }
 #hud .bar i { display: block; height: 100%; border-radius: inherit; transition: width 180ms ease; }
 /* Reaction-reserve segment: amber hatched overlay sitting flush against the spendable TU. */
 #hud .tu-reserve {
@@ -412,124 +457,110 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   transition: width 180ms ease, left 180ms ease;
 }
 #hud .reserve-tag { color: var(--hud-amber); font-weight: 700; letter-spacing: 0; }
-#hud .reserve-tag::before { content: "⚡ "; }
-/* Morale bar: tone drives the fill colour but the numeric value + label always accompany it. */
-#hud .morale-bar i { background: linear-gradient(90deg, #4ade80, #22d3ee); }
-#hud .morale-bar.shaken i { background: linear-gradient(90deg, #fbbf24, #f59e0b); }
-#hud .morale-bar.panic i { background: linear-gradient(90deg, #fb7185, #ef4444); }
-#hud .morale-tag { font-weight: 700; letter-spacing: 0; }
-#hud .morale-tag.steady { color: var(--hud-green); }
-#hud .morale-tag.shaken { color: var(--hud-amber); }
-#hud .morale-tag.panic { color: var(--hud-red); animation: panic-pulse 1s ease-in-out infinite; }
-#hud .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-top: 12px; }
-#hud .stat { padding: 7px; border: 1px solid rgba(255,255,255,.06); border-radius: 6px; background: rgba(0,0,0,.13); }
-#hud .stat span { display: block; color: var(--hud-muted); font: 700 12px/1 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
-#hud .stat b { display: block; margin-top: 4px; font: 750 15px/1 ui-monospace, monospace; }
-#hud .details-btn { min-height: 30px; min-width: 96px; margin-top: 10px; padding: 0 12px; font-size: 13px; text-transform: uppercase; }
+#hud .reserve-tag::before { content: "⚡"; margin-right: 1px; }
+#hud .unit-weapon { margin-top: 9px; color: var(--hud-muted); font: 600 12px/1.2 ui-monospace, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* Action controls dock BOTTOM-left — never horizontally centered (was left:346 /
-   width:340, which parked its body over the battlefield's central focal column). At
-   width 300 its right edge (14+300=314) stays left of the viewport's 20% line (320
-   at 1600), so it never intrudes on the central 60%. The capped max-height keeps its
-   top below the top-anchored .unit above it. */
+/* Action bar — ICON-FIRST DENSE TOOLBAR. Zero label columns (they burned whole
+   lines), zero clipped text: every control is an icon (+ a short number); names,
+   rounds, hit%, and hotkeys live in tooltips. Docks BOTTOM-left at width 300 so its
+   right edge (314) stays left of the viewport's 20% line (320 at 1600) and never
+   intrudes on the central 60%. The capped max-height keeps its top below .unit. */
 #hud .actions {
   left: max(14px, env(safe-area-inset-left));
   bottom: max(14px, env(safe-area-inset-bottom));
   width: 300px;
-  /* See .unit: half-height cap keeps a constant gap above this bottom-anchored card. */
   max-height: calc(50vh - 130px);
   overflow-y: auto;
-  padding: 13px 14px;
+  padding: 11px 13px;
 }
-#hud .context { display: flex; justify-content: space-between; gap: 16px; min-height: 42px; }
-#hud .context h3 { margin: 3px 0 0; font-size: 14px; line-height: 1.2; }
-#hud .context-detail { max-width: 200px; color: var(--hud-muted); text-align: right; font-size: 13px; }
-#hud .context-cost { color: var(--hud-green); font: 800 15px/1 ui-monospace, monospace; }
-#hud .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-top: 11px; }
-#hud .modes button { min-height: 57px; padding: 7px 6px; }
-#hud .modes .mode-name { display: flex; align-items: center; justify-content: center; gap: 5px; text-transform: uppercase; }
-#hud .modes .mode-icon { color: var(--hud-cyan); font-size: 14px; line-height: 1; }
+/* Move/target preview — one short line, never a two-line banner. */
+#hud .move-hint {
+  min-height: 18px;
+  margin-bottom: 9px;
+  color: var(--hud-muted);
+  font: 600 12px/1.3 ui-monospace, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#hud .move-hint b { color: var(--hud-text); font-weight: 750; }
+#hud .move-hint .cost { color: var(--hud-green); font-weight: 800; }
+#hud .move-hint.target b { color: var(--hud-amber); }
+#hud .move-hint.blocked b { color: var(--hud-red); }
+
+/* Fire modes — icon + TU number on the face; name/rounds/hit% in the tooltip. A
+   crosshair hit-chance chip is appended only while a target is previewed. */
+#hud .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+#hud .modes button { min-height: 46px; padding: 6px 4px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; }
+#hud .modes .mode-icon { color: var(--hud-cyan); font-size: 17px; line-height: 1; }
 #hud .modes button:disabled .mode-icon { color: var(--hud-muted); }
-#hud .modes .mode-meta { display: flex; align-items: center; justify-content: center; gap: 7px; margin-top: 6px; color: var(--ui-muted); font-size: 12px; }
-/* Hit-chance preview reads as a crosshair chip: ⌖ glyph + odds in a tight amber pill. */
+#hud .modes .mode-tu { font: 800 12px/1 ui-monospace, monospace; letter-spacing: .02em; }
+#hud .modes button:disabled .mode-tu { color: var(--hud-muted); }
 #hud .modes .chance {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  padding: 1px 7px;
+  padding: 0 6px;
   border-radius: var(--ui-radius-pill);
   border: 1px solid rgba(251,176,46,.4);
   background: rgba(251,176,46,.1);
   color: var(--hud-amber);
-  font-weight: 800;
-  letter-spacing: .02em;
+  font: 800 11px/1.5 ui-monospace, monospace;
 }
-#hud .modes .chance .xhair { color: var(--hud-cyan); font-size: 12px; line-height: 1; }
+#hud .modes .chance .xhair { color: var(--hud-cyan); font-size: 11px; line-height: 1; }
 #hud .modes button:disabled .chance { border-color: var(--ui-border); background: rgba(255,255,255,.04); color: var(--hud-muted); }
 #hud .modes button:disabled .chance .xhair { color: var(--hud-muted); }
-#hud .reserve-row,
-#hud .reload-row,
-#hud .items-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-#hud .reserve-row > span,
-#hud .reload-row > span,
-#hud .items-row > span { width: 110px; color: var(--hud-muted); font: 700 12px/1.2 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
-#hud .reserve { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; flex: 1; }
-#hud .reserve button { min-height: 32px; padding: 4px; font-size: 12px; text-transform: uppercase; }
-#hud .reload-row button { flex: 1; min-height: 34px; padding: 4px 8px; font-size: 13px; text-transform: uppercase; }
-/* Carried-items action grid. Each line is one item: primary action + optional grenade prime. */
-#hud .items-stack { flex: 1; display: flex; flex-direction: column; gap: 5px; }
-#hud .item-line { display: flex; gap: 5px; }
-#hud .item-line button { flex: 1; min-height: 36px; padding: 5px 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; text-align: left; text-transform: none; letter-spacing: .02em; }
-#hud .item-line button.prime { flex: 0 0 auto; min-width: 82px; justify-content: center; text-transform: uppercase; }
-#hud .item-line .item-label { display: flex; flex-direction: column; gap: 1px; overflow: hidden; }
-#hud .item-line .item-label b { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#hud .item-line .item-label small { color: var(--hud-muted); font-size: 12px; }
-#hud .item-line .item-verb { color: var(--hud-cyan); font-size: 12px; text-transform: uppercase; }
-#hud .item-line button:disabled .item-verb { color: var(--hud-muted); }
+
+/* Secondary controls strip: magazine · stance · reaction-reserve segmented · psi. */
+#hud .action-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+#hud .action-strip button { min-height: 34px; }
+#hud .mag-btn { display: inline-flex; align-items: center; gap: 5px; padding: 0 9px; }
+#hud .mag-btn .mag-icon { color: var(--hud-cyan); font-size: 14px; line-height: 1; }
+#hud .mag-btn .mag-count { font: 800 12px/1 ui-monospace, monospace; }
+#hud .mag-btn:disabled .mag-icon { color: var(--hud-muted); }
+#hud .stance-btn { min-width: 40px; padding: 0 11px; font-size: 15px; line-height: 1; }
+#hud .stance-btn .stance-glyph { color: var(--hud-cyan); }
+#hud .stance-btn:disabled .stance-glyph { color: var(--hud-muted); }
+/* Reaction reserve as one compact segmented control (icons). */
+#hud .reserve { display: inline-flex; border: 1px solid var(--ui-border); border-radius: 7px; overflow: hidden; }
+#hud .reserve button { min-height: 34px; min-width: 34px; padding: 0 8px; border: none; border-right: 1px solid var(--ui-border); border-radius: 0; font-size: 14px; line-height: 1; }
+#hud .reserve button:last-child { border-right: none; }
+
+/* Carried items — icon chips with a count badge; grenades gain a small PRIME sub-button. */
+#hud .items-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+#hud .items-stack { display: flex; flex-wrap: wrap; gap: 6px; }
+#hud .item-line { display: inline-flex; gap: 3px; }
+#hud .item-line button { position: relative; min-height: 38px; min-width: 40px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; font-size: 17px; line-height: 1; }
+#hud .item-line button.prime { min-width: 26px; padding: 0 6px; font: 800 12px/1 ui-monospace, monospace; }
+#hud .item-line .item-count {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--hud-cyan);
+  color: #04121a;
+  font: 800 10px/1 ui-monospace, monospace;
+  pointer-events: none;
+}
+#hud .item-line button:disabled .item-count { opacity: .4; }
 #hud .items-empty { color: var(--hud-muted); font: 600 13px/1.3 ui-monospace, monospace; padding: 4px 2px; }
 
-/* Stance toggle (actions panel) — mirrors the reload-row layout. */
-#hud .stance-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-#hud .stance-row > span { width: 110px; color: var(--hud-muted); font: 700 12px/1.2 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
-#hud .stance-row button { flex: 1; min-height: 34px; padding: 4px 8px; font-size: 13px; text-transform: uppercase; }
-#hud .stance-row .stance-glyph { color: var(--hud-cyan); margin-right: 5px; }
-#hud .stance-row .stance-tu { color: var(--hud-cyan); }
-#hud .stance-row button:disabled .stance-glyph,
-#hud .stance-row button:disabled .stance-tu { color: var(--hud-muted); }
-
-/* Psionics row (actions panel) — mirrors stance-row layout but holds two
-   sub-buttons (Panic + Mind Control). Each pairs a glyph with its label and TU
-   cost so state is never conveyed by colour alone; the MC button reads "SPENT"
-   once the per-battle hard cap is used. */
-#hud .psi-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-#hud .psi-row > span { width: 110px; color: var(--hud-muted); font: 700 12px/1.2 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
-#hud .psi-actions { flex: 1; display: grid; grid-template-columns: repeat(2, 1fr); gap: 5px; }
-#hud .psi-actions button {
-  min-height: 38px;
-  padding: 5px 6px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  font-size: 13px;
-  text-transform: uppercase;
-}
-#hud .psi-actions .psi-glyph { color: var(--hud-cyan); font-size: 14px; line-height: 1; }
-#hud .psi-actions .psi-cost { color: var(--hud-muted); font-size: 12px; letter-spacing: .04em; text-transform: none; }
+/* Psionics — two icon sub-buttons (Panic + Mind Control) that ride the action
+   strip. Each pairs a glyph with its TU cost; the MC button reads "SPENT" once the
+   per-battle hard cap is used. Full names + reasons live in the tooltip. */
+#hud .psi-actions { display: inline-flex; gap: 6px; }
+#hud .psi-actions button { min-height: 34px; min-width: 40px; padding: 0 9px; display: inline-flex; align-items: center; gap: 4px; }
+#hud .psi-actions .psi-glyph { color: var(--hud-cyan); font-size: 15px; line-height: 1; }
+#hud .psi-actions .psi-cost { color: var(--hud-muted); font: 700 11px/1 ui-monospace, monospace; letter-spacing: .02em; }
 #hud .psi-actions button:disabled .psi-glyph,
 #hud .psi-actions button:disabled .psi-cost { color: var(--hud-muted); }
-/* Armed psi-targeting mode reads as an active state on the chosen sub-button. */
 #hud .psi-actions button.active .psi-glyph { color: #effcff; }
-
-/* Stance + cover readout (unit panel). The cover tone tints the value but a
-   text label (Full / Half / Exposed) always accompanies the colour. */
-#hud .status-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; margin-top: 12px; }
-#hud .status-row .stance-glyph { color: var(--hud-cyan); margin-right: 4px; }
-#hud .cover-tag { font-weight: 750; letter-spacing: 0; }
-#hud .cover-tag.full { color: var(--hud-green); }
-#hud .cover-tag.half { color: var(--hud-amber); }
-#hud .cover-tag.exposed { color: var(--hud-red); }
-#hud .cover-tag.none { color: var(--hud-muted); }
+#hud .psi-actions.spent .psi-glyph { color: var(--hud-muted); }
 
 /* Strike-team roster docks bottom-RIGHT. width 300 keeps its left edge
    (1600-14-300=1286) right of the viewport's 80% line (1280 at 1600) so it stays
@@ -890,9 +921,8 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
     max-height: calc(100vh - 40px);
     padding: 11px 152px 11px 12px;
   }
-  #hud .identity { margin-bottom: 7px; }
-  #hud .identity h2 { font-size: 16px; }
-  #hud .unit-badge, #hud .stats { display: none; }
+  #hud .unit-name { font-size: 15px; }
+  #hud .unit-weapon { display: none; }
   #hud .actions {
     left: max(10px, env(safe-area-inset-left));
     right: max(10px, env(safe-area-inset-right));
@@ -901,11 +931,8 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
     max-height: none;
     padding: 10px;
   }
-  #hud .reserve-row,
-  #hud .reload-row,
-  #hud .items-row,
-  #hud .stance-row,
-  #hud .psi-row { display: none; }
+  #hud .action-strip,
+  #hud .items-row { display: none; }
   #hud .modes { margin-top: 7px; }
   #hud .modes button { min-height: 48px; }
   #hud .endturn { right: 20px; bottom: 36px; min-width: 124px; min-height: 46px; font-size: 12px; }
@@ -918,9 +945,8 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
 }
 @media (max-height: 660px) {
   #hud .log, #hud .squad { display: none; }
-  #hud .unit { padding-top: 10px; padding-bottom: 10px; }
-  #hud .stats,
-  #hud .status-row { display: none; }
+  #hud .unit { padding-top: 9px; padding-bottom: 9px; }
+  #hud .unit-weapon { display: none; }
   #hud .briefing-card { padding-top: 24px; padding-bottom: 24px; }
   #hud .briefing-grid { margin: 16px 0; }
 }
@@ -929,7 +955,7 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
    appear/disappear) still functions, just instantly. */
 @media (prefers-reduced-motion: reduce) {
   #hud .endturn.ready,
-  #hud .morale-tag.panic,
+  #hud .morale-pip.panic,
   #hud .roster .panic-tag { animation: none !important; }
   #hud button,
   #hud .bar i,
@@ -1030,33 +1056,29 @@ export class Hud {
   private readonly objectiveCount: HTMLDivElement;
   private readonly objectiveFill: HTMLElement;
   private readonly nameEl: HTMLHeadingElement;
+  private readonly rankPip: HTMLSpanElement;
   private readonly weaponEl: HTMLDivElement;
-  private readonly unitBadge: HTMLDivElement;
+  private readonly unitBadge: HTMLSpanElement;
   private readonly tuFill: HTMLElement;
   private readonly tuReserve: HTMLElement;
   private readonly tuText: HTMLElement;
   private readonly reserveTag: HTMLSpanElement;
   private readonly hpFill: HTMLElement;
   private readonly hpText: HTMLElement;
-  private readonly moraleBar: HTMLDivElement;
-  private readonly moraleFill: HTMLElement;
-  private readonly moraleText: HTMLElement;
-  private readonly moraleTag: HTMLSpanElement;
-  private readonly accuracyEl: HTMLElement;
-  private readonly reactionsEl: HTMLElement;
-  private readonly visionEl: HTMLElement;
+  /** Morale as a single colour pip; tooltip carries value + state. It only grows/
+   *  pulses when the operative is shaken or panicking. */
+  private readonly moralePip: HTMLSpanElement;
+  /** Cover shield glyph — shown ONLY when the operative is actually in cover. */
+  private readonly coverPip: HTMLSpanElement;
   private readonly detailsButton: HTMLButtonElement;
-  private readonly contextEyebrow: HTMLDivElement;
-  private readonly contextTitle: HTMLHeadingElement;
-  private readonly contextDetail: HTMLDivElement;
+  /** Single-line move/target hint (replaces the old two-line context banner). */
+  private readonly contextHint: HTMLDivElement;
   private readonly reloadButton: HTMLButtonElement;
   private readonly modeButtons = new Map<ShotKind, HTMLButtonElement>();
   private readonly reserveButtons = new Map<ReserveMode, HTMLButtonElement>();
   private readonly itemsRow: HTMLDivElement;
   private readonly itemsStack: HTMLDivElement;
   private readonly stanceButton: HTMLButtonElement;
-  private readonly stanceValue: HTMLElement;
-  private readonly coverValue: HTMLElement;
   private readonly psiRow: HTMLDivElement;
   private readonly psiPanicButton: HTMLButtonElement;
   private readonly psiMcButton: HTMLButtonElement;
@@ -1178,90 +1200,75 @@ export class Hud {
     this.root.appendChild(this.logEl);
 
     const unit = el("section", "panel unit");
-    const identity = el("div", "identity");
-    const identityCopy = el("div");
-    const unitEye = el("div", "eyebrow");
-    unitEye.textContent = "Selected operative";
-    this.nameEl = el("h2");
-    this.weaponEl = el("div", "weapon");
-    identityCopy.append(unitEye, this.nameEl, this.weaponEl);
-    this.unitBadge = el("div", "unit-badge");
-    identity.append(identityCopy, this.unitBadge);
-    unit.appendChild(identity);
 
-    const tuHead = el("div", "meter-head");
-    tuHead.append(document.createTextNode("Time units"));
-    const tuRight = el("span", "meter-right");
+    // Head row: rank pip · name · morale pip · cover pip · READY badge · details.
+    const head = el("div", "unit-head");
+    this.rankPip = el("span", "rank-pip");
+    this.rankPip.textContent = "OP";
+    this.nameEl = el("h2", "unit-name");
+    this.moralePip = el("span", "morale-pip steady");
+    this.coverPip = el("span", "cover-pip");
+    this.coverPip.textContent = "⛨";
+    this.coverPip.hidden = true;
+    this.unitBadge = el("span", "unit-badge");
+    this.detailsButton = el("button", "details-btn");
+    this.detailsButton.textContent = "i";
+    this.detailsButton.title = "Open operative dossier — accuracy, reactions, vision & career (ESC closes)";
+    this.detailsButton.setAttribute("aria-label", "Open operative dossier");
+    this.detailsButton.addEventListener("click", () => this.toggleDossier());
+    head.append(
+      this.rankPip,
+      this.nameEl,
+      this.moralePip,
+      this.coverPip,
+      this.unitBadge,
+      this.detailsButton,
+    );
+    unit.appendChild(head);
+
+    // Meters row: HP and TU side by side, numerals beside each bar.
+    const meters = el("div", "unit-meters");
+    const hpMeter = el("div", "meter");
+    const hpLine = el("div", "meter-line");
+    hpLine.append(document.createTextNode("HP"));
+    this.hpText = el("b");
+    hpLine.appendChild(this.hpText);
+    const hpBar = el("div", "bar");
+    this.hpFill = el("i");
+    hpBar.appendChild(this.hpFill);
+    hpMeter.append(hpLine, hpBar);
+
+    const tuMeter = el("div", "meter");
+    const tuLine = el("div", "meter-line");
+    tuLine.append(document.createTextNode("TU"));
+    const tuRight = el("span");
     this.tuText = el("b");
     this.reserveTag = el("span", "reserve-tag");
-    tuRight.append(this.tuText, this.reserveTag);
-    tuHead.appendChild(tuRight);
+    tuRight.append(this.tuText, document.createTextNode(" "), this.reserveTag);
+    tuLine.appendChild(tuRight);
     const tuBar = el("div", "bar");
     this.tuFill = el("i");
     this.tuFill.style.background = "linear-gradient(90deg,#22d3ee,#67e8f9)";
     this.tuReserve = el("i", "tu-reserve");
     tuBar.append(this.tuFill, this.tuReserve);
+    tuMeter.append(tuLine, tuBar);
 
-    const hpHead = el("div", "meter-head");
-    hpHead.append(document.createTextNode("Vital signs"));
-    this.hpText = el("b");
-    hpHead.appendChild(this.hpText);
-    const hpBar = el("div", "bar");
-    this.hpFill = el("i");
-    hpBar.appendChild(this.hpFill);
+    meters.append(hpMeter, tuMeter);
+    unit.appendChild(meters);
 
-    const moraleHead = el("div", "meter-head");
-    moraleHead.append(document.createTextNode("Morale"));
-    const moraleRight = el("span", "meter-right");
-    this.moraleText = el("b");
-    this.moraleTag = el("span", "morale-tag");
-    moraleRight.append(this.moraleText, this.moraleTag);
-    moraleHead.appendChild(moraleRight);
-    this.moraleBar = el("div", "bar morale-bar");
-    this.moraleFill = el("i");
-    this.moraleBar.appendChild(this.moraleFill);
-    unit.append(tuHead, tuBar, hpHead, hpBar, moraleHead, this.moraleBar);
+    // Weapon + ammo count (one quiet line).
+    this.weaponEl = el("div", "unit-weapon");
+    unit.appendChild(this.weaponEl);
 
-    const stats = el("div", "stats");
-    this.accuracyEl = this.makeStat(stats, "Accuracy");
-    this.reactionsEl = this.makeStat(stats, "Reactions");
-    this.visionEl = this.makeStat(stats, "Vision");
-    unit.appendChild(stats);
-
-    // Stance + directional-cover readout. Two stat-style cells in a 2-up row;
-    // cover colour always carries a Full/Half/Exposed text label.
-    const statusRow = el("div", "status-row");
-    const stanceCell = el("div", "stat");
-    const stanceCellLabel = el("span");
-    stanceCellLabel.textContent = "Stance";
-    this.stanceValue = el("b");
-    stanceCell.append(stanceCellLabel, this.stanceValue);
-    const coverCell = el("div", "stat");
-    const coverCellLabel = el("span");
-    coverCellLabel.textContent = "Cover";
-    this.coverValue = el("b", "cover-tag none");
-    this.coverValue.textContent = "—";
-    coverCell.append(coverCellLabel, this.coverValue);
-    statusRow.append(stanceCell, coverCell);
-    unit.appendChild(statusRow);
-
-    this.detailsButton = el("button", "details-btn");
-    this.detailsButton.textContent = "Details";
-    this.detailsButton.title = "Open operative dossier (ESC closes)";
-    this.detailsButton.addEventListener("click", () => this.toggleDossier());
-    unit.appendChild(this.detailsButton);
     this.root.appendChild(unit);
 
     const actions = el("section", "panel actions");
-    const context = el("div", "context");
-    const contextCopy = el("div");
-    this.contextEyebrow = el("div", "eyebrow");
-    this.contextTitle = el("h3");
-    contextCopy.append(this.contextEyebrow, this.contextTitle);
-    this.contextDetail = el("div", "context-detail");
-    context.append(contextCopy, this.contextDetail);
-    actions.appendChild(context);
 
+    // Move/target preview — one short line (built in updateContext).
+    this.contextHint = el("div", "move-hint");
+    actions.appendChild(this.contextHint);
+
+    // Fire modes — icon + TU number on the face (built in updateModeButtons).
     const modes = el("div", "modes");
     for (const kind of MODES) {
       const button = el("button");
@@ -1272,68 +1279,59 @@ export class Hud {
     }
     actions.appendChild(modes);
 
-    const reloadRow = el("div", "reload-row");
-    const reloadLabel = el("span");
-    reloadLabel.textContent = "Magazine";
-    this.reloadButton = el("button");
-    this.reloadButton.textContent = "Reload [L]";
-    this.reloadButton.addEventListener("click", () => this.cb.onReload());
-    reloadRow.append(reloadLabel, this.reloadButton);
-    actions.appendChild(reloadRow);
+    // Secondary controls strip: magazine · stance · reaction reserve · psionics.
+    const strip = el("div", "action-strip");
 
-    const stanceRow = el("div", "stance-row");
-    const stanceLabel = el("span");
-    stanceLabel.textContent = "Stance";
-    this.stanceButton = el("button");
+    // Magazine — ammo icon + count; click reloads, TU + hotkey live in the tooltip.
+    this.reloadButton = el("button", "mag-btn");
+    this.reloadButton.addEventListener("click", () => this.cb.onReload());
+    strip.appendChild(this.reloadButton);
+
+    // Stance — icon toggle (glyph reflects stand/kneel; detail + TU in the tooltip).
+    this.stanceButton = el("button", "stance-btn");
     this.stanceButton.addEventListener("click", () => {
       const sel = this.lastSelected;
       if (!sel) return;
       const current: UnitStance = sel.stance ?? "stand";
       this.cb.onSetStance?.(current === "stand" ? "kneel" : "stand");
     });
-    stanceRow.append(stanceLabel, this.stanceButton);
-    actions.appendChild(stanceRow);
+    strip.appendChild(this.stanceButton);
 
-    // Psionics row: hidden unless the selected operative has psi skill. Each
-    // sub-button pairs a glyph with its label + TU cost so the armed/spent state
-    // is never conveyed by colour alone; MC reads "SPENT" once the per-battle
-    // hard cap is used. TU costs + availability arrive via runtime.psi (computed
-    // by the controller, which owns the PSI tuning constants).
-    this.psiRow = el("div", "psi-row");
-    const psiLabel = el("span");
-    psiLabel.textContent = "Psionics";
-    const psiActions = el("div", "psi-actions");
-    this.psiPanicButton = el("button");
-    this.psiPanicButton.dataset.kind = "panic";
-    this.psiPanicButton.title = "Psi-panic a visible enemy (dumps morale, may break nerve)";
-    this.psiPanicButton.addEventListener("click", () => this.cb.onPsiAttack?.("panic"));
-    this.psiMcButton = el("button");
-    this.psiMcButton.dataset.kind = "mindControl";
-    this.psiMcButton.title = "Seize an enemy for one round. Hard-capped at one use per battle.";
-    this.psiMcButton.addEventListener("click", () => this.cb.onPsiAttack?.("mindControl"));
-    psiActions.append(this.psiPanicButton, this.psiMcButton);
-    this.psiRow.append(psiLabel, psiActions);
-    actions.appendChild(this.psiRow);
-
-    const reserveRow = el("div", "reserve-row");
-    const reserveLabel = el("span");
-    reserveLabel.textContent = "Reaction reserve";
+    // Reaction reserve — one compact segmented control of icon buttons; each icon's
+    // name + effect lives in its tooltip so no label column is needed.
     const reserve = el("div", "reserve");
     for (const mode of RESERVES) {
       const button = el("button");
-      button.textContent = mode;
+      button.dataset.reserve = mode;
+      button.textContent = RESERVE_ICON[mode];
+      button.title = RESERVE_TITLE[mode];
+      button.setAttribute("aria-label", RESERVE_TITLE[mode]);
       button.addEventListener("click", () => this.cb.onSetReserve(mode));
       this.reserveButtons.set(mode, button);
       reserve.appendChild(button);
     }
-    reserveRow.append(reserveLabel, reserve);
-    actions.appendChild(reserveRow);
+    strip.appendChild(reserve);
 
+    // Psionics — two icon sub-buttons (Panic + Mind Control). The whole group is
+    // hidden unless the selected operative has psi skill; the armed/spent state is
+    // never colour-only (MC reads "SPENT" and the reason is in the tooltip). TU
+    // costs + availability arrive via runtime.psi (controller owns the tuning).
+    this.psiRow = el("div", "psi-actions");
+    this.psiPanicButton = el("button");
+    this.psiPanicButton.dataset.kind = "panic";
+    this.psiPanicButton.addEventListener("click", () => this.cb.onPsiAttack?.("panic"));
+    this.psiMcButton = el("button");
+    this.psiMcButton.dataset.kind = "mindControl";
+    this.psiMcButton.addEventListener("click", () => this.cb.onPsiAttack?.("mindControl"));
+    this.psiRow.append(this.psiPanicButton, this.psiMcButton);
+    strip.appendChild(this.psiRow);
+
+    actions.appendChild(strip);
+
+    // Carried items — icon chips with a count badge (built in updateItemButtons).
     this.itemsRow = el("div", "items-row");
-    const itemsLabel = el("span");
-    itemsLabel.textContent = "Items";
     this.itemsStack = el("div", "items-stack");
-    this.itemsRow.append(itemsLabel, this.itemsStack);
+    this.itemsRow.appendChild(this.itemsStack);
     actions.appendChild(this.itemsRow);
     this.root.appendChild(actions);
 
@@ -1611,34 +1609,45 @@ export class Hud {
   private updateUnit(state: BattleState, selected: Unit | null): void {
     this.detailsButton.disabled = !selected;
     if (!selected) {
+      this.rankPip.textContent = "OP";
+      this.rankPip.title = "";
       this.nameEl.textContent = "No operative";
+      this.nameEl.title = "";
       this.weaponEl.textContent = "Select a squad member";
+      this.weaponEl.title = "";
       this.unitBadge.textContent = "--";
+      this.unitBadge.className = "unit-badge";
       this.tuFill.style.width = "0%";
       this.tuReserve.style.width = "0%";
       this.hpFill.style.width = "0%";
       this.tuText.textContent = "--";
       this.reserveTag.textContent = "";
       this.hpText.textContent = "--";
-      this.moraleFill.style.width = "0%";
-      this.moraleText.textContent = "--";
-      this.moraleTag.textContent = "";
-      this.moraleBar.className = "bar morale-bar";
-      this.accuracyEl.textContent = "--";
-      this.reactionsEl.textContent = "--";
-      this.visionEl.textContent = "--";
-      this.stanceValue.textContent = "--";
-      this.coverValue.textContent = "—";
-      this.coverValue.className = "cover-tag none";
+      this.moralePip.className = "morale-pip steady";
+      this.moralePip.title = "";
+      this.coverPip.hidden = true;
       return;
     }
 
+    // Rank pip: an abbreviated role tag (full role in the tooltip).
+    const role = titleCase(selected.templateId);
+    this.rankPip.textContent = selected.templateId.slice(0, 3).toUpperCase();
+    this.rankPip.title = role;
     this.nameEl.textContent = selected.name;
+    this.nameEl.title = `${selected.name} · ${role}`;
+
     const weapon = state.weapons[selected.weaponId];
     this.weaponEl.textContent = weapon
-      ? `${weapon.name} - Ammo ${selected.ammo}/${weapon.magazineSize}`
+      ? `${weapon.name} · ${selected.ammo}/${weapon.magazineSize}`
       : selected.weaponId;
-    this.unitBadge.textContent = selected.tu > 0 ? "READY" : "SPENT";
+    this.weaponEl.title = weapon
+      ? `${weapon.name} — ${selected.ammo}/${weapon.magazineSize} rounds loaded`
+      : selected.weaponId;
+
+    const ready = selected.tu > 0;
+    this.unitBadge.textContent = ready ? "READY" : "SPENT";
+    this.unitBadge.className = ready ? "unit-badge" : "unit-badge spent";
+    this.unitBadge.title = ready ? "Operative has time units left" : "Operative has spent its turn";
 
     // TU bar: spendable cyan fill + amber hatched reaction-reserve segment.
     const maxTu = selected.stats.timeUnits;
@@ -1649,54 +1658,37 @@ export class Hud {
     this.tuFill.style.width = `${freePct}%`;
     this.tuReserve.style.left = `${freePct}%`;
     this.tuReserve.style.width = `${percent(reserveShown, maxTu)}%`;
-    this.tuText.textContent = `${selected.tu} / ${maxTu}`;
+    this.tuText.textContent = `${selected.tu}/${maxTu}`;
     if (reserve > 0) {
-      this.reserveTag.textContent = `${reserve} RXN`;
+      this.reserveTag.textContent = `${reserve}`;
       this.reserveTag.title = `${reserve} TU held back for ${selected.reserve} reaction fire`;
     } else {
       this.reserveTag.textContent = "";
+      this.reserveTag.title = "";
     }
 
     const hpPct = percent(selected.hp, selected.stats.health);
     this.hpFill.style.width = `${hpPct}%`;
     this.hpFill.style.background =
       hpPct >= 60 ? "#4ade80" : hpPct >= 30 ? "#fbbf24" : "#fb7185";
-    this.hpText.textContent = `${selected.hp} / ${selected.stats.health}`;
+    this.hpText.textContent = `${selected.hp}/${selected.stats.health}`;
 
-    // Morale bar: tone tints the fill but numeric value + label always accompany it.
+    // Morale pip: one colour dot; value + state live in the tooltip. It only grows/
+    // pulses when the operative is shaken or panicking (see CSS).
     const moraleValue = selected.morale ?? MORALE.MAX;
     const read = moraleState(selected.morale);
-    this.moraleFill.style.width = `${percent(moraleValue, MORALE.MAX)}%`;
-    this.moraleBar.className = `bar morale-bar ${read.tone}`;
-    this.moraleText.textContent = `${moraleValue}`;
-    this.moraleTag.textContent = read.label;
-    this.moraleTag.className = `morale-tag ${read.tone}`;
-    this.moraleTag.title = `Morale ${moraleValue}/100 - ${read.label}`;
+    this.moralePip.className = `morale-pip ${read.tone}`;
+    this.moralePip.title = `Morale ${moraleValue}/100 — ${read.label}`;
 
-    this.accuracyEl.textContent = String(selected.stats.firingAccuracy);
-    this.reactionsEl.textContent = String(selected.stats.reactions);
-    this.visionEl.textContent = `${selected.sightRange} tiles`;
-
-    this.renderStanceReadout(state, selected);
+    this.renderCoverPip(state, selected);
   }
 
   /**
-   * Stance indicator + directional-cover status for the unit panel. Cover is
-   * measured against the nearest hostile the squad can see; when none is
-   * visible it reads as "—". Colour is always paired with a text label.
+   * Cover shield pip for the unit head. Cover is measured against the nearest
+   * hostile the squad can see; the pip appears ONLY when the operative actually
+   * holds half or full cover (hidden when exposed or no hostile is visible).
    */
-  private renderStanceReadout(state: BattleState, selected: Unit): void {
-    const stance: UnitStance = selected.stance ?? "stand";
-    const stanceGlyph = el("span", "stance-glyph");
-    stanceGlyph.textContent = stance === "kneel" ? "▄" : "█";
-    this.stanceValue.replaceChildren(
-      stanceGlyph,
-      document.createTextNode(stance === "kneel" ? "Kneeling" : "Standing"),
-    );
-    this.stanceValue.title = stance === "kneel"
-      ? "Kneeling: +accuracy, smaller profile, costlier moves"
-      : "Standing: full mobility";
-
+  private renderCoverPip(state: BattleState, selected: Unit): void {
     // Directional cover: only the tile sitting between the operative and the
     // nearest visible shooter protects them (see sim coverDefenseFor).
     const visEnemies = visibleEnemyIds(state, "player");
@@ -1716,17 +1708,18 @@ export class Hud {
     }
 
     if (!nearest) {
-      this.coverValue.textContent = "—";
-      this.coverValue.className = "cover-tag none";
-      this.coverValue.title = "No visible hostile — cover not engaged";
+      this.coverPip.hidden = true;
       return;
     }
-
     const cover = coverDefenseFor(state.grid, selected.pos, nearest.pos);
+    if (cover === 0) {
+      this.coverPip.hidden = true;
+      return;
+    }
     const read = this.coverReadout(cover);
-    this.coverValue.textContent = read.label;
-    this.coverValue.className = `cover-tag ${read.cls}`;
-    this.coverValue.title = `Directional cover vs ${nearest.name}: ${read.label.toLowerCase()}`;
+    this.coverPip.hidden = false;
+    this.coverPip.className = `cover-pip ${read.cls}`;
+    this.coverPip.title = `In ${read.label.toLowerCase()} cover vs ${nearest.name}`;
   }
 
   /** Maps a directional cover value to its label + colour class. */
@@ -1742,15 +1735,14 @@ export class Hud {
     runtime: HudRuntime,
   ): void {
     const stance: UnitStance = selected?.stance ?? "stand";
+    // Icon-only face: the glyph reflects the CURRENT stance; the toggle direction,
+    // effect, and TU cost live in the tooltip (see the [K] hotkey too).
     const glyph = el("span", "stance-glyph");
     glyph.textContent = stance === "kneel" ? "▄" : "█";
-    const tu = el("span", "stance-tu");
-    tu.textContent = `${STANCE.TOGGLE_TU} TU`;
-    this.stanceButton.replaceChildren(
-      glyph,
-      document.createTextNode(stance === "kneel" ? "Kneel" : "Stand"),
-      document.createTextNode(" · "),
-      tu,
+    this.stanceButton.replaceChildren(glyph);
+    this.stanceButton.setAttribute(
+      "aria-label",
+      stance === "kneel" ? "Stand up" : "Kneel",
     );
 
     const insufficientTu = !!selected && selected.tu < STANCE.TOGGLE_TU;
@@ -1769,10 +1761,10 @@ export class Hud {
         : state.status !== "playing"
           ? "Mission complete"
           : insufficientTu
-            ? `Not enough TU (need ${STANCE.TOGGLE_TU})`
+            ? `Kneel/stand — not enough TU (need ${STANCE.TOGGLE_TU}) [K]`
             : stance === "stand"
-              ? "Kneel: boosts accuracy and shrinks your profile, but costs 4 TU and makes moves costlier"
-              : "Stand up: restores full mobility (kneeling boosts accuracy)";
+              ? `Kneel [K] — boosts accuracy and shrinks your profile, costs ${STANCE.TOGGLE_TU} TU and makes moves costlier`
+              : `Stand up [K] — restores full mobility (${STANCE.TOGGLE_TU} TU; kneeling boosts accuracy)`;
   }
 
   /**
@@ -1788,36 +1780,35 @@ export class Hud {
     }
     this.psiRow.style.display = "";
     const info = runtime.psi;
+    this.psiRow.classList.toggle("spent", info.mcSpent);
+    // Icon + TU cost on the face; the action name + effect live in the tooltip.
     this.renderPsiButton(
       this.psiPanicButton,
       "✦",
-      "Panic",
       `${info.panicTuCost} TU`,
       info.panicAvailable,
       this.activePsi === "panic",
       info.panicAvailable
-        ? "Psi-panic: dumps morale, may break the target's nerve"
-        : "Not enough TU or not your turn",
+        ? "Psi-panic — dumps a visible enemy's morale, may break its nerve"
+        : "Psi-panic — not enough TU or not your turn",
     );
     this.renderPsiButton(
       this.psiMcButton,
       "☯",
-      info.mcSpent ? "MC Spent" : "Mind Control",
-      info.mcSpent ? "1 / battle used" : `${info.mcTuCost} TU`,
+      info.mcSpent ? "used" : `${info.mcTuCost} TU`,
       info.mcAvailable,
       this.activePsi === "mindControl",
       info.mcSpent
-        ? "Mind control hard cap reached (1 per battle)"
+        ? "Mind control — hard cap reached (1 per battle)"
         : info.mcAvailable
-          ? "Seize an enemy for one round (1 per battle)"
-          : "Not enough TU or not your turn",
+          ? "Mind control — seize an enemy for one round (1 per battle)"
+          : "Mind control — not enough TU or not your turn",
     );
   }
 
   private renderPsiButton(
     button: HTMLButtonElement,
     glyph: string,
-    label: string,
     cost: string,
     enabled: boolean,
     active: boolean,
@@ -1825,46 +1816,58 @@ export class Hud {
   ): void {
     const g = el("span", "psi-glyph");
     g.textContent = glyph;
-    const l = el("span");
-    l.textContent = label;
     const c = el("span", "psi-cost");
     c.textContent = cost;
-    button.replaceChildren(g, l, c);
+    button.replaceChildren(g, c);
     button.disabled = !enabled;
     button.classList.toggle("active", active);
     button.title = title;
   }
 
+  /**
+   * Single-line move/target hint. Replaces the old two-line "MOVE PREVIEW / Advance
+   * to movement limit / 57 TU" banner with one terse line, tone-classed so the verb
+   * carries the state (move = neutral, target = amber, blocked = red).
+   */
   private updateContext(hover: HudHover | null, selected: Unit | null): void {
+    const hint = this.contextHint;
     if (!selected) {
-      this.contextEyebrow.textContent = "No active unit";
-      this.contextTitle.textContent = "Select an operative";
-      this.contextDetail.textContent = "Use the roster or click a blue unit.";
+      hint.className = "move-hint";
+      hint.replaceChildren(document.createTextNode("Select an operative"));
+      hint.title = "Use the roster or click a blue unit.";
       return;
     }
     if (!hover) {
-      this.contextEyebrow.textContent = "Awaiting order";
-      this.contextTitle.textContent = "Choose a destination or target";
-      this.contextDetail.textContent = "Click to move. Hover a hostile to preview fire.";
+      hint.className = "move-hint";
+      hint.replaceChildren(document.createTextNode("Click to move · hover to fire"));
+      hint.title = "Click a green path to move. Hover a hostile to preview fire odds.";
       return;
     }
 
-    this.contextEyebrow.textContent =
-      hover.kind === "target" ? "Target acquired" : hover.kind === "move" ? "Move preview" : "Route blocked";
-    this.contextTitle.textContent = hover.label;
     if (hover.kind === "move" && hover.moveCost !== undefined) {
-      this.contextDetail.replaceChildren(
-        Object.assign(el("span", "context-cost"), { textContent: `${hover.moveCost} TU` }),
-        document.createElement("br"),
+      const after = hover.tuAfter ?? 0;
+      hint.className = "move-hint move";
+      hint.replaceChildren(
+        Object.assign(el("b"), { textContent: "Move" }),
+        document.createTextNode(" — "),
+        Object.assign(el("span", "cost"), { textContent: `${hover.moveCost} TU` }),
         document.createTextNode(
-          hover.reachable === false
-            ? `Advance to limit, ${hover.tuAfter ?? 0} TU left`
-            : `${hover.tuAfter ?? 0} TU remaining`,
+          hover.reachable === false ? ` · to limit, ${after} left` : ` · ${after} left`,
         ),
       );
-    } else {
-      this.contextDetail.textContent = hover.detail ?? "";
+      hint.title = hover.label;
+      return;
     }
+
+    const tone = hover.kind === "target" ? "target" : hover.kind === "blocked" ? "blocked" : "";
+    hint.className = `move-hint${tone ? ` ${tone}` : ""}`;
+    hint.replaceChildren(
+      Object.assign(el("b"), {
+        textContent: hover.kind === "target" ? "Target" : hover.kind === "blocked" ? "Blocked" : "",
+      }),
+      document.createTextNode(hover.kind === "target" ? `: ${hover.label}` : hover.label),
+    );
+    hint.title = hover.detail ?? hover.label;
   }
 
   private updateModeButtons(
@@ -1879,34 +1882,27 @@ export class Hud {
       if (!button) continue;
       const mode = weapon?.modes.find((candidate) => candidate.kind === kind);
       const costValue = mode && selected ? modeTuCost(selected, mode) : null;
-      const ammoValue = mode && selected ? `${Math.min(selected.ammo, mode.shots)}/${mode.shots} RDS` : "N/A";
       const preview = hover?.previews?.[kind];
-      const chance =
-        preview && preview.possible
-          ? ratioToPercent(preview.hitChance)
-          : preview
-            ? "BLOCKED"
-            : "--";
+      const hotkey = kind === "snap" ? "1" : kind === "aimed" ? "2" : "3";
 
-      // Button face: fire-mode icon + name (Style Bible item 5, icons on the face).
+      // Button face: fire-mode ICON + TU number only. Name, rounds, and hit% live in
+      // the tooltip; the crosshair hit-chance chip is appended ONLY while a target is
+      // previewed — the one moment those odds change THIS action's decision.
       const icon = el("span", "mode-icon");
       icon.textContent = MODE_ICON[kind];
-      const name = el("span", "mode-name");
-      name.append(icon, document.createTextNode(kind));
-      const meta = el("span", "mode-meta");
-      const cost = el("span");
-      cost.textContent = costValue === null ? "N/A" : `${costValue} TU`;
-      const ammo = el("span");
-      ammo.textContent = ammoValue;
-      // Hit-chance reads as a crosshair chip: ⌖ glyph paired with the odds.
-      const odds = el("span", "chance");
-      const xhair = el("span", "xhair");
-      xhair.textContent = "⌖";
-      const oddsValue = el("span");
-      oddsValue.textContent = chance;
-      odds.append(xhair, oddsValue);
-      meta.append(cost, ammo, odds);
-      button.replaceChildren(name, meta);
+      const tu = el("span", "mode-tu");
+      tu.textContent = costValue === null ? "N/A" : `${costValue} TU`;
+      const face: HTMLElement[] = [icon, tu];
+      if (preview) {
+        const odds = el("span", "chance");
+        const xhair = el("span", "xhair");
+        xhair.textContent = "⌖";
+        const oddsValue = el("span");
+        oddsValue.textContent = preview.possible ? ratioToPercent(preview.hitChance) : "✕";
+        odds.append(xhair, oddsValue);
+        face.push(odds);
+      }
+      button.replaceChildren(...face);
       button.disabled =
         !mode ||
         !selected ||
@@ -1915,8 +1911,20 @@ export class Hud {
         (costValue !== null && selected.tu < costValue) ||
         (mode !== undefined && selected.ammo < mode.shots);
       button.classList.toggle("active", kind === this.activeMode && !!mode);
+
+      // Tooltip carries name, rounds, hit%, and the hotkey.
+      const rounds = mode ? `${mode.shots} rd${mode.shots === 1 ? "" : "s"}` : "";
+      const hitText = preview
+        ? preview.possible
+          ? ` · ${ratioToPercent(preview.hitChance)} hit`
+          : " · blocked"
+        : "";
       button.title = preview?.reason ??
-        (mode && selected && selected.ammo < mode.shots ? "not enough ammo" : `${titleCase(kind)} fire`);
+        (mode && selected && selected.ammo < mode.shots
+          ? `${titleCase(kind)} fire [${hotkey}] — not enough ammo`
+          : mode && costValue !== null
+            ? `${titleCase(kind)} fire [${hotkey}] — ${costValue} TU · ${rounds}${hitText}`
+            : `${titleCase(kind)} fire [${hotkey}] — unavailable`);
     }
   }
 
@@ -1924,9 +1932,13 @@ export class Hud {
     const weapon = selected ? state.weapons[selected.weaponId] : undefined;
     const cost = selected && weapon ? reloadTuCost(selected, weapon.reloadTuPercent) : 0;
     const full = !!selected && !!weapon && selected.ammo >= weapon.magazineSize;
-    this.reloadButton.textContent = selected && weapon
-      ? `Reload ${selected.ammo}/${weapon.magazineSize} (${cost} TU) [L]`
-      : "Reload [L]";
+    // Face: magazine icon + ammo count only; TU cost + hotkey live in the tooltip.
+    const magIcon = el("span", "mag-icon");
+    magIcon.textContent = "⦿";
+    const magCount = el("span", "mag-count");
+    magCount.textContent = selected && weapon ? `${selected.ammo}/${weapon.magazineSize}` : "--";
+    this.reloadButton.replaceChildren(magIcon, magCount);
+    this.reloadButton.setAttribute("aria-label", "Reload weapon");
     this.reloadButton.disabled =
       !selected ||
       !weapon ||
@@ -1940,10 +1952,10 @@ export class Hud {
       : !weapon
         ? "No weapon"
         : full
-          ? "Magazine full"
+          ? `Magazine full (${selected.ammo}/${weapon.magazineSize})`
           : selected.tu < cost
-            ? "Not enough TU"
-            : "Reload weapon";
+            ? `Reload [L] — not enough TU (need ${cost})`
+            : `Reload [L] — ${selected.ammo}/${weapon.magazineSize}, costs ${cost} TU`;
   }
 
   private updateReserveButtons(selected: Unit | null, runtime: HudRuntime): void {
@@ -2011,46 +2023,49 @@ export class Hud {
     const primed = isGrenade && !!inst.primed;
 
     const line = el("div", "item-line");
+    const glyph = ITEM_ICON[def.kind] ?? "▪";
 
+    // Chip face: item icon only + a count badge. The verb, effect, charges, and TU
+    // cost live in the tooltip so long labels never clip.
     const main = el("button");
-    main.title = isGrenade
-      ? `Throw ${def.name} (blast ${def.blastRadius ?? 1}, ${def.throwRange ?? 6} range) - ${cost} TU`
+    main.textContent = glyph;
+    main.setAttribute("aria-label", `${verb} ${def.name}`);
+    const chargeNote = isStunRod ? "reusable" : `x${inst.uses}`;
+    const primedNote = primed ? ` · primed ${inst.fuseTurns ?? 1}t` : "";
+    const effect = isGrenade
+      ? `Throw ${def.name} (blast ${def.blastRadius ?? 1}, ${def.throwRange ?? 6} range)`
       : isSmoke
-        ? `Throw ${def.name} (smoke cloud ${def.blastRadius ?? 2}, ${def.throwRange ?? 6} range) - ${cost} TU`
+        ? `Throw ${def.name} (smoke cloud ${def.blastRadius ?? 2}, ${def.throwRange ?? 6} range)`
         : isProxMine
-          ? `Throw ${def.name} (mine, blast ${def.blastRadius ?? 2}, ${def.throwRange ?? 6} range) - ${cost} TU`
+          ? `Throw ${def.name} (mine, blast ${def.blastRadius ?? 2}, ${def.throwRange ?? 6} range)`
           : isScanner
-            ? `Use ${def.name} (reveals enemies within ${def.scanRadius ?? 8} tiles through walls) - ${cost} TU`
+            ? `Use ${def.name} (reveals enemies within ${def.scanRadius ?? 8} tiles through walls)`
             : isStunRod
-              ? `Strike an adjacent enemy with ${def.name} (+${def.stunPower ?? 0} stun; enough drops it unconscious for capture) - ${cost} TU`
-              : `Use ${def.name} on an adjacent ally (heals ${def.healAmount ?? 0}) - ${cost} TU`;
-    const label = el("span", "item-label");
-    const name = el("b");
-    name.textContent = def.name;
-    const meta = el("small");
-    // The stun rod is reusable (no charge is spent), so read it as such instead
-    // of a consumable "x1" charge count.
-    const charge = isStunRod ? `reusable - ${cost} TU` : `x${inst.uses} - ${cost} TU`;
-    meta.textContent = primed ? `${charge} - primed ${inst.fuseTurns ?? 1}t` : charge;
-    label.append(name, meta);
-    const verbSpan = el("span", "item-verb");
-    verbSpan.textContent = verb;
-    main.append(label, verbSpan);
+              ? `Stun an adjacent enemy with ${def.name} (+${def.stunPower ?? 0} stun; enough drops it for capture)`
+              : `Use ${def.name} on an adjacent ally (heals ${def.healAmount ?? 0})`;
+    main.title = `${effect} — ${chargeNote} · ${cost} TU${primedNote}`;
     main.disabled = !playerActing || outOfUses || cantAfford || primed;
     main.addEventListener("click", () => {
       if (isThrowable) this.cb.onThrowItem?.(inst.itemId);
       else this.cb.onUseItem?.(inst.itemId);
     });
+    // Count badge (skip the reusable stun rod, which spends no charge).
+    if (!isStunRod) {
+      const count = el("span", "item-count");
+      count.textContent = String(inst.uses);
+      main.appendChild(count);
+    }
     line.appendChild(main);
 
     if (isGrenade) {
       const primeCost = itemActionTuCost(maxTu, def.tuPercent, "prime");
       const prime = el("button", "prime");
-      prime.textContent = `Prime ${primeCost}TU`;
+      prime.textContent = "P";
+      prime.setAttribute("aria-label", `Prime ${def.name}`);
       prime.disabled = !playerActing || outOfUses || selected.tu < primeCost || primed;
       prime.title = primed
-        ? `Already primed - detonates in ${inst.fuseTurns ?? 1} turn(s)`
-        : `Prime ${def.name} for ${primeCost} TU - detonates on the carrier's next turn`;
+        ? `Already primed — detonates in ${inst.fuseTurns ?? 1} turn(s)`
+        : `Prime ${def.name} for ${primeCost} TU — detonates on the carrier's next turn`;
       prime.addEventListener("click", () => this.cb.onPrimeItem?.(inst.itemId));
       line.appendChild(prime);
     }
@@ -2593,16 +2608,6 @@ export class Hud {
     if (growth.health) parts.push(`+${growth.health} Health`);
     if (growth.timeUnits) parts.push(`+${growth.timeUnits} Time Units`);
     return parts;
-  }
-
-  private makeStat(parent: HTMLElement, label: string): HTMLElement {
-    const box = el("div", "stat");
-    const caption = el("span");
-    caption.textContent = label;
-    const value = el("b");
-    box.append(caption, value);
-    parent.appendChild(box);
-    return value;
   }
 
   private buildBriefing(): HTMLDivElement {
