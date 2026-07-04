@@ -148,6 +148,16 @@ export interface ActiveFlight {
   progress: number;
   speedDegPerHour: number;
   startedAtHour: number;
+  /**
+   * What this flight is for. Absent (or "patrol") means a legacy interceptor
+   * patrol/return leg; "deployment" is a non-blocking Skyranger run carrying the
+   * squad to a mission site — the globe stays live while it flies.
+   */
+  purpose?: "patrol" | "deployment";
+  /** For a deployment flight: the ufoContact id this run is assaulting. */
+  deployContactId?: string;
+  /** For a deployment flight: true once it reached the site and is awaiting the player's DEPLOY click. */
+  arrived?: boolean;
 }
 
 export interface UfoContact {

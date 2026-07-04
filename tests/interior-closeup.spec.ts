@@ -1,6 +1,6 @@
 /** Throwaway: dive into a facility interior and capture it. */
 import path from "node:path";
-import { test } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 import { createCampaign } from "../src/campaign/storage";
 import type { BaseLocation, CampaignState } from "../src/campaign/types";
 
@@ -20,6 +20,9 @@ test("capture a facility interior (dive)", async ({ page }) => {
   // deterministic test hook (mirrors an on-canvas facility click + camera dive).
   await page.evaluate(() => window.__baseEnterRoom?.("lab"));
   await page.waitForTimeout(1300);
+  // The lab room body is now a research carousel (one project per slide + strip).
+  await expect(page.locator("#base-view .bs-carousel").first()).toBeVisible();
+  await expect(page.locator("#base-view .proj-title").first()).toBeVisible();
   await page.locator("#base-view canvas").first().screenshot({ path: path.join(SHOTS, "base-interior.png") });
   await page.screenshot({ path: path.join(SHOTS, "base-interior-full.png") });
 });

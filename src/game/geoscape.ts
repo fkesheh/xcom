@@ -59,7 +59,7 @@ import {
   ufoTypeInfo,
 } from "../campaign/geoscape";
 import { generateOperation } from "../campaign/operations";
-import { activeSoldiers, campaignObjectiveProgress, canBuildNewBase, canLaunchFinalAssault, chooseInterceptor, craftSpeedDegPerHour, DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR, deploymentSoldiers, DIFFICULTY_CONFIGS, highestRegionalPanic, MAX_EXTRA_BASES, NEW_BASE_COST, transportCraft } from "../campaign/storage";
+import { activeSoldiers, campaignObjectiveProgress, canBuildNewBase, canLaunchFinalAssault, chooseInterceptor, craftSpeedDegPerHour, DEFAULT_INTERCEPTOR_SPEED_DEG_PER_HOUR, deploymentSoldiers, DIFFICULTY_CONFIGS, highestRegionalPanic, MAX_EXTRA_BASES, NEW_BASE_COST } from "../campaign/storage";
 import {
   animateBeaconPulse,
   createEarthShaderMaterial,
@@ -128,6 +128,17 @@ interface GeoscapeOptions {
    */
   onLaunchMission?: () => void;
   /**
+   * A non-blocking deployment flight reached its mission site (progress >= 1). NAV
+   * (main.ts) persists `arrived: true` on that flight + saves so the DEPLOY chip
+   * survives reload. Presentation (toast + pulsing DEPLOY chip) stays here in B.
+   */
+  onDeploymentArrived?: (flightId: string) => void;
+  /**
+   * The player clicked the "DEPLOY — begin assault" chip. NAV enters the
+   * battlescape via startTactical — the ONLY path into battle, never automatic.
+   */
+  onBeginAssault?: (contactId: string) => void;
+  /**
    * Fires once per notable campaign event detected while time flows (UFO detected /
    * shot down / landed, funding + interception + mission reports, campaign won/lost).
    * NAV queues these and surfaces them as base-facility beacons + toasts when the
@@ -140,6 +151,38 @@ export interface GeoscapeTimeAction {
   label: string;
   hours: number;
   disabled: boolean;
+}
+
+/** Which left-edge chip's modal is open. */
+type GeoModalKind = "objective" | "contact" | "fleet" | "reports";
+
+/** Status-dot tone for a floating left-edge chip. */
+type GeoChipTone = "info" | "warn" | "danger" | "muted" | "done";
+
+/** A descriptor for one reconciled chip in the left-edge rail. */
+interface GeoChipDesc {
+  key: string;
+  icon: string;
+  label: string;
+  sub: string;
+  tone: GeoChipTone;
+  pulse?: boolean;
+  /** Extra static class (e.g. "geo-chip-deploy"); folded into the stable className. */
+  extraClass?: string;
+  /** Fire the one-shot enter animation (only when this key first appears / re-enters). */
+  enter?: boolean;
+  onClick: () => void;
+}
+
+/** A cached, reusable chip node whose text/tone/handler are mutated in place. */
+interface GeoChipHandle {
+  chip: HTMLButtonElement;
+  dot: HTMLSpanElement;
+  icon: HTMLSpanElement;
+  label: HTMLSpanElement;
+  sub: HTMLSpanElement;
+  className: string;
+  onClick: () => void;
 }
 
 const STYLE_ID = "blacksite-geoscape-style";
@@ -222,8 +265,6 @@ const PURSUIT_MAX_DRIFT_RAD = 0.14;
 const CHASE_TARGET_WEIGHT = 0.22;
 /** Per-frame ease factor pulling the orbit target toward its chase goal. */
 const CHASE_EASE = 0.05;
-/** Skyranger transport flight (base -> mission site) on mission launch, in milliseconds. */
-const DEPLOYMENT_FLIGHT_MS = 2800;
 /** Sampling resolution of the base->site Skyranger trajectory line. */
 const DEPLOYMENT_SEGMENTS = 32;
 /** Particles per interception impact burst (precomputed; no per-frame allocation). */
@@ -371,28 +412,180 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   border-radius: var(--ui-radius-sm) 0 0 0;
   background: linear-gradient(90deg, var(--ui-teal), transparent);
 }
-/* Left column is a flex stack that never runs off-screen: a fixed intro + a
-   scrollable card body (themed scrollbar from UI_BASE) so tall states scroll
-   instead of overflowing behind the speed bar. */
+/* Left edge is no longer a tall glass column. It is a transparent positioning
+   container holding a compact stat cluster and a rail of small floating chips
+   (each opens a modal). The globe behind it stays substantially unobstructed. */
 #geoscape .geo-left {
+  position: absolute;
+  z-index: var(--ui-z-panel);
   top: max(18px, env(safe-area-inset-top));
   left: max(18px, env(safe-area-inset-left));
   display: flex;
   flex-direction: column;
   gap: var(--ui-sp-3);
+  /* Compact one-line chip rail: kept comfortably under 260px so the pills read as
+     floating pills (not a column) and the globe stays maximally unobstructed. */
+  width: min(240px, calc(100vw - 28px));
   max-height: calc(100vh - 36px - 84px);
-  overflow: hidden;
+  pointer-events: none;
 }
-#geoscape .geo-left-body {
+#geoscape .geo-left > * { pointer-events: auto; }
+/* Instructional intro copy — only on the new-game screen (empty for a campaign). */
+#geoscape .geo-intro {
+  padding: var(--ui-sp-4);
+  border: 1px solid var(--ui-border-console);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-panel-glass);
+  box-shadow: var(--ui-glow-inner), var(--ui-shadow);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+#geoscape .geo-intro:empty { display: none; }
+/* Compact top-left stat cluster (console glass, tight padding). In normal flow
+   (NOT .geo-panel) so it stacks above the chip rail instead of overlaying it. */
+#geoscape .geo-stats-cluster {
+  padding: var(--ui-sp-3);
+  border: 1px solid var(--ui-border-console);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-panel-glass);
+  box-shadow: var(--ui-glow-inner), var(--ui-shadow);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+/* Floating chip rail: one-line pills, each opening a modal. */
+#geoscape .geo-chip-rail {
   display: flex;
   flex-direction: column;
   gap: var(--ui-sp-2);
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding-right: 2px;
 }
-#geoscape .geo-left-cards {
+#geoscape .geo-chip {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-sp-2);
+  width: 100%;
+  padding: var(--ui-sp-2) var(--ui-sp-3);
+  border: 1px solid var(--ui-border-console);
+  border-radius: var(--ui-radius-pill);
+  background: var(--ui-panel-glass);
+  box-shadow: var(--ui-glow-inner), var(--ui-shadow);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--ui-fast) var(--ui-ease), background var(--ui-fast) var(--ui-ease), transform var(--ui-fast) var(--ui-ease);
+}
+#geoscape .geo-chip:hover { border-color: var(--ui-border-bright); background: var(--ui-panel-raised); transform: translateX(2px); }
+#geoscape .geo-chip-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ui-cyan);
+  box-shadow: 0 0 6px currentColor;
+  color: var(--ui-cyan);
+}
+#geoscape .geo-chip-icon {
+  flex: 0 0 auto;
+  color: var(--ui-muted);
+  font: 700 var(--ui-text-sm)/1 var(--ui-font-mono);
+}
+#geoscape .geo-chip-text { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+#geoscape .geo-chip-label {
+  color: var(--ui-text);
+  font: 700 var(--ui-text-xs)/1.1 var(--ui-font-mono);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+#geoscape .geo-chip-sub {
+  color: var(--ui-muted);
+  font: 500 var(--ui-text-xs)/1.2 var(--ui-font-ui);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Tone maps only the status dot + a matching border tint, never the whole pill. */
+#geoscape .geo-chip--info .geo-chip-dot { background: var(--ui-cyan); color: var(--ui-cyan); }
+#geoscape .geo-chip--warn .geo-chip-dot { background: var(--ui-amber); color: var(--ui-amber); }
+#geoscape .geo-chip--warn { border-color: color-mix(in srgb, var(--ui-amber) 40%, var(--ui-border-console)); }
+#geoscape .geo-chip--danger .geo-chip-dot { background: var(--ui-red); color: var(--ui-red); }
+#geoscape .geo-chip--danger { border-color: color-mix(in srgb, var(--ui-red) 45%, var(--ui-border-console)); }
+#geoscape .geo-chip--done .geo-chip-dot { background: var(--ui-green); color: var(--ui-green); }
+#geoscape .geo-chip--muted .geo-chip-dot { background: var(--ui-muted); color: var(--ui-muted); box-shadow: none; }
+/* Arrival DEPLOY chip: red-livery pill that pulses to draw the eye. */
+#geoscape .geo-chip-deploy {
+  border-color: var(--ui-red);
+  background: var(--ui-panel-glass);
+}
+#geoscape .geo-chip-deploy .geo-chip-label { color: var(--ui-red); }
+#geoscape .geo-chip--pulse { animation: geo-chip-pulse 1.6s var(--ui-ease) infinite; }
+@keyframes geo-chip-pulse {
+  0%, 100% { box-shadow: var(--ui-glow-inner), 0 0 0 rgba(248,68,68,0); }
+  50% { box-shadow: var(--ui-glow-inner), 0 0 16px rgba(248,68,68,.6); }
+}
+/* 150ms slide+glow when a new UFO contact first appears (reducedMotion neutralized
+   by the UI_BASE prefers-reduced-motion reset). Fires only on the absent->present
+   contact-id transition, never every refresh. */
+#geoscape .geo-chip--enter { animation: geo-chip-in 150ms var(--ui-ease); }
+@keyframes geo-chip-in {
+  from { opacity: 0; transform: translateX(-10px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+/* Console-glass modal opened by a chip (dim backdrop, Esc / click-out closes). */
+#geoscape .geo-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: var(--ui-z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--ui-sp-6);
+  background: rgba(2, 6, 12, 0.62);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+  animation: geo-modal-fade var(--ui-fast) var(--ui-ease);
+}
+@keyframes geo-modal-fade { from { opacity: 0; } to { opacity: 1; } }
+#geoscape .geo-modal {
+  width: min(420px, calc(100vw - 40px));
+  max-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-panel-solid);
+  box-shadow: var(--ui-glow-inner), var(--ui-shadow);
+}
+#geoscape .geo-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ui-sp-3);
+  padding: var(--ui-sp-3) var(--ui-sp-4);
+  border-bottom: 1px solid var(--ui-border-console);
+}
+#geoscape .geo-modal-title {
+  margin: 0;
+  color: var(--ui-text);
+  font: 800 var(--ui-text-lg)/1 var(--ui-font-mono);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+#geoscape .geo-modal-close {
+  flex: 0 0 auto;
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-panel);
+  color: var(--ui-muted);
+  font: 700 var(--ui-text-base)/1 var(--ui-font-mono);
+  cursor: pointer;
+}
+#geoscape .geo-modal-close:hover { border-color: var(--ui-border-bright); color: var(--ui-text); }
+#geoscape .geo-modal-body {
+  padding: var(--ui-sp-4);
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: var(--ui-sp-3);
@@ -452,9 +645,9 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   color: var(--ui-muted);
   font: 600 var(--ui-text-xs)/var(--ui-leading) var(--ui-font-mono);
 }
-/* Live-contact card: red-bordered alert on the console-glass surface. Enters
-   with a 150ms slide+glow the moment a UFO is detected (see .geo-contact--enter),
-   which only fires on the absent->present transition, never every refresh. */
+/* Live-contact card: red-bordered alert on the console-glass surface, rendered
+   inside the Contact chip's modal. The absent->present entrance now animates the
+   Contact chip itself (.geo-chip--enter), not this card. */
 #geoscape .geo-contact {
   padding: var(--ui-sp-3);
   border: 1px solid var(--ui-red);
@@ -516,24 +709,6 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   color: var(--ui-muted);
   font-size: var(--ui-text-xs);
   white-space: nowrap;
-}
-/* 150ms slide + glow entrance when a contact first appears. reducedMotion is
-   neutralized by the UI_BASE media query. */
-#geoscape .geo-contact--enter {
-  animation: geo-contact-in 150ms var(--ui-ease);
-}
-@keyframes geo-contact-in {
-  from {
-    opacity: 0;
-    transform: translateY(-8px);
-    box-shadow: 0 0 0 rgba(251,113,133,0);
-  }
-  60% { box-shadow: 0 0 16px rgba(251,113,133,.55); }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-    box-shadow: var(--ui-glow-inner);
-  }
 }
 /* Objective card is the visually primary element of the left column: a teal
    accent rail + brighter title, so hierarchy reads by luminance, not more color. */
@@ -1076,25 +1251,6 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   15% { opacity: 1; transform: translate(-50%, -55%) scale(1.05); }
   100% { opacity: 0; transform: translate(-50%, -140%) scale(1); }
 }
-#geoscape .geo-deploy {
-  align-items: center;
-  justify-content: center;
-}
-#geoscape .geo-deploy-panel {
-  width: min(420px, calc(100vw - 48px));
-  padding: var(--ui-sp-4);
-  border: 1px solid var(--ui-border-strong);
-  border-radius: var(--ui-radius-lg);
-  background: var(--ui-panel-solid);
-  box-shadow: var(--ui-shadow);
-  text-align: center;
-}
-#geoscape .geo-deploy-panel .eyebrow { color: var(--ui-cyan); }
-#geoscape .geo-deploy-panel h2 { color: var(--ui-text); margin-bottom: 6px; }
-#geoscape .geo-deploy-panel p { color: var(--ui-muted); font-size: var(--ui-text-base); }
-#geoscape .geo-deploy-panel .geo-bar { margin: 12px 0 0; text-align: left; }
-#geoscape .geo-deploy-actions { display: flex; gap: 8px; margin-top: 14px; }
-#geoscape .geo-deploy-actions button { flex: 1; }
 #geoscape .geo-threat-tag {
   display: inline-flex;
   align-items: center;
@@ -1173,7 +1329,7 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
 }
 @media (max-width: 820px) {
   #geoscape .geo-panel { width: calc(100vw - 24px); padding: var(--ui-sp-3); }
-  #geoscape .geo-left { left: 12px; right: 12px; }
+  #geoscape .geo-left { left: 12px; width: min(240px, calc(100vw - 24px)); }
   /* Lift the right panel above the centered speed bar so the two never overlap. */
   #geoscape .geo-right { left: 12px; right: 12px; bottom: calc(12px + 78px); }
   #geoscape h1 { font-size: 30px; }
@@ -1497,6 +1653,12 @@ export class GeoscapeView {
   private lastFlowMs = 0;
   /** Active speed buttons; aria-pressed refreshed whenever timeSpeed changes. */
   private speedButtons: HTMLButtonElement[] = [];
+  /** The Pause/1x/5x/30x speed group, built ONCE and reused across every tick.
+   *  refresh() runs on every time-flow tick (<=700ms); rebuilding these buttons each
+   *  tick detached them from under an in-flight click (a click landing between tick N's
+   *  replaceChildren and the pointerup was dropped), which froze the speed control
+   *  during a deployment transit. Cached in place, the nodes survive every refresh. */
+  private speedGroup: HTMLDivElement | null = null;
   /** Cached base->UFO great-circle route for the current engagement target. */
   private interceptorRoute: { baseN: Vector3; ufoN: Vector3; contactId: string } | null = null;
   /** Directional sun light; orbited each frame by updateTerminator for the day/night cycle. */
@@ -1541,7 +1703,10 @@ export class GeoscapeView {
   // Dynamic DOM containers populated by refresh() (static shell lives in buildHud()).
   private readonly statsGrid: HTMLDivElement;
   private readonly noticeSlot: HTMLDivElement;
-  private readonly cardsSlot: HTMLDivElement;
+  /** New-game instructional copy; empty for a live campaign. */
+  private readonly introSlot: HTMLDivElement;
+  /** Floating left-edge chip rail (Objective/Contact/Fleet/Reports + DEPLOY). */
+  private readonly chipRail: HTMLDivElement;
   private readonly actionsSlot: HTMLDivElement;
   private readonly overlaySlot: HTMLDivElement;
   private readonly toast: HTMLDivElement;
@@ -1561,6 +1726,10 @@ export class GeoscapeView {
   private readonly onKeydown = (e: KeyboardEvent): void => {
     if (e.key === "Escape" && this.helpOverlay?.classList.contains("show")) {
       this.toggleHelp(false);
+      return;
+    }
+    if (e.key === "Escape" && this.openModalKind) {
+      this.closeGeoModal();
     }
   };
 
@@ -1646,25 +1815,33 @@ export class GeoscapeView {
   private threatFlash: HTMLDivElement | null = null;
   private threatFlashTimer: number | undefined;
 
-  // --- Skyranger deployment flight (staged on mission launch) ---
-  /** Inbound: the transport is animating from base to the mission site. */
-  private deploying = false;
-  /** Arrived: a Deploy/Wait choice overlay is open (time frozen until the pick). */
-  private deployArrived = false;
-  /** Wait chosen: the transport loiters at the site, time flows, deploy on demand. */
-  private loitering = false;
-  /** Time-flow speed before the deployment pause; restored on Wait to resume flow. */
-  private preDeploySpeed = 0;
-  private deploymentFlight: {
-    baseN: Vector3;
-    siteN: Vector3;
-    region: string;
-    craftName: string;
-    startMs: number;
-    onDeployed: () => void;
-  } | null = null;
-  private readonly skyrangerMarker = new Group();
+  // --- Non-blocking Skyranger deployment ---
+  /**
+   * Deployment flights now live in campaign.activeFlights (purpose "deployment")
+   * and render through the pooled flight markers while time stays live — no
+   * blocking overlay, no time-lock. This line draws the planned base->site
+   * great-circle route for the active deployment flight.
+   */
   private deploymentLine!: Line;
+  /** Flight ids we have already fired onDeploymentArrived for (guards a double-fire before the arrived flag persists). */
+  private readonly deployArrivedFired = new Set<string>();
+
+  // --- Left-edge chip rail (reconciled in place; nodes are reused across ticks) ---
+  // refresh() runs on every time-flow tick (every <=700ms). Rebuilding the chip
+  // <button>s each tick restarted the DEPLOY chip's pulse animation (so it never
+  // visibly pulsed) and swallowed clicks whose mousedown landed on a node that a
+  // tick then replaced. So chips are cached by key and mutated in place; only text,
+  // tone class, and the click callback change — the node identity is stable.
+  private readonly chipCache = new Map<string, GeoChipHandle>();
+  // Persistent primary CTA reused across contact-modal rebuilds so a click whose
+  // mousedown/mouseup straddle a refresh tick is not dropped (the node survives).
+  private launchCta: HTMLButtonElement | null = null;
+
+  // --- Left-edge chip modal (one open at a time; Esc / click-out closes) ---
+  private modalBackdrop: HTMLDivElement | null = null;
+  private modalTitleEl: HTMLElement | null = null;
+  private modalBodySlot: HTMLDivElement | null = null;
+  private openModalKind: GeoModalKind | null = null;
 
   // --- Active-flight markers (interceptors/transports flying across the globe) ---
   /** Pooled marker + trail per active flight, keyed by flight id (built/disposed on lifecycle). */
@@ -1712,7 +1889,8 @@ export class GeoscapeView {
     this.confirmButton = panels.confirm;
     this.statsGrid = panels.statsGrid;
     this.noticeSlot = panels.noticeSlot;
-    this.cardsSlot = panels.cardsSlot;
+    this.introSlot = panels.introSlot;
+    this.chipRail = panels.chipRail;
     this.actionsSlot = panels.actionsSlot;
     this.overlaySlot = panels.overlaySlot;
     this.toast = panels.toast;
@@ -1774,12 +1952,9 @@ export class GeoscapeView {
     this.controls.dispose();
     disposeObject(this.scene);
     this.renderer.dispose();
+    this.closeGeoModal();
     this.root.remove();
-    // Drop any in-flight deployment callback/state so a torn-down view can't fire it.
-    this.deploymentFlight = null;
-    this.deploying = false;
-    this.deployArrived = false;
-    this.loitering = false;
+    this.deployArrivedFired.clear();
     this.damageLayer = null;
   }
 
@@ -2091,29 +2266,24 @@ export class GeoscapeView {
     confirm: HTMLButtonElement;
     statsGrid: HTMLDivElement;
     noticeSlot: HTMLDivElement;
-    cardsSlot: HTMLDivElement;
+    introSlot: HTMLDivElement;
+    chipRail: HTMLDivElement;
     actionsSlot: HTMLDivElement;
     overlaySlot: HTMLDivElement;
     toast: HTMLDivElement;
     speedBar: HTMLDivElement;
   } {
-    const left = el("section", "geo-panel geo-left");
-    const eyebrow = el("div", "eyebrow");
-    eyebrow.textContent = "Blacksite global command";
-    const title = el("h1");
-    title.textContent = "Earth Command";
-    const copy = el("p");
-    copy.textContent = this.opts.campaign
-      ? "A clandestine base is established. Advance time to detect UFO contacts, then return to base to launch."
-      : "Select a first base site on the globe. This will become the permanent command center for the campaign.";
+    // Left edge is no longer a tall glass column: a compact stat cluster plus a
+    // rail of small floating chips (each opens a modal). The globe stays clear.
+    const left = el("section", "geo-left");
+    // Instructional copy — only on the new-game screen; a live campaign shows none.
+    const introSlot = el("div", "geo-intro");
+    const statsCluster = el("div", "geo-stats-cluster");
     const statsGrid = el("div", "geo-status");
+    statsCluster.append(statsGrid);
     const noticeSlot = el("div");
-    const cardsSlot = el("div", "geo-left-cards");
-    // Fixed intro (eyebrow/title/copy/stat strip) + scrollable card body so a
-    // tall state scrolls inside the column instead of overflowing off-screen.
-    const leftBody = el("div", "geo-left-body");
-    leftBody.append(noticeSlot, cardsSlot);
-    left.append(eyebrow, title, copy, statsGrid, leftBody);
+    const chipRail = el("div", "geo-chip-rail");
+    left.append(introSlot, statsCluster, noticeSlot, chipRail);
     this.root.appendChild(left);
 
     const right = el("section", "geo-panel geo-right");
@@ -2166,7 +2336,7 @@ export class GeoscapeView {
     this.welcomeBanner = this.buildWelcomeBanner();
     this.root.appendChild(this.welcomeBanner);
 
-    return { region, coords, confirm, statsGrid, noticeSlot, cardsSlot, actionsSlot, overlaySlot, toast, speedBar };
+    return { region, coords, confirm, statsGrid, noticeSlot, introSlot, chipRail, actionsSlot, overlaySlot, toast, speedBar };
   }
 
   /**
@@ -2179,13 +2349,16 @@ export class GeoscapeView {
     this.refreshForcedPause();
     this.refreshStats();
     this.refreshNotice();
-    this.refreshCards();
+    this.refreshIntro();
+    this.refreshDeploymentArrival();
+    this.refreshChips();
     this.refreshActions();
     this.refreshOverlay();
     this.refreshMarkers();
     this.refreshInterceptor();
     this.refreshSpeedState();
     this.refreshHint();
+    this.refreshOpenModal();
     this.applyCanvasCursor();
   }
 
@@ -2233,8 +2406,9 @@ export class GeoscapeView {
 
   /** Force pause whenever an overlay is up or the campaign is no longer active. */
   private refreshForcedPause(): void {
-    if ((this.deploying || this.deployArrived) && this.timeSpeed !== 0) this.setTimeSpeed(0);
-    else if (this.isEngaging() && this.timeSpeed !== 0) this.setTimeSpeed(0);
+    // Deployment no longer freezes time — the Skyranger flies while the globe stays
+    // live. Only an active interception encounter or a finished campaign pauses.
+    if (this.isEngaging() && this.timeSpeed !== 0) this.setTimeSpeed(0);
     else if (this.campaign && this.campaign.strategic.status !== "active" && this.timeSpeed !== 0) {
       this.setTimeSpeed(0);
     }
@@ -2253,9 +2427,7 @@ export class GeoscapeView {
     const interactive =
       !!this.campaign &&
       this.campaign.strategic.status === "active" &&
-      !this.isEngaging() &&
-      !this.deploying &&
-      !this.deployArrived;
+      !this.isEngaging();
     for (const btn of this.speedButtons) {
       const speed = Number(btn.dataset.speed);
       btn.setAttribute("aria-pressed", String(this.timeSpeed === speed));
@@ -2407,24 +2579,293 @@ export class GeoscapeView {
     this.noticeSlot.replaceChildren(...(notice ? [notice] : []));
   }
 
-  private refreshCards(): void {
-    this.cardsSlot.replaceChildren();
-    if (!this.campaign) {
-      announcedContactId = null;
+  /** New-game instructional copy in the left column; empty for a live campaign. */
+  private refreshIntro(): void {
+    if (this.campaign) {
+      this.introSlot.replaceChildren();
       return;
     }
-    // Contact card enters with a 150ms slide+glow, but ONLY when a UFO id we have not
-    // announced yet appears — never re-firing every refresh while time flows, and never
-    // on a view remount for a contact that was already on screen (persisted by id).
-    const contact = this.contactCard();
-    const contactId = this.campaign.ufoContact?.id ?? null;
-    if (contactId && contactId !== announcedContactId) contact.classList.add("geo-contact--enter");
+    const eyebrow = el("div", "eyebrow");
+    eyebrow.textContent = "Blacksite global command";
+    const title = el("h1");
+    title.textContent = "Earth Command";
+    const copy = el("p");
+    copy.textContent =
+      "Select a first base site on the globe. This becomes the permanent command center for the campaign.";
+    this.introSlot.replaceChildren(eyebrow, title, copy);
+  }
+
+  /**
+   * Rebuild the floating left-edge chip rail. A live campaign shows one-line pills
+   * — Objective / Contact / Fleet / Reports — each opening a console-glass modal
+   * with the detail that used to fill the tall column. The DEPLOY chip is prepended
+   * when a Skyranger has reached its site (see refreshDeploymentArrival).
+   */
+  private refreshChips(): void {
+    const c = this.campaign;
+    if (!c) {
+      announcedContactId = null;
+      this.syncChipRail([]);
+      return;
+    }
+
+    const descs: GeoChipDesc[] = [];
+
+    // DEPLOY chip: a deployment flight on station (arrived flag or progress >= 1).
+    // The critical softlock guard (campaign/geoscape.ts) keeps a deployment flight
+    // only while its deployContactId still matches a live contact, so an arrived
+    // flight's contact is present here — but we still label by (and fire on) the
+    // FLIGHT's own destination contact id, never a live-contact fallback, so a
+    // version-skewed / mid-reload frame can never begin an assault against a UFO the
+    // Skyranger never flew to.
+    const arrivedDeploy = (c.activeFlights ?? []).find(
+      (f) => f.purpose === "deployment" && (f.arrived === true || f.progress >= 1),
+    );
+    if (arrivedDeploy && arrivedDeploy.deployContactId) {
+      const targetId = arrivedDeploy.deployContactId;
+      const flightContact = c.ufoContact?.id === targetId ? c.ufoContact : undefined;
+      const region = flightContact?.region ?? "mission site";
+      descs.push({
+        key: "deploy",
+        icon: "✈",
+        label: "Deploy — begin assault",
+        sub: `Skyranger on station · ${region}`,
+        tone: "danger",
+        pulse: true,
+        extraClass: "geo-chip-deploy",
+        onClick: () => this.opts.onBeginAssault?.(targetId),
+      });
+    }
+
+    // Objective chip.
+    const objective = campaignObjectiveProgress(c);
+    descs.push({
+      key: "objective",
+      icon: "◎",
+      label: "Objective",
+      sub: `${objective.completed}/${objective.required} cores · ${formatPercent(objective.percent)}`,
+      tone: objective.status === "active" ? "info" : "done",
+      onClick: () => this.openGeoModal("objective"),
+    });
+
+    // Contact chip — pulses once when a new UFO id first appears.
+    const contact = c.ufoContact;
+    const contactId = contact?.id ?? null;
+    const lostAtSea = !!contact && contact.status === "crashed" && !!contact.overOcean;
+    const contactTone: GeoChipTone = !contact
+      ? "muted"
+      : contact.status === "crashed" || contact.status === "landed"
+        ? lostAtSea
+          ? "muted"
+          : "warn"
+        : "danger";
+    const contactEnter = !!contactId && contactId !== announcedContactId;
     announcedContactId = contactId;
-    // Everything after the primary objective + live contact collapses into a
-    // single quiet hairline-separated list of rows.
-    const rows = el("div", "geo-rows");
-    rows.append(this.aircraftCard(), this.projectCard(), this.councilCard(), this.fundingCard());
-    this.cardsSlot.append(this.objectiveCard(), contact, rows);
+    descs.push({
+      key: "contact",
+      icon: contact ? "⚠" : "◌",
+      label: "Contact",
+      sub: contact ? this.contactStatusLabel(contact) : "No UFO — radar sweeping",
+      tone: contactTone,
+      enter: contactEnter,
+      onClick: () => this.openGeoModal("contact"),
+    });
+
+    // Fleet chip — interceptor readiness.
+    const repairedAt = c.interceptor.repairedAtHour;
+    const repairing = repairedAt !== undefined && repairedAt > c.clock.elapsedHours;
+    descs.push({
+      key: "fleet",
+      icon: "✦",
+      label: "Fleet",
+      sub: repairing
+        ? `Interceptor repair · ${formatHours(repairedAt - c.clock.elapsedHours)}`
+        : "Interceptor ready",
+      tone: repairing ? "warn" : "info",
+      onClick: () => this.openGeoModal("fleet"),
+    });
+
+    // Reports chip — council + funding + project digest.
+    const panic = highestRegionalPanic(c);
+    const fundingReport = c.lastFundingReport;
+    descs.push({
+      key: "reports",
+      icon: "▤",
+      label: "Reports",
+      sub: fundingReport ? `Funding #${fundingReport.reportNumber} filed` : "Awaiting first council transfer",
+      tone: panic.panic >= 75 ? "warn" : "info",
+      onClick: () => this.openGeoModal("reports"),
+    });
+
+    this.syncChipRail(descs);
+  }
+
+  /**
+   * Reconcile the chip rail against `descs` WITHOUT recreating nodes: reuse each
+   * cached chip by key (mutating only text / tone class / handler), create missing
+   * ones, drop stale ones, and reorder to match. Reusing nodes keeps the DEPLOY
+   * chip's pulse animation running (a stable className string never restarts it) and
+   * lets a click survive a mid-gesture refresh tick.
+   */
+  private syncChipRail(descs: GeoChipDesc[]): void {
+    const seen = new Set<string>();
+    descs.forEach((desc, i) => {
+      seen.add(desc.key);
+      let handle = this.chipCache.get(desc.key);
+      if (!handle) {
+        handle = this.createChipHandle();
+        this.chipCache.set(desc.key, handle);
+      }
+      this.applyChipDesc(handle, desc);
+      const atPos = this.chipRail.children[i];
+      if (atPos !== handle.chip) this.chipRail.insertBefore(handle.chip, atPos ?? null);
+    });
+    for (const [key, handle] of this.chipCache) {
+      if (!seen.has(key)) {
+        handle.chip.remove();
+        this.chipCache.delete(key);
+      }
+    }
+  }
+
+  /** Build a fresh reusable chip node with one stable click listener. */
+  private createChipHandle(): GeoChipHandle {
+    const chip = el("button", "geo-chip");
+    chip.type = "button";
+    const dot = el("span", "geo-chip-dot");
+    const icon = el("span", "geo-chip-icon");
+    const text = el("span", "geo-chip-text");
+    const label = el("span", "geo-chip-label");
+    const sub = el("span", "geo-chip-sub");
+    text.append(label, sub);
+    chip.append(dot, icon, text);
+    const handle: GeoChipHandle = { chip, dot, icon, label, sub, className: "", onClick: () => {} };
+    // One listener for the node's whole lifetime — indirects through handle.onClick,
+    // which each refresh points at a fresh closure over live state.
+    chip.addEventListener("click", () => handle.onClick());
+    return handle;
+  }
+
+  /** Mutate a cached chip's text / tone / handler in place; never recreate the node. */
+  private applyChipDesc(handle: GeoChipHandle, desc: GeoChipDesc): void {
+    if (handle.icon.textContent !== desc.icon) handle.icon.textContent = desc.icon;
+    if (handle.label.textContent !== desc.label) handle.label.textContent = desc.label;
+    if (handle.sub.textContent !== desc.sub) handle.sub.textContent = desc.sub;
+    handle.chip.title = `${desc.label}: ${desc.sub}`;
+    handle.onClick = desc.onClick;
+    // Stable className string (deterministic order) so an unchanged tone/pulse never
+    // reassigns className identically-but-restarts nothing; the pulse animation lives
+    // on geo-chip--pulse and survives because the class list does not change.
+    const base = `geo-chip geo-chip--${desc.tone}${desc.pulse ? " geo-chip--pulse" : ""}${
+      desc.extraClass ? ` ${desc.extraClass}` : ""
+    }`;
+    if (handle.className !== base) {
+      handle.className = base;
+      handle.chip.className = base;
+    }
+    // One-shot enter animation: retrigger by removing + reflowing + re-adding.
+    if (desc.enter) {
+      handle.chip.classList.remove("geo-chip--enter");
+      void handle.chip.offsetWidth;
+      handle.chip.classList.add("geo-chip--enter");
+    }
+  }
+
+  /**
+   * Detect a non-blocking deployment flight reaching its site (progress >= 1) and
+   * fire onDeploymentArrived + a toast exactly once. The DEPLOY chip is rendered by
+   * refreshChips from the same arrived condition, so it appears on the same frame.
+   */
+  private refreshDeploymentArrival(): void {
+    const flights = this.campaign?.activeFlights ?? [];
+    for (const flight of flights) {
+      if (flight.purpose !== "deployment") continue;
+      if (flight.progress < 1) continue;
+      if (flight.arrived === true || this.deployArrivedFired.has(flight.id)) continue;
+      this.deployArrivedFired.add(flight.id);
+      // Label by the flight's own destination contact, not whatever contact is live
+      // now (they can differ if the original expired and a new one spawned).
+      const live = this.campaign?.ufoContact;
+      const region =
+        live && live.id === flight.deployContactId ? live.region : "the mission site";
+      this.showToast({
+        kind: "info",
+        text: `Skyranger on station over ${region} — deploy to begin the assault.`,
+        alertKind: "ufoLanded",
+      });
+      this.opts.onDeploymentArrived?.(flight.id);
+    }
+  }
+
+  /** Open a console-glass modal for the given chip (dim backdrop, Esc / click-out close). */
+  private openGeoModal(kind: GeoModalKind): void {
+    if (!this.campaign) return;
+    this.closeGeoModal();
+    const backdrop = el("div", "geo-modal-backdrop");
+    const modal = el("div", "geo-modal");
+    const head = el("div", "geo-modal-head");
+    const title = el("h2", "geo-modal-title");
+    const close = el("button", "geo-modal-close");
+    close.type = "button";
+    close.textContent = "✕";
+    close.setAttribute("aria-label", "Close");
+    close.addEventListener("click", () => this.closeGeoModal());
+    head.append(title, close);
+    const body = el("div", "geo-modal-body");
+    modal.append(head, body);
+    backdrop.append(modal);
+    backdrop.addEventListener("click", (e: MouseEvent) => {
+      if (e.target === backdrop) this.closeGeoModal();
+    });
+    this.root.appendChild(backdrop);
+    this.modalBackdrop = backdrop;
+    this.modalTitleEl = title;
+    this.modalBodySlot = body;
+    this.openModalKind = kind;
+    this.refreshOpenModal();
+  }
+
+  private closeGeoModal(): void {
+    this.modalBackdrop?.remove();
+    this.modalBackdrop = null;
+    this.modalTitleEl = null;
+    this.modalBodySlot = null;
+    this.openModalKind = null;
+  }
+
+  /** Rebuild the open modal's live content each refresh so it never goes stale. */
+  private refreshOpenModal(): void {
+    const kind = this.openModalKind;
+    if (!kind || !this.modalBodySlot || !this.modalTitleEl) return;
+    if (!this.campaign) {
+      this.closeGeoModal();
+      return;
+    }
+    const titles: Record<GeoModalKind, string> = {
+      objective: "Campaign objective",
+      contact: "UFO contact",
+      fleet: "Fleet status",
+      reports: "Council reports",
+    };
+    this.modalTitleEl.textContent = titles[kind];
+    this.modalBodySlot.replaceChildren(...this.buildModalBody(kind));
+  }
+
+  /** Full detail for a chip's modal — the content that used to fill the column. */
+  private buildModalBody(kind: GeoModalKind): HTMLElement[] {
+    switch (kind) {
+      case "objective":
+        return [this.objectiveCard()];
+      case "contact":
+        return [this.contactCard()];
+      case "fleet":
+        return [this.aircraftCard()];
+      case "reports": {
+        const rows = el("div", "geo-rows");
+        rows.append(this.councilCard(), this.fundingCard(), this.projectCard());
+        return [rows];
+      }
+    }
   }
 
   /**
@@ -2434,8 +2875,6 @@ export class GeoscapeView {
    */
   private refreshActions(): void {
     this.actionsSlot.replaceChildren();
-    this.speedBar.replaceChildren();
-    this.speedButtons = [];
     const c = this.campaign;
     const reset = el("button", "ui-btn");
     reset.textContent = c ? "New campaign" : "Reset";
@@ -2456,30 +2895,36 @@ export class GeoscapeView {
       back.addEventListener("click", () => this.opts.onBackToBase?.());
       this.actionsSlot.append(back);
     }
-    const speedGroup = el("div", "geo-speed");
-    speedGroup.setAttribute("role", "group");
-    speedGroup.setAttribute("aria-label", "Time speed");
-    for (const option of SPEED_OPTIONS) {
-      const btn = el("button", "geo-speed-btn");
-      btn.type = "button";
-      btn.dataset.speed = String(option.speed);
-      const icon = el("span", "geo-speed-icon");
-      icon.textContent = option.icon;
-      const label = el("span");
-      label.textContent = option.label;
-      btn.append(icon, label);
-      const hint = option.speed === 0
-        ? "time frozen — no events advance"
-        : option.speed === 1
-          ? "near real-time pace"
-          : "faster flow — events still auto-pause";
-      btn.title = `${option.label} — ${hint}`;
-      btn.setAttribute("aria-pressed", String(this.timeSpeed === option.speed));
-      btn.addEventListener("click", () => this.setTimeSpeed(option.speed));
-      speedGroup.append(btn);
-      this.speedButtons.push(btn);
+    // The speed group is built ONCE and reused across every tick (see field doc):
+    // rebuilding it each refresh detached the buttons mid-click and froze time control
+    // during a deployment transit. aria-pressed is synced separately by refreshSpeedState.
+    if (!this.speedGroup) {
+      const speedGroup = el("div", "geo-speed");
+      speedGroup.setAttribute("role", "group");
+      speedGroup.setAttribute("aria-label", "Time speed");
+      for (const option of SPEED_OPTIONS) {
+        const btn = el("button", "geo-speed-btn");
+        btn.type = "button";
+        btn.dataset.speed = String(option.speed);
+        const icon = el("span", "geo-speed-icon");
+        icon.textContent = option.icon;
+        const label = el("span");
+        label.textContent = option.label;
+        btn.append(icon, label);
+        const hint = option.speed === 0
+          ? "time frozen — no events advance"
+          : option.speed === 1
+            ? "near real-time pace"
+            : "faster flow — events still auto-pause";
+        btn.title = `${option.label} — ${hint}`;
+        btn.setAttribute("aria-pressed", String(this.timeSpeed === option.speed));
+        btn.addEventListener("click", () => this.setTimeSpeed(option.speed));
+        speedGroup.append(btn);
+        this.speedButtons.push(btn);
+      }
+      this.speedGroup = speedGroup;
+      this.speedBar.replaceChildren(speedGroup);
     }
-    this.speedBar.append(speedGroup);
     const can = canBuildNewBase(c);
     const build = el("button", this.buildMode ? "ui-btn ui-btn--danger" : "ui-btn");
     build.textContent = this.buildMode ? "Cancel build" : `Build base (${formatCredits(NEW_BASE_COST.credits)})`;
@@ -2494,21 +2939,16 @@ export class GeoscapeView {
     // The endgame's one urgent action: once the alien HQ is revealed and the
     // assault is unlocked, this takes priority over every other action — placed
     // first so it is unmissable the moment it becomes available.
-    if (canLaunchFinalAssault(c)) {
+    // The HQ assault shares the squad with a ground deployment: suppress it while a
+    // Skyranger is airborne/on-station so the player can't launch both (main.ts gates
+    // this at the model level too, but a hidden button beats a no-op one).
+    const deployInFlight = (c.activeFlights ?? []).some((f) => f.purpose === "deployment");
+    if (canLaunchFinalAssault(c) && !deployInFlight) {
       const assault = el("button", "primary ui-cta geo-assault-cta");
       assault.textContent = "ASSAULT ALIEN HQ";
       assault.title = "Launch the final decapitating strike on the alien homeworld base — victory ends the war.";
       assault.addEventListener("click", () => this.opts.onLaunchAssault?.());
       this.actionsSlot.prepend(assault);
-    }
-    if (this.loitering) {
-      // A Skyranger is on station: deploy on demand instead of offering a fresh
-      // launch/intercept (the squad is already inbound to this site).
-      const deploy = el("button", "primary ui-cta");
-      deploy.textContent = "Deploy squad";
-      deploy.addEventListener("click", () => this.deploySquad());
-      this.actionsSlot.append(deploy);
-      return;
     }
     if (c.ufoContact?.status === "tracked") {
       const intercept = el("button", "primary ui-cta");
@@ -2539,14 +2979,6 @@ export class GeoscapeView {
   }
 
   private refreshOverlay(): void {
-    if (this.deploying) {
-      this.overlaySlot.replaceChildren(this.buildDeploymentOverlay());
-      return;
-    }
-    if (this.deployArrived) {
-      this.overlaySlot.replaceChildren(this.buildDeployChoiceOverlay());
-      return;
-    }
     if (this.isEngaging()) {
       // Keep the live panel (with its button + beat state) mounted while a beat
       // plays; only sync the numbers. Rebuild otherwise (engagement start / after
@@ -2594,6 +3026,7 @@ export class GeoscapeView {
     if (c?.alienHq?.revealed) this.placeHqMarker(c.alienHq.location);
     else this.hqMarker.visible = false;
     this.refreshFlightMarkers();
+    this.refreshDeploymentRoute();
   }
 
   /**
@@ -2652,8 +3085,8 @@ export class GeoscapeView {
 
   /**
    * Small craft silhouette for an active flight: cyan dart for interceptors,
-   * slate transport for the Skyranger. Distinct from the engagement-only
-   * interceptorMarker / skyrangerMarker (these fly during normal time-flow).
+   * slate transport for the Skyranger (deployment runs render through this pool).
+   * Distinct from the engagement-only interceptorMarker used during interception.
    */
   private buildFlightMarker(kind: "interceptor" | "transport"): Group {
     const group = new Group();
@@ -2983,8 +3416,6 @@ export class GeoscapeView {
     const speed = this.timeSpeed;
     if (
       speed <= 0 ||
-      this.deploying ||
-      this.deployArrived ||
       !this.campaign ||
       this.campaign.strategic.status !== "active" ||
       this.isEngaging()
@@ -3646,8 +4077,6 @@ export class GeoscapeView {
     const speed = this.timeSpeed;
     if (
       speed <= 0 ||
-      this.deploying ||
-      this.deployArrived ||
       !this.campaign ||
       this.campaign.strategic.status !== "active" ||
       this.isEngaging()
@@ -3917,7 +4346,7 @@ export class GeoscapeView {
     marker.quaternion.setFromRotationMatrix(this.scratchBasis);
   }
 
-  /** Allocate the Skyranger transport marker + its base->site trajectory line once. */
+  /** Allocate the planned base->site route line for the active deployment flight once. */
   private buildDeploymentFx(): void {
     const positions = new Float32Array((DEPLOYMENT_SEGMENTS + 1) * 3);
     const geo = new BufferGeometry();
@@ -3928,62 +4357,6 @@ export class GeoscapeView {
     );
     this.deploymentLine.visible = false;
     this.earthGroup.add(this.deploymentLine);
-    this.buildSkyrangerMarker();
-    this.skyrangerMarker.visible = false;
-    this.earthGroup.add(this.skyrangerMarker);
-  }
-
-  /**
-   * Heavy-lift transport silhouette: a bulkier slate-green airframe with a green
-   * cargo stripe accent, distinct from the cyan interceptor and amber base cone.
-   * +Y is the nose (aligned by orientMarker along the travel tangent). The green
-   * livery is paired with the "Skyranger / Deploying squad" text in the overlay.
-   */
-  private buildSkyrangerMarker(): void {
-    const body = new MeshStandardMaterial({
-      color: 0xe2e8f0,
-      emissive: new Color(0x94a3b8),
-      emissiveIntensity: 0.8,
-      roughness: 0.4,
-      metalness: 0.5,
-    });
-    const fuselage = new Mesh(new CylinderGeometry(0.014, 0.02, 0.2, 8), body);
-    const nose = new Mesh(new ConeGeometry(0.014, 0.05, 8), body);
-    nose.position.y = 0.125;
-    const wingGeo = new BoxGeometry(0.1, 0.04, 0.007);
-    const wingR = new Mesh(wingGeo, body);
-    wingR.position.set(0.055, -0.02, 0);
-    wingR.rotation.z = -0.35;
-    const wingL = new Mesh(wingGeo, body);
-    wingL.position.set(-0.055, -0.02, 0);
-    wingL.rotation.z = 0.35;
-    const tail = new Mesh(new BoxGeometry(0.05, 0.006, 0.006), body);
-    tail.position.set(0, -0.09, 0);
-    const fin = new Mesh(new BoxGeometry(0.006, 0.035, 0.02), body);
-    fin.position.set(0, -0.075, 0.013);
-    const stripe = new Mesh(
-      new BoxGeometry(0.004, 0.16, 0.016),
-      new MeshStandardMaterial({
-        color: 0x4ade80,
-        emissive: new Color(0x22c55e),
-        emissiveIntensity: 1.2,
-        roughness: 0.3,
-        metalness: 0.3,
-      }),
-    );
-    stripe.position.set(0, 0.01, 0.006);
-    const ring = new Mesh(
-      new RingGeometry(0.07, 0.095, 20),
-      new MeshBasicMaterial({
-        color: 0xbbf7d0,
-        transparent: true,
-        opacity: 0.45,
-        side: DoubleSide,
-        blending: AdditiveBlending,
-      }),
-    );
-    ring.rotation.x = -Math.PI / 2;
-    this.skyrangerMarker.add(fuselage, nose, wingR, wingL, tail, fin, stripe, ring);
   }
 
   private fillDeploymentTrajectory(baseN: Vector3, siteN: Vector3): void {
@@ -4001,86 +4374,52 @@ export class GeoscapeView {
   }
 
   /**
-   * Stage the Skyranger deployment flight: fly a transport marker from the base to
-   * the mission site along a great-circle arc over DEPLOYMENT_FLIGHT_MS with a
-   * "Skyranger en route" overlay + trajectory line. On arrival the view shows a
-   * Deploy/Wait choice: Deploy invokes `onDeployed` (-> battlescape); Wait drops
-   * into a loiter so the player can deploy later (e.g. at dawn). Pauses time flow
-   * for the inbound flight + the choice.
+   * Draw the planned base->site route line for an active non-blocking deployment
+   * flight (the Skyranger itself flies via the pooled flight markers). Hidden when
+   * no deployment is in transit. Called from refreshMarkers each state refresh.
    */
-  playDeploymentFlight(campaign: CampaignState, onDeployed: () => void): void {
-    if (this.disposed) return;
-    const contact = campaign.ufoContact;
-    if (!contact) {
-      onDeployed();
+  private refreshDeploymentRoute(): void {
+    const flight = (this.campaign?.activeFlights ?? []).find((f) => f.purpose === "deployment");
+    if (!flight) {
+      this.deploymentLine.visible = false;
       return;
     }
-    const baseN = latLonToVector(campaign.base.lat, campaign.base.lon, 1).normalize();
-    const siteN = latLonToVector(contact.lat, contact.lon, 1).normalize();
+    const baseN = latLonToVector(flight.fromLat, flight.fromLon, 1).normalize();
+    const siteN = latLonToVector(flight.toLat, flight.toLon, 1).normalize();
     this.fillDeploymentTrajectory(baseN, siteN);
     this.deploymentLine.visible = true;
-    this.skyrangerMarker.visible = true;
-    this.deployArrived = false;
-    this.loitering = false;
-    this.preDeploySpeed = this.timeSpeed;
-    this.deploying = true;
-    this.setTimeSpeed(0);
-    this.deploymentFlight = {
-      baseN,
-      siteN,
-      region: contact.region,
-      craftName: transportCraft(campaign)?.name ?? "Skyranger",
-      startMs: performance.now(),
-      onDeployed,
-    };
-    this.refreshOverlay();
   }
 
   /**
-   * Advance the Skyranger along its arc. On arrival, surface a Deploy/Wait choice
-   * (Deploy -> onDeployed -> battlescape; Wait -> loiter at the site with time
-   * flowing). While loitering the transport holds at the site and a "Deploy squad"
-   * button is offered from the actions panel; if the contact expires meanwhile the
-   * loiter is abandoned back to normal time flow.
+   * Per-frame throb on a deployment flight's pooled marker: an on-station Skyranger
+   * (arrived) hovers with a gentle pulse so it reads as awaiting the DEPLOY order.
+   * reducedMotion holds it steady. In-transit markers keep their default scale.
    */
-  private updateDeployment(now: number): void {
-    const dep = this.deploymentFlight;
-    if (dep && this.deploying) {
-      const t = Math.min(1, (now - dep.startMs) / DEPLOYMENT_FLIGHT_MS);
-      slerpUnit(dep.baseN, dep.siteN, t, this.scratchA); // unit surface direction
-      this.skyrangerMarker.position.copy(this.scratchA).multiplyScalar(EARTH_RADIUS + 0.16);
-      this.orientMarker(this.skyrangerMarker, this.scratchA, dep.siteN);
-      this.skyrangerMarker.scale.setScalar(1 + (this.reducedMotion ? 0 : Math.sin(now * 0.01) * 0.12));
-      if (t >= 1) {
-        this.deploying = false;
-        this.showDeployChoice();
-      }
-      return;
-    }
-    if (dep && this.loitering) {
-      // The site vanished while loitering (contact expired): abandon the loiter.
-      if (!this.campaign?.ufoContact) {
-        this.cancelLoiter();
-        return;
-      }
-      // Hold at the site with a gentle hover; time flows so fuel burns / dawn breaks.
-      this.skyrangerMarker.position.copy(dep.siteN).multiplyScalar(EARTH_RADIUS + 0.16);
-      this.skyrangerMarker.scale.setScalar(1 + (this.reducedMotion ? 0 : Math.sin(now * 0.008) * 0.1));
+  private animateDeploymentMarkers(now: number): void {
+    const flights = this.campaign?.activeFlights ?? [];
+    for (const flight of flights) {
+      if (flight.purpose !== "deployment") continue;
+      const entry = this.flightMarkers.get(flight.id);
+      if (!entry) continue;
+      const arrived = flight.arrived === true || flight.progress >= 1;
+      const pulse = arrived && !this.reducedMotion ? 1 + Math.sin(now * 0.008) * 0.14 : 1;
+      entry.marker.scale.setScalar(pulse);
     }
   }
 
-  private buildDeploymentOverlay(): HTMLElement {
-    const overlay = el("div", "geo-overlay geo-deploy");
-    const panel = el("div", "geo-deploy-panel");
-    const eye = el("div", "eyebrow");
-    eye.textContent = `✈ ${this.deploymentFlight?.craftName ?? "Skyranger"} en route`;
-    const heading = el("h2");
-    heading.textContent = "Deploying squad";
-    const copy = el("p");
-    copy.textContent = `Inbound to ${this.deploymentFlight?.region ?? "mission site"}. Stand by for landing.`;
-    panel.append(eye, heading, copy);
-    overlay.append(panel);
-    return overlay;
+  /**
+   * Build the persistent "Launch Operation" CTA once. Its click listener lives for
+   * the node's whole lifetime and no-ops while disabled, so the node can be reused
+   * across every contact-modal rebuild without stacking listeners or dropping clicks.
+   */
+  private createLaunchCta(): HTMLButtonElement {
+    const launch = el("button", "primary ui-cta geo-launch-cta");
+    launch.type = "button";
+    launch.addEventListener("click", () => {
+      if (launch.disabled) return;
+      this.opts.onLaunchMission?.();
+    });
+    return launch;
   }
 
   /** Concise contact card: id, status instruction, region, time-left. Drops the prose. */
@@ -4150,11 +4489,10 @@ export class GeoscapeView {
     const launchable =
       active &&
       ((contact.status === "crashed" && !contact.overOcean) || contact.status === "landed");
-    // A Skyranger already inbound / on station owns the launch flow (the loiter
-    // "Deploy squad" button drives it). Re-showing "Launch Operation" here would let a
-    // second click restart playDeploymentFlight — teleporting the in-flight craft back
-    // to base and dropping the prior onDeployed closure — so suppress it while flying.
-    const flightInProgress = this.deploying || this.deployArrived || this.loitering;
+    // A Skyranger already inbound / on station owns the launch flow (its DEPLOY chip
+    // drives the assault). Re-showing "Launch Operation" here would append a second
+    // deployment flight to activeFlights, so suppress it while one is in transit.
+    const flightInProgress = (c?.activeFlights ?? []).some((f) => f.purpose === "deployment");
     if (launchable && this.opts.onLaunchMission && !flightInProgress) {
       const squad = c ? deploymentSoldiers(c).length : 0;
       const roster = c ? activeSoldiers(c).length : 0;
@@ -4163,8 +4501,10 @@ export class GeoscapeView {
       // to the operation informed, not blind (this info lived on the deleted base card).
       const briefing = this.contactBriefing();
       if (briefing) card.append(briefing);
-      const launch = el("button", "primary ui-cta geo-launch-cta");
-      launch.type = "button";
+      // Reuse ONE persistent CTA node across every modal rebuild (the contact modal
+      // body is replaceChildren'd each refresh tick). A fresh <button> each tick drops
+      // a click whose mousedown/mouseup straddle a tick; a stable node keeps it.
+      const launch = this.launchCta ?? (this.launchCta = this.createLaunchCta());
       if (squad === 0) {
         // No deployable squad: mirror the old base launch button's explanatory
         // disabled states instead of arming a CTA that would fly the Skyranger and
@@ -4176,9 +4516,9 @@ export class GeoscapeView {
             ? "Recruit operatives at the base before launching an operation."
             : "Assign operatives to the deployment at the base before launching.";
       } else {
+        launch.disabled = false;
         launch.textContent = "Launch Operation";
         launch.title = "Deploy the Skyranger and enter the battlescape on arrival.";
-        launch.addEventListener("click", () => this.opts.onLaunchMission?.());
       }
       card.append(launch);
     }
@@ -4347,70 +4687,6 @@ export class GeoscapeView {
     body.append(heading, copy);
     notice.append(icon, body);
     return notice;
-  }
-
-  /**
-   * Deploy/Wait choice shown when the Skyranger reaches the mission site. Deploy
-   * hands off to `onDeployed` (-> battlescape at the current time-of-day); Wait
-   * dismisses the choice and drops into a loiter so the player can deploy later
-   * (e.g. at dawn) while time flows and fuel burns.
-   */
-  private buildDeployChoiceOverlay(): HTMLElement {
-    const overlay = el("div", "geo-overlay geo-deploy");
-    const panel = el("div", "geo-deploy-panel");
-    const eye = el("div", "eyebrow");
-    eye.textContent = `✈ ${this.deploymentFlight?.craftName ?? "Skyranger"} on station`;
-    const heading = el("h2");
-    heading.textContent = "Deploy squad?";
-    const copy = el("p");
-    copy.textContent = `Arrived at ${this.deploymentFlight?.region ?? "mission site"}. Deploy now or wait for daylight.`;
-    const actions = el("div", "geo-deploy-actions");
-    const wait = el("button", "ui-btn");
-    wait.textContent = "Wait";
-    wait.addEventListener("click", () => this.waitAtSite());
-    const deploy = el("button", "primary ui-cta");
-    deploy.textContent = "Deploy";
-    deploy.addEventListener("click", () => this.deploySquad());
-    actions.append(wait, deploy);
-    panel.append(eye, heading, copy, actions);
-    overlay.append(panel);
-    return overlay;
-  }
-
-  /** Surface the Deploy/Wait choice on arrival; freeze time while the player decides. */
-  private showDeployChoice(): void {
-    this.deployArrived = true;
-    this.setTimeSpeed(0);
-    this.refreshOverlay();
-  }
-
-  /** Wait: dismiss the choice, loiter at the site, and resume time flow. */
-  private waitAtSite(): void {
-    this.deployArrived = false;
-    this.loitering = true;
-    this.setTimeSpeed(this.preDeploySpeed > 0 ? this.preDeploySpeed : 1);
-    this.refreshOverlay();
-  }
-
-  /** Deploy now (from the choice or the loiter button): invoke onDeployed -> battlescape. */
-  private deploySquad(): void {
-    const dep = this.deploymentFlight;
-    this.deployArrived = false;
-    this.loitering = false;
-    this.deploying = false;
-    this.deploymentFlight = null;
-    if (dep) dep.onDeployed(); // -> startTactical -> disposes this view mid-frame
-  }
-
-  /** Abandon a loiter when the contact vanishes: hide the transport, resume normal flow. */
-  private cancelLoiter(): void {
-    this.loitering = false;
-    this.deployArrived = false;
-    this.deploying = false;
-    this.deploymentFlight = null;
-    this.skyrangerMarker.visible = false;
-    this.deploymentLine.visible = false;
-    this.refresh();
   }
 
   private objectiveCard(): HTMLElement {
@@ -4662,10 +4938,7 @@ export class GeoscapeView {
     // onAdvanceTime may synchronously dispose+remount this view (current controller);
     // bail before touching the disposed renderer/controls in that case.
     if (this.disposed) return;
-    this.updateDeployment(now);
-    // Deployment arrival surfaces a Deploy/Wait choice (no dispose); Deploy later
-    // invokes onDeployed -> startTactical from a click, which disposes this view.
-    if (this.disposed) return;
+    this.animateDeploymentMarkers(now);
     this.updateTerminator();
     this.updateCityLights();
     this.updateAtmosphere();

@@ -1411,7 +1411,25 @@ function manageActiveFlights(
     }
     return [flight];
   });
-  const finalFlights = [...kept, ...converted].filter((flight) => flight.progress < 1);
+  // Patrol/return legs that reach their end (progress 1) are retired. A NON-BLOCKING
+  // deployment run is the exception: on arrival it stays on the globe (progress clamped
+  // to 1 by advanceFlightProgress) so the geoscape can detect the arrival, fire the
+  // toast, and dock the "DEPLOY — begin assault" chip. It is retired only when the
+  // mission it delivered resolves (recordMissionResult -> dropDeploymentFlights) OR —
+  // crucially — when the contact it targets vanishes: a UFO/crash site can expire while
+  // the transport is still in transit or loitering on-station. If we kept such a flight,
+  // the transport would be stranded forever, the DEPLOY chip would become a permanent
+  // dead button, and geoscape's `flightInProgress` launch-suppression would block EVERY
+  // future ground mission — a save-persisted softlock making the campaign unwinnable.
+  // So a deployment flight survives only while its deployContactId still matches the live
+  // contact; a stale (or version-skewed, id-less) deployment flight is dropped here.
+  const liveContactId = contact?.id;
+  const finalFlights = [...kept, ...converted].filter((flight) => {
+    if (flight.purpose === "deployment") {
+      return flight.deployContactId != null && flight.deployContactId === liveContactId;
+    }
+    return flight.progress < 1;
+  });
 
   // 6. Refuel crafts sitting in the hangar (no active flight) for the elapsed dt.
   const finalFleet = refuelAtBase(burnedFleet, finalFlights, dt);

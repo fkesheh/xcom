@@ -255,6 +255,60 @@ export function transportCraft(campaign: CampaignState): Craft | undefined {
   return (campaign.fleet ?? []).find((craft) => craft.kind === "transport");
 }
 
+/** Id prefix for a non-blocking deployment run: `deploy:<craftId>:<contactId>`. */
+export const DEPLOY_ID_PREFIX = "deploy:";
+
+/**
+ * Launch a NON-BLOCKING deployment: appends a `purpose:"deployment"` ActiveFlight
+ * for the transport, flying the base -> contact great-circle arc. The globe stays
+ * live while it flies (unlike the old blocking deployment overlay); on arrival the
+ * geoscape flags it `arrived` and offers a DEPLOY chip. Pure/additive — returns a
+ * new CampaignState with the flight appended. No-op (returns campaign unchanged) if
+ * the contact is unknown or a deployment for it is already in flight.
+ */
+export function launchDeploymentFlight(campaign: CampaignState, contactId: string): CampaignState {
+  const contact = campaign.ufoContact?.id === contactId ? campaign.ufoContact : undefined;
+  if (!contact) return campaign;
+  const flights = campaign.activeFlights ?? [];
+  const flightId = `${DEPLOY_ID_PREFIX}${contactId}`;
+  if (flights.some((flight) => flight.id === flightId)) return campaign;
+  const transport = transportCraft(campaign);
+  const craftId = transport?.id ?? "sky-1";
+  const speedDegPerHour = transport
+    ? craftSpeedDegPerHour(transport)
+    : DEFAULT_TRANSPORT_SPEED_DEG_PER_HOUR;
+  const flight: ActiveFlight = {
+    id: flightId,
+    craftId,
+    kind: "transport",
+    fromLat: campaign.base.lat,
+    fromLon: campaign.base.lon,
+    toLat: contact.lat,
+    toLon: contact.lon,
+    progress: 0,
+    speedDegPerHour,
+    startedAtHour: campaign.clock.elapsedHours,
+    purpose: "deployment",
+    deployContactId: contactId,
+    arrived: false,
+  };
+  return { ...campaign, activeFlights: [...flights, flight] };
+}
+
+/**
+ * Removes every deployment-purpose flight from an active-flight roster, preserving
+ * interceptor patrols. Returns undefined for an empty result to match the fresh /
+ * normalized "no flights" shape. Used to retire the squad's Skyranger run once its
+ * mission resolves.
+ */
+export function dropDeploymentFlights(
+  flights: readonly ActiveFlight[] | undefined,
+): ActiveFlight[] | undefined {
+  if (!flights || flights.length === 0) return undefined;
+  const kept = flights.filter((flight) => flight.purpose !== "deployment");
+  return kept.length > 0 ? kept : undefined;
+}
+
 /**
  * Repair-duration for a damaged craft, matching the legacy interceptor formula: longer
  * for heavier damage, shortened by a workshop. Duplicated from geoscape.interceptorRepairHours
@@ -2213,6 +2267,11 @@ export function recordMissionResult(
     // contact — completing it must not erase an unrelated live contact. Every
     // other operation consumes the contact it was launched against.
     ufoContact: operation.missionType === "alienBaseAssault" ? campaign.ufoContact : undefined,
+    // The non-blocking deployment run that carried the squad here is done once the
+    // mission resolves — clear it so an arrived Skyranger (and its DEPLOY chip) does
+    // not linger on the globe pointing at a now-consumed contact. Interceptor patrols
+    // are independent air ops and are left untouched.
+    activeFlights: dropDeploymentFlights(campaign.activeFlights),
     strategic,
     regionalPanic,
     resources,
@@ -3006,6 +3065,11 @@ function normalizeActiveFlight(value: unknown): ActiveFlight | undefined {
     progress: Math.max(0, Math.min(1, maybe.progress)),
     speedDegPerHour: Math.max(0, maybe.speedDegPerHour),
     startedAtHour: Math.max(0, maybe.startedAtHour),
+    // Non-blocking deployment fields (additive-optional). Only reconstruct a
+    // deployment run's markers — a legacy patrol has none of these and stays a patrol.
+    ...(maybe.purpose === "deployment" ? { purpose: "deployment" as const } : {}),
+    ...(typeof maybe.deployContactId === "string" ? { deployContactId: maybe.deployContactId } : {}),
+    ...(typeof maybe.arrived === "boolean" ? { arrived: maybe.arrived } : {}),
   };
 }
 

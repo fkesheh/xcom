@@ -6,7 +6,7 @@ import {
   createUfoContact,
   startInterceptionEncounter,
 } from "../src/campaign/geoscape";
-import { createCampaign, loadCampaign, saveCampaign } from "../src/campaign/storage";
+import { createCampaign, launchDeploymentFlight, loadCampaign, saveCampaign } from "../src/campaign/storage";
 import type { CampaignSoldier, CampaignState } from "../src/campaign/types";
 
 const BASE = { lat: 2, lon: 14.2, region: "Africa" } as const;
@@ -156,5 +156,50 @@ describe("campaign save/load normalization", () => {
     const loaded = loadCampaign();
 
     expect(loaded!.soldiers.every((s) => s.bio === undefined)).toBe(true);
+  });
+
+  it("preserves an in-flight deployment run (purpose/deployContactId/arrived) across save/load", () => {
+    const campaign = freshCampaign();
+    const contact = createUfoContact(campaign, 18, "crashSite");
+    const launched = launchDeploymentFlight({ ...campaign, ufoContact: contact }, contact.id);
+    // Simulate an ARRIVED deployment awaiting the player's DEPLOY click.
+    const arrived = {
+      ...launched,
+      activeFlights: (launched.activeFlights ?? []).map((f) =>
+        f.purpose === "deployment" ? { ...f, progress: 1, arrived: true } : f,
+      ),
+    };
+    saveCampaign(arrived);
+
+    const loaded = loadCampaign();
+    const flight = loaded!.activeFlights?.find((f) => f.purpose === "deployment");
+    expect(flight).toBeDefined();
+    expect(flight!.deployContactId).toBe(contact.id);
+    expect(flight!.arrived).toBe(true);
+    expect(flight!.kind).toBe("transport");
+  });
+
+  it("normalizes a legacy patrol flight (no deployment fields) without adding them", () => {
+    const campaign = freshCampaign();
+    const legacyFlight = {
+      id: "patrol:int-1:ufo-1",
+      craftId: "int-1",
+      kind: "interceptor" as const,
+      fromLat: 0,
+      fromLon: 0,
+      toLat: 10,
+      toLon: 10,
+      progress: 0.4,
+      speedDegPerHour: 0.9,
+      startedAtHour: 0,
+    };
+    saveCampaign({ ...campaign, activeFlights: [legacyFlight] });
+
+    const loaded = loadCampaign();
+    const flight = loaded!.activeFlights?.[0];
+    expect(flight).toBeDefined();
+    expect(flight!.purpose).toBeUndefined();
+    expect(flight!.deployContactId).toBeUndefined();
+    expect(flight!.arrived).toBeUndefined();
   });
 });

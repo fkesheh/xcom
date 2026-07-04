@@ -70,6 +70,7 @@ import {
   deploymentItemIds,
   deploymentSoldiers,
   deploymentWeaponIds,
+  launchDeploymentFlight,
   loadCampaign,
   purchaseWeapon,
   recordMissionResult,
@@ -477,6 +478,11 @@ function buildGeoscapeCallbacks(campaign: CampaignState | null) {
       // for the HQ; startTactical bypasses the contact requirement for the assault.
       const current = currentCampaign ?? campaign;
       if (!current || current.strategic.status !== "active") return;
+      // The final assault uses the same squad as a ground deployment. If a Skyranger
+      // is mid-transit (or on station) delivering that squad to a contact, launching
+      // the HQ assault would fight two places at once and recordMissionResult would
+      // silently drop the in-transit flight. Gate it at the model level.
+      if ((current.activeFlights ?? []).some((f) => f.purpose === "deployment")) return;
       const plan = launchFinalAssault(current);
       if (!plan) return;
       flushSave();
@@ -505,25 +511,56 @@ function buildGeoscapeCallbacks(campaign: CampaignState | null) {
       if (currentCampaign) void showBase(currentCampaign);
     },
     onLaunchMission: () => {
-      // Mission launch now lives on the geoscape live-contact card. We are already
-      // on the globe (inside the Command Center room), so replay the Skyranger
-      // deployment flight IN PLACE — no screen hop — then enter the battlescape on
-      // arrival via the unchanged startTactical path. Read the live in-memory state
+      // NON-BLOCKING launch: instead of freezing the globe while the Skyranger flies,
+      // append a tracked deployment flight and keep time live. The transport now
+      // renders from activeFlights (B's geoscape marker); on arrival the geoscape
+      // fires onDeploymentArrived and offers a DEPLOY chip — entering battle stays a
+      // player click (onBeginAssault), never automatic. Read the live in-memory state
       // so deployment/weapons/operation match the current squad.
       const current = currentCampaign ?? campaign;
       if (!current || current.strategic.status !== "active") return;
-      const contactStatus = current.ufoContact?.status;
-      if (contactStatus !== "crashed" && contactStatus !== "landed") return;
+      const contact = current.ufoContact;
+      const contactStatus = contact?.status;
+      if (!contact || (contactStatus !== "crashed" && contactStatus !== "landed")) return;
+      // Only one deployment flight at a time — the transport (and the squad aboard) is
+      // a single shared asset. Without this a player could launch a second squad to a
+      // different contact while the first is still airborne (the per-contact guard in
+      // launchDeploymentFlight only dedupes the SAME contact).
+      if ((current.activeFlights ?? []).some((f) => f.purpose === "deployment")) return;
       // Guard the deployment here too (the geoscape CTA already hides itself for an
-      // empty squad): without a deployable operative the ~3s Skyranger flight would
-      // play out and then startTactical would silently no-op, leaving the globe paused
-      // with no mission and no feedback. Bail before the flight instead.
+      // empty squad): without a deployable operative there is nothing to fly, and the
+      // arrival DEPLOY click would enter a battle with no squad. Bail before launch.
+      if (deploymentSoldiers(current).length === 0) return;
+      currentCampaign = launchDeploymentFlight(current, contact.id);
+      flushSave();
+      geoscape?.update(currentCampaign);
+    },
+    onDeploymentArrived: (flightId: string) => {
+      // The deployment run reached its site. Persist arrived:true on that flight so
+      // the DEPLOY chip survives save/load; the chip + arrival toast are B's job.
+      if (!currentCampaign) return;
+      const flights = currentCampaign.activeFlights ?? [];
+      const idx = flights.findIndex((flight) => flight.id === flightId);
+      if (idx === -1 || flights[idx]!.arrived === true) return;
+      const updated = [...flights];
+      updated[idx] = { ...updated[idx]!, arrived: true };
+      currentCampaign = { ...currentCampaign, activeFlights: updated };
+      flushSave();
+    },
+    onBeginAssault: (contactId: string) => {
+      // The ONLY path into the ground battle from a deployment. Fired by the player's
+      // DEPLOY chip click on arrival — never automatically. Enter the battlescape via
+      // the unchanged startTactical path (generateOperation derives the op from the
+      // live contact). The in-flight deployment flight is cleared once the mission
+      // resolves via recordMissionResult clearing the contact.
+      const current = currentCampaign ?? campaign;
+      if (!current || current.strategic.status !== "active") return;
+      const contact = current.ufoContact;
+      if (!contact || contact.id !== contactId) return;
       if (deploymentSoldiers(current).length === 0) return;
       flushSave();
       currentCampaign = current;
-      geoscape?.playDeploymentFlight(current, () => {
-        void startTactical(currentCampaign ?? current);
-      });
+      void startTactical(current);
     },
     onCampaignEvent: (event: GeoCampaignEvent) => {
       // Map the geoscape's granular event onto a base alert (structurally identical
@@ -734,6 +771,11 @@ async function showBase(campaign: CampaignState): Promise<void> {
     hideLoader();
   }
   sfx.startAmbience("base");
+}
+
+/** Aggregate (sum) of a campaign's per-region panic — the debrief's panic-delta basis. */
+function aggregatePanic(campaign: CampaignState): number {
+  return Object.values(campaign.regionalPanic).reduce((sum, value) => sum + value, 0);
 }
 
 async function startTactical(campaign: CampaignState, operation: OperationPlan = generateOperation(campaign)): Promise<void> {
@@ -1012,6 +1054,37 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
       ? completedCampaign.strategic.score - missionBefore.score
       : undefined;
 
+    // Strategic deltas derived by diffing the pre-mission snapshot (threat/funding/
+    // panic captured in completeMission) against the recorded post-mission state.
+    // Panic uses the aggregate (sum) across regions, so a successful mission's local
+    // panic drop reads as a negative (good-direction) delta.
+    const threatDelta = missionBefore
+      ? completedCampaign.strategic.threat - missionBefore.threat
+      : undefined;
+    const fundingDelta = missionBefore
+      ? completedCampaign.strategic.funding - missionBefore.funding
+      : undefined;
+    const panicDelta = missionBefore
+      ? aggregatePanic(completedCampaign) - missionBefore.panic
+      : undefined;
+
+    // Objective progress: the operation's primary objective (done on a win) plus,
+    // for terror ops, an explicit civilian-rescue line derived from the report tally.
+    const objectives: { label: string; done: boolean }[] = [
+      { label: operation.objective, done: report.result === "success" },
+    ];
+    if (
+      report.missionType === "terror" &&
+      report.civilianCount !== undefined &&
+      report.civilianCount > 0
+    ) {
+      const rescued = report.civiliansRescued ?? 0;
+      objectives.push({
+        label: `Rescue civilians (${rescued}/${report.civilianCount})`,
+        done: rescued >= report.civilianCount,
+      });
+    }
+
     return {
       result: report.result,
       operation: report.codename,
@@ -1025,6 +1098,10 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
       kia,
       survivors,
       ...(missionScore !== undefined ? { missionScore } : {}),
+      ...(threatDelta !== undefined ? { threatDelta } : {}),
+      ...(fundingDelta !== undefined ? { fundingDelta } : {}),
+      ...(panicDelta !== undefined ? { panicDelta } : {}),
+      ...(objectives.length > 0 ? { objectives } : {}),
       ...(report.civiliansRescued !== undefined ? { civiliansRescued: report.civiliansRescued } : {}),
       ...(report.civilianCasualties !== undefined
         ? { civilianCasualties: report.civilianCasualties }
@@ -1648,6 +1725,10 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
    */
   let missionBefore: {
     score: number;
+    threat: number;
+    funding: number;
+    /** Aggregate (sum) of all regional panic pre-mission, for the debrief panic delta. */
+    panic: number;
     soldiers: Map<string, { rank: SoldierRank; statGrowth?: SoldierStatGrowth }>;
   } | null = null;
 
@@ -1668,6 +1749,9 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
     const latest = currentCampaign ?? campaign;
     missionBefore = {
       score: latest.strategic.score,
+      threat: latest.strategic.threat,
+      funding: latest.strategic.funding,
+      panic: aggregatePanic(latest),
       soldiers: new Map(
         latest.soldiers.map((soldier) => [
           soldier.id,

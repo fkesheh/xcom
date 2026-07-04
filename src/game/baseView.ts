@@ -98,7 +98,7 @@ import type {
   ResearchId,
   UfoContact,
 } from "../campaign/types";
-import { ITEMS, WEAPONS } from "../sim/content";
+import { ITEMS, TEMPLATES, WEAPONS } from "../sim/content";
 import {
   accentMaterial,
   BASE_PALETTE,
@@ -111,6 +111,7 @@ import { buildFacilityModel } from "./baseFacilities";
 import { buildFacilityInterior } from "./baseFacilityInteriors";
 import { CrewSystem } from "./basePeople";
 import { UI_TOKENS, UI_BASE, UI_COMPONENTS, UI_PRIMITIVES } from "./uiTheme";
+import { createCarousel, type CarouselHandle, type CarouselItem } from "./uiCarousel";
 import {
   formatCredits,
   formatSignedCredits,
@@ -179,6 +180,16 @@ const ITEM_IDS: readonly string[] = Object.keys(ITEMS);
 const ITEM_ICON: Record<string, string> = { grenade: "◆", medkit: "✚", stunRod: "⚡" };
 /** Max copies of a single item type one soldier may carry. */
 const MAX_ITEM_CARRY = 3;
+
+/** Rank insignia glyph shown beside a soldier's name in the barracks dossier —
+ *  a quick visual ladder (rank word is always shown too, so it's never color/
+ *  glyph alone). */
+const RANK_INSIGNIA: Record<string, string> = {
+  rookie: "•",
+  squaddie: "❭",
+  sergeant: "❭❭",
+  captain: "★",
+};
 
 /** Display name for a captive's sim template id (mirrors sim/content.ts
  *  TEMPLATES names — hardcoded here rather than importing sim content, matching
@@ -745,196 +756,6 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   font: 700 var(--ui-text-xs)/1 ui-monospace, monospace;
   letter-spacing: .03em;
 }
-#base-view .tech-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 11px;
-  padding: 8px 11px;
-  border: 1px solid rgba(103,232,249,.18);
-  border-radius: 8px;
-  background: rgba(2,12,20,.4);
-}
-#base-view .tech-legend-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--ui-muted);
-  font: 700 var(--ui-text-xs)/1 ui-monospace, monospace;
-  letter-spacing: .04em;
-  text-transform: uppercase;
-}
-#base-view .tech-legend-item.completed { color: #bbf7d0; }
-#base-view .tech-legend-item.available { color: var(--ui-cyan); }
-#base-view .tech-legend-item.locked { color: var(--ui-muted); }
-#base-view .tech-tree {
-  display: flex;
-  align-items: flex-start;
-  gap: 0;
-  overflow-x: auto;
-  padding-bottom: 6px;
-}
-#base-view .tech-tier {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  min-width: 212px;
-  flex: 0 0 auto;
-  padding-right: 14px;
-}
-#base-view .tech-tier.linked {
-  padding-left: 22px;
-  border-left: 2px solid rgba(103,232,249,.2);
-}
-#base-view .tech-tier-label {
-  margin-bottom: 2px;
-  color: var(--ui-cyan);
-  font: 800 var(--ui-text-xs)/1 ui-monospace, monospace;
-  letter-spacing: .16em;
-  text-transform: uppercase;
-}
-#base-view .tech-node {
-  position: relative;
-  padding: 10px 11px;
-  border: 1px solid rgba(103,232,249,.22);
-  border-radius: 10px;
-  background: rgba(2,12,20,.5);
-}
-#base-view .tech-node.completed {
-  border-color: rgba(74,222,128,.45);
-  background: rgba(10,35,22,.4);
-}
-#base-view .tech-node.available {
-  border-color: rgba(103,232,249,.6);
-  background: rgba(8,35,47,.45);
-  box-shadow: 0 0 18px rgba(34,211,238,.12);
-}
-#base-view .tech-node.locked {
-  border-color: rgba(148,163,184,.22);
-  background: rgba(2,12,20,.42);
-  opacity: .82;
-}
-#base-view .tech-node.active {
-  border-color: rgba(251,191,36,.6);
-  background: rgba(35,24,4,.32);
-  box-shadow: 0 0 20px rgba(251,191,36,.16);
-}
-#base-view .tech-connector {
-  position: absolute;
-  left: -22px;
-  top: 17px;
-  width: 18px;
-  color: rgba(103,232,249,.55);
-  font: 700 var(--ui-text-xs)/1 ui-monospace, monospace;
-  text-align: center;
-}
-#base-view .tech-node-head {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-bottom: 5px;
-}
-#base-view .tech-node-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  flex: none;
-  font-size: var(--ui-text-sm);
-}
-#base-view .tech-node.completed .tech-node-icon { color: var(--ui-green); }
-#base-view .tech-node.available .tech-node-icon { color: var(--ui-cyan); }
-#base-view .tech-node.locked .tech-node-icon { color: var(--ui-muted); }
-#base-view .tech-node.active .tech-node-icon { color: var(--ui-amber); }
-#base-view .tech-node-title {
-  flex: 1;
-  min-width: 0;
-  color: var(--ui-text);
-  font: 800 var(--ui-text-xs)/1.2 ui-monospace, monospace;
-  letter-spacing: .03em;
-  text-transform: uppercase;
-}
-#base-view .tech-node.locked .tech-node-title { color: var(--ui-muted); }
-#base-view .tech-node-status {
-  flex: none;
-  padding: 2px 7px;
-  border-radius: 999px;
-  font: 700 var(--ui-text-xs)/1 ui-monospace, monospace;
-  letter-spacing: .04em;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-#base-view .tech-node.completed .tech-node-status { color: #bbf7d0; border: 1px solid rgba(74,222,128,.4); }
-#base-view .tech-node.available .tech-node-status { color: var(--ui-cyan); border: 1px solid rgba(103,232,249,.4); }
-#base-view .tech-node.locked .tech-node-status { color: var(--ui-muted); border: 1px solid rgba(148,163,184,.3); }
-#base-view .tech-node.active .tech-node-status { color: #fde68a; border: 1px solid rgba(251,191,36,.5); }
-#base-view .tech-node-desc {
-  margin: 0 0 7px;
-  color: var(--ui-muted);
-  font: 400 var(--ui-text-base)/1.45 Inter, sans-serif;
-  letter-spacing: 0;
-  text-transform: none;
-}
-#base-view .tech-node-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-  color: var(--ui-muted);
-  font: 700 var(--ui-text-xs)/1.2 ui-monospace, monospace;
-}
-#base-view .tech-node-meta .card-cost { color: var(--ui-amber); }
-#base-view .tech-node-req {
-  color: var(--ui-red);
-  font: 700 var(--ui-text-xs)/1.35 ui-monospace, monospace;
-  letter-spacing: .02em;
-}
-#base-view .tech-node .tech-progress { margin: 2px 0 6px; }
-#base-view .tech-node button {
-  width: 100%;
-  margin-top: 9px;
-  min-height: 36px;
-  font-size: var(--ui-text-sm);
-}
-#base-view .soldier-table {
-  display: grid;
-  gap: 6px;
-}
-#base-view .soldier-row {
-  display: grid;
-  grid-template-columns: auto minmax(64px, 1.4fr) auto auto minmax(92px, 1fr) minmax(196px, 1.7fr);
-  gap: 8px;
-  align-items: center;
-  padding: 8px 9px;
-  border: 1px solid rgba(103,232,249,.16);
-  border-radius: 8px;
-  color: var(--ui-text);
-  background: rgba(2,12,20,.42);
-  font: 600 var(--ui-text-xs)/1.2 ui-monospace, monospace;
-}
-#base-view .soldier-row.selected,
-#base-view .soldier-row:hover {
-  border-color: rgba(103,232,249,.45);
-  background: rgba(8,35,47,.5);
-}
-#base-view .soldier-row.kia { color: var(--ui-red); opacity: .75; }
-#base-view .soldier-row.wounded { color: var(--ui-amber); }
-#base-view .soldier-row .s-name { color: var(--ui-text); }
-#base-view .soldier-row .s-rank { color: var(--ui-muted); }
-#base-view .s-name-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-#base-view .s-bio {
-  color: var(--ui-muted);
-  font: 400 var(--ui-text-sm)/1.4 Inter, sans-serif;
-  letter-spacing: 0;
-  text-transform: none;
-  white-space: normal;
-}
 #base-view .deploy-toggle {
   display: inline-flex;
   align-items: center;
@@ -944,16 +765,6 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
 }
 #base-view .deploy-toggle input { width: 15px; height: 15px; accent-color: var(--ui-cyan); }
 #base-view .deploy-toggle:has(input:disabled) { color: var(--ui-dim); opacity: .65; }
-#base-view .soldier-row select {
-  min-width: 92px;
-  color: var(--ui-text);
-  border: 1px solid rgba(103,232,249,.24);
-  border-radius: 6px;
-  background: rgba(1,9,15,.85);
-  font: 600 var(--ui-text-xs)/1 ui-monospace, monospace;
-  letter-spacing: .03em;
-}
-#base-view .soldier-row select:disabled { opacity: .45; }
 #base-view .soldier-items {
   display: flex;
   flex-wrap: wrap;
@@ -1005,16 +816,6 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
 }
 #base-view .status-chip.wounded { border-color: rgba(251,191,36,.5); color: #fde68a; }
 #base-view .status-chip.kia { border-color: rgba(251,113,133,.5); color: #fda4af; }
-#base-view .soldier-detail {
-  grid-column: 1 / -1;
-  margin-top: 6px;
-  padding: 8px 9px;
-  border-top: 1px dashed rgba(103,232,249,.2);
-  color: var(--ui-muted);
-  font: 400 var(--ui-text-base)/1.45 Inter, sans-serif;
-  letter-spacing: 0;
-  text-transform: none;
-}
 /* Memorial — a somber, muted panel (desaturated slate, no neon) so the fallen
    read with gravity alongside the otherwise luminous cyan base UI. */
 #base-view .memorial-panel {
@@ -1483,6 +1284,217 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   outline: 2px solid var(--ui-cyan);
   outline-offset: 2px;
 }
+/* ============================================================================
+   Carousel room content (research / manufacturing / barracks). The carousel
+   framing lives in uiCarousel.ts; these style the FULL-detail slide bodies so
+   nothing clips horizontally in the narrow sidebar (the old list-card bug). */
+#base-view .room-carousel-wrap { min-width: 0; }
+
+/* --- Shared project detail (research + manufacturing) --- */
+#base-view .proj-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid rgba(103,232,249,.22);
+  border-radius: 12px;
+  background: rgba(2,12,20,.5);
+}
+#base-view .proj-detail.craft-order { border-color: rgba(192,96,255,.38); }
+#base-view .proj-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+#base-view .proj-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-pill);
+  font: 800 var(--ui-text-xs)/1 ui-monospace, monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--ui-muted);
+}
+#base-view .proj-badge-icon { font-size: var(--ui-text-sm); }
+#base-view .proj-badge.active { color: var(--ui-amber); border-color: rgba(251,191,36,.55); }
+#base-view .proj-badge.completed,
+#base-view .proj-badge.done { color: var(--ui-green); border-color: rgba(74,222,128,.5); }
+#base-view .proj-badge.available { color: var(--ui-cyan); border-color: var(--ui-border-strong); }
+#base-view .proj-badge.locked { color: var(--ui-dim); }
+#base-view .proj-tier {
+  font: 700 var(--ui-text-xs)/1 ui-monospace, monospace;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ui-dim);
+}
+#base-view .proj-title {
+  margin: 0;
+  color: var(--ui-text);
+  font: 800 var(--ui-text-lg)/1.15 ui-monospace, monospace;
+  letter-spacing: .01em;
+}
+#base-view .proj-desc {
+  margin: 0;
+  color: var(--ui-muted);
+  font: 400 var(--ui-text-base)/1.5 Inter, sans-serif;
+}
+#base-view .proj-req {
+  color: var(--ui-amber);
+  font: 600 var(--ui-text-sm)/1.4 ui-monospace, monospace;
+}
+#base-view .proj-meta-line {
+  color: var(--ui-muted);
+  font: 600 var(--ui-text-sm)/1.3 ui-monospace, monospace;
+}
+#base-view .proj-cost-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+#base-view .proj-cost {
+  color: var(--ui-amber);
+  font: 700 var(--ui-text-sm)/1 ui-monospace, monospace;
+}
+#base-view .proj-duration {
+  color: var(--ui-muted);
+  font: 600 var(--ui-text-sm)/1 ui-monospace, monospace;
+}
+#base-view .proj-action {
+  align-self: stretch;
+  min-height: 40px;
+  margin-top: 2px;
+}
+
+/* --- Barracks dossier --- */
+#base-view .dossier {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid rgba(103,232,249,.22);
+  border-radius: 12px;
+  background: rgba(2,12,20,.5);
+}
+#base-view .dossier.kia { border-color: rgba(148,163,184,.3); opacity: .82; }
+#base-view .dossier.wounded { border-color: rgba(251,191,36,.4); }
+#base-view .dossier-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+#base-view .dossier-id { display: flex; align-items: center; gap: 10px; min-width: 0; }
+#base-view .dossier-insignia {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 6px;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: 8px;
+  color: var(--ui-cyan);
+  background: rgba(8,28,40,.5);
+  font: 700 var(--ui-text-sm)/1 ui-monospace, monospace;
+}
+#base-view .dossier-name-wrap { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+#base-view .dossier-name {
+  color: var(--ui-text-strong);
+  font: 800 var(--ui-text-lg)/1.1 ui-monospace, monospace;
+  letter-spacing: .01em;
+}
+#base-view .dossier-rank {
+  color: var(--ui-muted);
+  font: 700 var(--ui-text-xs)/1 ui-monospace, monospace;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+#base-view .dossier-deploy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: rgba(8,28,40,.4);
+  color: var(--ui-text);
+  font: 700 var(--ui-text-sm)/1 ui-monospace, monospace;
+  letter-spacing: .03em;
+}
+#base-view .dossier-deploy input { width: 16px; height: 16px; accent-color: var(--ui-cyan); }
+#base-view .dossier-bio {
+  margin: 0;
+  color: var(--ui-muted);
+  font: 400 var(--ui-text-base)/1.5 Inter, sans-serif;
+}
+#base-view .dossier-stats {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+#base-view .dossier-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 8px 4px;
+  border: 1px solid rgba(103,232,249,.18);
+  border-radius: 8px;
+  background: rgba(8,24,34,.5);
+}
+#base-view .dossier-stat-value {
+  color: var(--ui-text-strong);
+  font: 800 var(--ui-text-lg)/1 ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+#base-view .dossier-stat-bonus {
+  margin-left: 3px;
+  color: var(--ui-green);
+  font-size: var(--ui-text-xs);
+  font-weight: 700;
+}
+#base-view .dossier-stat-label {
+  color: var(--ui-muted);
+  font: 600 var(--ui-text-xs)/1 ui-monospace, monospace;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  text-align: center;
+}
+#base-view .dossier-career {
+  color: var(--ui-muted);
+  font: 600 var(--ui-text-sm)/1.4 ui-monospace, monospace;
+}
+#base-view .dossier-loadout-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+#base-view .dossier-loadout-label {
+  color: var(--ui-cyan);
+  font: 800 var(--ui-text-xs)/1 ui-monospace, monospace;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+#base-view .dossier-weapon {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 34px;
+  padding: 0 10px;
+  color: var(--ui-text);
+  background: rgba(8,24,34,.7);
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  font: 600 var(--ui-text-sm)/1 ui-monospace, monospace;
+}
+
 /* Respect prefers-reduced-motion: collapse every CSS transition/animation on
    the base screen. The ambient 3D motion (rotators, glow pulses, camera drift)
    is additionally frozen from JS via BaseView.reducedMotion. */
@@ -1878,6 +1890,16 @@ export class BaseView {
   private selectedFacilityId: string | null = null;
   private activeRoom: RoomId = "overview";
   private expandedSoldierId: string | null = null;
+  /** Remembered carousel selection per room so a mid-room refresh (start research,
+   *  equip an item) keeps the player on the same PROJECT instead of snapping away.
+   *  Persisted by project id (not slide index) because the slide order changes when
+   *  a project starts — the active project sorts to slot 0, so a positional index
+   *  would land the player on an unrelated project after clicking Start. */
+  private researchCarouselProjectId: string | null = null;
+  private mfgCarouselProjectId: string | null = null;
+  /** Live carousel handles for the currently-mounted room; destroyed (keyboard
+   *  listener removed) before every room re-render and on dispose. */
+  private roomCarousels: CarouselHandle[] = [];
   private tooltipEl: HTMLDivElement | null = null;
   private topbarChips: HTMLElement | null = null;
   private clockEl: HTMLElement | null = null;
@@ -2030,6 +2052,7 @@ export class BaseView {
     // scene walk so its internal dispose() is the single owner of those resources.
     for (const crew of this.crewSystems) crew.dispose();
     this.crewSystems = [];
+    this.destroyRoomCarousels();
     // Free the mounted interior diorama explicitly (geometry + materials) so a
     // teardown mid-dive never leaks; the scene walk below handles the hub.
     this.clearInterior();
@@ -3208,6 +3231,9 @@ export class BaseView {
    *  base) followed by the room's focused body. The selected room persists across
    *  update() refreshes because activeRoom is a class field. */
   private renderRoom(campaign: CampaignState): HTMLElement {
+    // Tear down any carousels from the previous render (removes their scoped
+    // keyboard listeners) before building the new room DOM — dispose discipline.
+    this.destroyRoomCarousels();
     const meta = ROOM_META[this.activeRoom];
     const room = el("div", "facility-room");
     // Every room keeps a consistent header (facility name + Back to Base). renderRoom
@@ -3249,6 +3275,27 @@ export class BaseView {
     }
     room.append(body);
     return room;
+  }
+
+  /** Destroy every carousel mounted for the current room (removes each one's
+   *  root-scoped keydown listener). Called before each re-render and on dispose. */
+  private destroyRoomCarousels(): void {
+    for (const carousel of this.roomCarousels) carousel.destroy();
+    this.roomCarousels = [];
+  }
+
+  /** Build a carousel over `items`, track it for teardown, and return its root so
+   *  a room can drop it straight into its DOM. `onIndexChange` persists the slide
+   *  position so a refresh keeps the player where they were. */
+  private mountCarousel(
+    items: CarouselItem[],
+    ariaLabel: string,
+    initialIndex: number,
+    onIndexChange: (index: number) => void,
+  ): HTMLElement {
+    const carousel = createCarousel({ items, ariaLabel, initialIndex, onIndexChange });
+    this.roomCarousels.push(carousel);
+    return carousel.root;
   }
 
   /** Room header: a "Back to Base" affordance (hidden on the overview hub) plus
@@ -3472,6 +3519,7 @@ export class BaseView {
     const wrap = el("div");
     const deployment = deploymentSoldiers(campaign);
     const deployedIds = new Set(deployment.map((soldier) => soldier.id));
+    // RECRUIT stays in the room header, OUTSIDE the per-soldier carousel.
     const head = el("div", "panel-head");
     const title = el("span", "panel-title");
     title.textContent = `${deployment.length}/${DEPLOYMENT_SIZE} deployed`;
@@ -3480,16 +3528,34 @@ export class BaseView {
     recruit.disabled = campaign.strategic.status !== "active" || !canRecruitSoldier(campaign);
     recruit.addEventListener("click", () => this.opts.onRecruitSoldier());
     head.append(title, recruit);
-    const table = el("div", "soldier-table");
+    wrap.appendChild(head);
+
     if (campaign.soldiers.length === 0) {
       const empty = el("div", "empty-state");
       empty.textContent = "No operatives on roster. Recruit to field a squad.";
-      table.appendChild(empty);
+      wrap.appendChild(empty);
+    } else {
+      // One sliding dossier per soldier. The strip cell's dot signals readiness.
+      const items: CarouselItem[] = campaign.soldiers.map((soldier) => ({
+        id: soldier.id,
+        stripLabel: soldier.name,
+        stripStatus:
+          soldier.status === "kia" ? "locked"
+            : soldier.status === "wounded" ? "active"
+            : deployedIds.has(soldier.id) ? "done"
+            : "ready",
+        render: () => this.renderSoldierDossier(campaign, soldier, deployedIds),
+      }));
+      const selected = campaign.soldiers.findIndex((soldier) => soldier.id === this.expandedSoldierId);
+      const initial = selected >= 0 ? selected : 0;
+      const carouselWrap = el("div", "room-carousel-wrap");
+      carouselWrap.appendChild(
+        this.mountCarousel(items, "Squad roster", initial, (index) => {
+          this.expandedSoldierId = campaign.soldiers[index]?.id ?? null;
+        }),
+      );
+      wrap.appendChild(carouselWrap);
     }
-    for (const soldier of campaign.soldiers) {
-      table.appendChild(this.renderSoldierRow(campaign, soldier, deployedIds));
-    }
-    wrap.append(head, table);
     // Medbay has no standalone room — its wounded-recovery readout folds in here.
     const wounded = campaign.soldiers.filter((soldier) => soldier.status === "wounded");
     if (wounded.length > 0) {
@@ -3566,43 +3632,95 @@ export class BaseView {
     return `Killed in action during Operation ${last.codename} (${last.region})`;
   }
 
-  private renderSoldierRow(
+  /** Full per-soldier dossier shown as one carousel slide: name + rank insignia +
+   *  deploy toggle, bio, a stat block (TU/HP/accuracy/reactions/bravery with
+   *  survived-mission growth), a career line, the weapon selector, and the item
+   *  loadout rows. Nothing is clipped — every field has the full panel width. */
+  private renderSoldierDossier(
     campaign: CampaignState,
     soldier: CampaignSoldier,
     deployedIds: Set<string>,
   ): HTMLElement {
-    const row = el(
-      "div",
-      `soldier-row ${soldier.status}${this.expandedSoldierId === soldier.id ? " selected" : ""}`,
-    );
+    const node = el("article", `dossier ${soldier.status}`);
     const deployed = deployedIds.has(soldier.id);
-    const deployToggle = el("label", "deploy-toggle");
+
+    // --- Header: identity + deploy toggle ---
+    const head = el("div", "dossier-head");
+    const idBlock = el("div", "dossier-id");
+    const insignia = el("span", "dossier-insignia");
+    insignia.textContent = RANK_INSIGNIA[soldier.rank] ?? "•";
+    insignia.title = soldier.rank;
+    const nameWrap = el("div", "dossier-name-wrap");
+    const nameEl = el("span", "dossier-name");
+    nameEl.textContent = soldier.name;
+    const rankEl = el("span", "dossier-rank");
+    rankEl.textContent = soldier.rank;
+    nameWrap.append(nameEl, rankEl);
+    idBlock.append(insignia, nameWrap);
+    head.append(idBlock, this.renderSoldierStatus(campaign, soldier));
+    node.appendChild(head);
+
+    // --- Deploy toggle (own row, clearly tappable) ---
+    const deployToggle = el("label", "deploy-toggle dossier-deploy");
     const deployCheckbox = document.createElement("input");
     deployCheckbox.type = "checkbox";
     deployCheckbox.checked = deployed;
+    // While a deployment flight is airborne / on station the squad is committed aboard
+    // the Skyranger — editing (or emptying) it would strand the arrival DEPLOY chip on
+    // a squad that no longer exists (a silent no-op in onBeginAssault). Lock the roster
+    // for the duration of the flight.
+    const deploymentAirborne = (campaign.activeFlights ?? []).some((f) => f.purpose === "deployment");
     deployCheckbox.disabled =
-      campaign.strategic.status !== "active" || (deployed ? false : !canDeploySoldier(campaign, soldier.id));
+      campaign.strategic.status !== "active" ||
+      deploymentAirborne ||
+      (deployed ? false : !canDeploySoldier(campaign, soldier.id));
+    if (deploymentAirborne) {
+      deployToggle.title = "Squad is aboard the Skyranger — recall or complete the operation to change the roster.";
+    }
     deployCheckbox.setAttribute("aria-label", `${deployed ? "Remove" : "Deploy"} ${soldier.name}`);
-    deployCheckbox.addEventListener("click", (event) => event.stopPropagation());
     deployCheckbox.addEventListener("change", () => {
       this.opts.onToggleDeployment(soldier.id, deployCheckbox.checked);
     });
-    deployToggle.append(deployCheckbox, document.createTextNode(deployed ? "DROP" : "ADD"));
+    deployToggle.append(
+      deployCheckbox,
+      document.createTextNode(deployed ? "Deployed — drop from squad" : "Add to deployment"),
+    );
+    node.appendChild(deployToggle);
 
-    const nameCell = el("div", "s-name-cell");
-    const nameEl = el("span", "s-name");
-    nameEl.textContent = soldier.name;
-    nameCell.append(nameEl);
+    // --- Bio ---
     if (soldier.bio) {
-      const bioEl = el("span", "s-bio");
+      const bioEl = el("p", "dossier-bio");
       bioEl.textContent = soldier.bio;
-      nameCell.append(bioEl);
+      node.appendChild(bioEl);
     }
-    const rankEl = el("span", "s-rank");
-    rankEl.textContent = soldier.rank;
 
+    // --- Stat block: effective battle stats (trooper base + rank/armor/growth). ---
+    const base = TEMPLATES.trooper?.stats;
+    const bonus = campaignSoldierStatBonus(campaign, soldier);
+    const grid = el("div", "dossier-stats");
+    grid.append(
+      this.dossierStat("TU", (base?.timeUnits ?? 0) + bonus.timeUnits, bonus.timeUnits),
+      this.dossierStat("HP", (base?.health ?? 0) + bonus.health, bonus.health),
+      this.dossierStat("Accuracy", (base?.firingAccuracy ?? 0) + bonus.firingAccuracy, bonus.firingAccuracy),
+      this.dossierStat("Reactions", (base?.reactions ?? 0) + bonus.reactions, bonus.reactions),
+      this.dossierStat("Bravery", base?.bravery ?? 0, 0),
+    );
+    node.appendChild(grid);
+
+    // --- Career line ---
+    const career = el("div", "dossier-career");
+    const growth = soldier.statGrowth ? this.formatStatDeltas(soldier.statGrowth) : "";
+    let careerText = `${soldier.missions} missions · ${soldier.survivedMissions} survived`;
+    if (growth) careerText += ` · career growth ${growth}`;
+    career.textContent = careerText;
+    node.appendChild(career);
+
+    // --- Weapon loadout row ---
+    const weaponRow = el("div", "dossier-loadout-row");
+    const weaponLabel = el("span", "dossier-loadout-label");
+    weaponLabel.textContent = "Weapon";
     const currentWeapon = soldierWeaponId(campaign, soldier.id);
-    const weaponSelect = el("select");
+    const weaponSelect = el("select", "dossier-weapon");
     weaponSelect.disabled = soldier.status === "kia" || campaign.strategic.status !== "active";
     weaponSelect.setAttribute("aria-label", `Weapon for ${soldier.name}`);
     for (const weaponId of CAMPAIGN_WEAPON_IDS) {
@@ -3614,37 +3732,34 @@ export class BaseView {
       option.disabled = weaponId !== currentWeapon && !canAssignSoldierWeapon(campaign, soldier.id, weaponId);
       weaponSelect.appendChild(option);
     }
-    weaponSelect.addEventListener("click", (event) => event.stopPropagation());
     weaponSelect.addEventListener("change", () => {
-      const next = weaponSelect.value as CampaignWeaponId;
-      this.opts.onAssignWeapon(soldier.id, next);
+      this.opts.onAssignWeapon(soldier.id, weaponSelect.value as CampaignWeaponId);
     });
+    weaponRow.append(weaponLabel, weaponSelect);
+    node.appendChild(weaponRow);
 
-    row.append(
-      deployToggle,
-      nameCell,
-      rankEl,
-      this.renderSoldierStatus(campaign, soldier),
-      weaponSelect,
-      this.renderSoldierItems(campaign, soldier),
-    );
-    if (this.expandedSoldierId === soldier.id) {
-      const detail = el("div", "soldier-detail");
-      const growth = soldier.statGrowth ? this.formatStatDeltas(soldier.statGrowth) : "";
-      const effective = this.formatStatDeltas(campaignSoldierStatBonus(campaign, soldier));
-      let detailText =
-        `${soldier.missions} missions · ${soldier.survivedMissions} survived · rank ${soldier.rank}`;
-      if (soldier.status === "wounded") detailText += " · wounded";
-      if (growth) detailText += ` · growth ${growth}`;
-      if (effective) detailText += ` · effective ${effective}`;
-      detail.textContent = `${detailText}.`;
-      row.appendChild(detail);
+    // --- Item loadout ---
+    const itemsLabel = el("span", "dossier-loadout-label");
+    itemsLabel.textContent = "Items";
+    node.append(itemsLabel, this.renderSoldierItems(campaign, soldier));
+    return node;
+  }
+
+  /** One stat tile in the dossier stat block: label, value, and a `+N` growth
+   *  badge when the effective stat is above the trooper baseline. */
+  private dossierStat(label: string, value: number, bonus: number): HTMLElement {
+    const tile = el("div", "dossier-stat");
+    const val = el("span", "dossier-stat-value");
+    val.textContent = `${value}`;
+    if (bonus > 0) {
+      const badge = el("span", "dossier-stat-bonus");
+      badge.textContent = `+${bonus}`;
+      val.appendChild(badge);
     }
-    row.addEventListener("click", () => {
-      this.expandedSoldierId = this.expandedSoldierId === soldier.id ? null : soldier.id;
-      this.refreshHud();
-    });
-    return row;
+    const lab = el("span", "dossier-stat-label");
+    lab.textContent = label;
+    tile.append(val, lab);
+    return tile;
   }
 
   /** Format a stat delta block as `+N acc/+M rea/...`, omitting zero entries and
@@ -3825,35 +3940,47 @@ export class BaseView {
    *  Status comes from {@link researchTree}; the active project is always rendered
    *  with its progress bar regardless of its tree status. */
   private renderResearchRoom(campaign: CampaignState): HTMLElement {
-    const wrap = el("div");
+    const wrap = el("div", "room-carousel-wrap");
 
-    const legend = el("div", "tech-legend");
-    legend.append(
-      this.techLegend("✓", "Completed", "completed"),
-      this.techLegend("▸", "Available", "available"),
-      this.techLegend("⊘", "Locked", "locked"),
-    );
-    wrap.appendChild(legend);
-
+    // Order projects the way the old tier columns read: tier ascending, then the
+    // tree's own order within a tier. One carousel slide per project.
     const tree = researchTree(campaign);
     const tierOf = this.researchTiers();
-    const maxTier = Math.max(0, ...tierOf.values());
-    const treeEl = el("div", "tech-tree");
-    for (let tier = 0; tier <= maxTier; tier++) {
-      const entries = tree.filter((node) => tierOf.get(node.project.id) === tier);
-      if (entries.length === 0) continue;
-      const column = el("div", tier > 0 ? "tech-tier linked" : "tech-tier");
-      const label = el("div", "tech-tier-label");
-      label.textContent = `Tier ${tier}`;
-      column.appendChild(label);
-      for (const entry of entries) {
-        column.appendChild(
-          this.renderResearchNode(campaign, entry, tier),
-        );
-      }
-      treeEl.appendChild(column);
+    const ordered = [...tree].sort((a, b) => {
+      const ta = tierOf.get(a.project.id) ?? 0;
+      const tb = tierOf.get(b.project.id) ?? 0;
+      if (ta !== tb) return ta - tb;
+      return tree.indexOf(a) - tree.indexOf(b);
+    });
+
+    if (ordered.length === 0) {
+      const empty = el("div", "empty-state");
+      empty.textContent = "No research projects available.";
+      wrap.appendChild(empty);
+      return wrap;
     }
-    wrap.appendChild(treeEl);
+
+    const items: CarouselItem[] = ordered.map((entry) => {
+      const status = this.researchReconciledStatus(campaign, entry);
+      return {
+        id: entry.project.id,
+        stripLabel: entry.project.title,
+        stripStatus:
+          status === "active" ? "active"
+            : status === "completed" ? "done"
+            : status === "available" ? "ready"
+            : "locked",
+        render: () => this.renderResearchDetail(campaign, entry, tierOf.get(entry.project.id) ?? 0),
+      };
+    });
+
+    const savedResearch = items.findIndex((it) => it.id === this.researchCarouselProjectId);
+    const initial = savedResearch >= 0 ? savedResearch : 0;
+    wrap.appendChild(
+      this.mountCarousel(items, "Research projects", initial, (index) => {
+        this.researchCarouselProjectId = items[index]?.id ?? null;
+      }),
+    );
     return wrap;
   }
 
@@ -3883,78 +4010,71 @@ export class BaseView {
     return cache;
   }
 
-  private techLegend(icon: string, label: string, cls: string): HTMLElement {
-    const chip = el("span", `tech-legend-item ${cls}`);
-    const iconEl = el("span", "tech-node-icon");
-    iconEl.textContent = icon;
-    chip.append(iconEl, document.createTextNode(label));
-    return chip;
+  /** Reconcile a project's tree status into the four states the UI renders.
+   *  researchTree may report "locked" merely because the lab is busy; a project
+   *  whose prerequisites are all met is treated as "available" (lab-blocked) so we
+   *  never show a misleading "Requires:" line on something already unlocked. */
+  private researchReconciledStatus(
+    campaign: CampaignState,
+    entry: ResearchTreeNode,
+  ): "completed" | "available" | "locked" | "active" {
+    if (campaign.activeResearch?.projectId === entry.project.id) return "active";
+    const requiresMet = entry.project.requires.every((req) => hasResearch(campaign, req));
+    if (entry.status === "locked" && requiresMet) return "available";
+    return entry.status;
   }
 
-  private renderResearchNode(
+  /** Full-detail research slide for the carousel: status badge, complete title +
+   *  description (no horizontal clip), cost/duration chips, requirement notes,
+   *  progress bar when active, and the wired action button. */
+  private renderResearchDetail(
     campaign: CampaignState,
     entry: ResearchTreeNode,
     tier: number,
   ): HTMLElement {
     const project = entry.project;
     const activeRes = campaign.activeResearch;
-    const isActive = activeRes?.projectId === project.id;
-
-    // Reconcile the tree status: researchTree may report "locked" simply because
-    // the lab is busy. A project whose prerequisites are all met is rendered as
-    // available (just lab-blocked), so we never show a misleading "Requires:"
-    // line on something the player has actually unlocked.
+    const status = this.researchReconciledStatus(campaign, entry);
     const unmetRequires = project.requires
       .filter((req) => !hasResearch(campaign, req))
       .map((req) => RESEARCH_PROJECTS.find((candidate) => candidate.id === req)?.title ?? req);
-    const requiresMet = unmetRequires.length === 0;
-    const status: "completed" | "available" | "locked" | "active" =
-      isActive ? "active"
-        : entry.status === "locked" && requiresMet ? "available"
-        : entry.status;
 
-    const node = el("article", `tech-node ${status}`);
+    const node = el("article", `proj-detail ${status}`);
 
-    if (tier > 0) {
-      const connector = el("span", "tech-connector");
-      connector.textContent = "►";
-      connector.title = `Descends from Tier ${tier - 1}`;
-      node.appendChild(connector);
-    }
-
-    const head = el("div", "tech-node-head");
-    const icon = el("span", "tech-node-icon");
-    const badge = el("span", "tech-node-status");
+    const head = el("div", "proj-detail-head");
+    const badge = el("span", `proj-badge ${status}`);
+    const badgeIcon = el("span", "proj-badge-icon");
     if (status === "active") {
-      icon.textContent = "↻";
-      badge.textContent = "In progress";
+      badgeIcon.textContent = "↻";
+      badge.append(badgeIcon, document.createTextNode("In progress"));
     } else if (status === "completed") {
-      icon.textContent = "✓";
-      badge.textContent = "Completed";
+      badgeIcon.textContent = "✓";
+      badge.append(badgeIcon, document.createTextNode("Completed"));
     } else if (status === "available") {
-      icon.textContent = "▸";
-      badge.textContent = "Available";
+      badgeIcon.textContent = "▸";
+      badge.append(badgeIcon, document.createTextNode("Available"));
     } else {
-      icon.textContent = "⊘";
-      badge.textContent = "Locked";
+      badgeIcon.textContent = "⊘";
+      badge.append(badgeIcon, document.createTextNode("Locked"));
     }
-    const title = el("span", "tech-node-title");
-    title.textContent = project.title;
-    head.append(icon, title, badge);
+    const tierTag = el("span", "proj-tier");
+    tierTag.textContent = `Tier ${tier}`;
+    head.append(badge, tierTag);
     node.appendChild(head);
 
-    const desc = el("p", "tech-node-desc");
-    desc.textContent = project.description;
+    const title = el("h3", "proj-title");
+    title.textContent = project.title;
+    node.appendChild(title);
+
+    const desc = el("p", "proj-desc");
+    desc.textContent = status === "completed" ? project.completedDescription : project.description;
     node.appendChild(desc);
 
-    // Captive-gated nodes (the interrogation chain) get a small requirement
-    // annotation. When the node is otherwise startable but no qualifying
-    // captive is held, the annotation explains WHY instead of the generic
-    // "Need resources" button label.
+    // Captive-gated nodes (the interrogation chain) annotate their requirement.
     const captiveLabel = this.captiveRequirementLabel(project);
     const captiveQualified = captiveLabel === null || this.hasQualifyingCaptiveFor(campaign, project);
     if (captiveLabel && status !== "completed") {
-      const note = el("div", "tech-node-req");
+      const note = el("div", "proj-req");
       note.textContent =
         status === "available" && !captiveQualified ? this.captiveBlockedNote(project) : captiveLabel;
       node.appendChild(note);
@@ -3967,44 +4087,38 @@ export class BaseView {
         duration > 0
           ? Math.min(1, Math.max(0, (campaign.clock.elapsedHours - activeRes.startedAtHour) / duration))
           : 0;
-      const bar = el("div", "progress tech-progress");
+      const bar = el("div", "progress");
       const fill = el("i");
       fill.style.width = `${Math.round(fraction * 100)}%`;
       bar.appendChild(fill);
-      const meta = el("div", "tech-node-meta");
+      const meta = el("div", "proj-meta-line");
       meta.textContent = `${formatHours(remaining)} remaining — scientists are working`;
       node.append(bar, meta);
       return node;
     }
 
-    if (status === "completed") {
-      const meta = el("div", "tech-node-meta");
-      meta.textContent = project.completedDescription;
-      node.appendChild(meta);
-      return node;
-    }
+    if (status === "completed") return node;
 
     if (status === "locked") {
-      const req = el("div", "tech-node-req");
-      req.textContent = unmetRequires.length > 0
-        ? `Requires: ${unmetRequires.join(", ")}`
-        : "Locked";
+      const req = el("div", "proj-req");
+      req.textContent =
+        unmetRequires.length > 0 ? `Requires: ${unmetRequires.join(", ")}` : "Locked";
       node.appendChild(req);
       return node;
     }
 
-    // available
+    // available: cost + duration chips, then the Start action.
     const cost = researchCost(campaign, project.id);
-    const meta = el("div", "tech-node-meta");
-    meta.append(
-      span(formatCost(cost), "card-cost"),
-      span(formatHours(researchDuration(campaign, project.id))),
+    const chips = el("div", "proj-cost-row");
+    chips.append(
+      span(formatCost(cost), "proj-cost"),
+      span(formatHours(researchDuration(campaign, project.id)), "proj-duration"),
     );
-    node.appendChild(meta);
+    node.appendChild(chips);
 
     const labBusy = !!campaign.activeResearch;
     const canStart = canStartResearch(campaign, project.id);
-    const button = el("button");
+    const button = el("button", "proj-action");
     button.textContent = labBusy
       ? "Lab busy"
       : canStart
@@ -4049,74 +4163,127 @@ export class BaseView {
   /** Engineering room: active manufacturing with a progress bar, then buildable
    *  items (cost + Start). */
   private renderEngineeringRoom(campaign: CampaignState): HTMLElement {
-    const wrap = el("div");
-
+    const wrap = el("div", "room-carousel-wrap");
     const activeMfg = campaign.activeManufacturing;
-    if (activeMfg) {
-      const project = MANUFACTURING_PROJECTS.find((candidate) => candidate.id === activeMfg.projectId);
+
+    // One carousel slide per manufacturing project; the in-production order (if
+    // any) leads so its progress is the first thing the player sees.
+    const ordered = [...MANUFACTURING_PROJECTS].sort((a, b) => {
+      const aActive = a.id === activeMfg?.projectId ? 0 : 1;
+      const bActive = b.id === activeMfg?.projectId ? 0 : 1;
+      if (aActive !== bActive) return aActive - bActive;
+      return MANUFACTURING_PROJECTS.indexOf(a) - MANUFACTURING_PROJECTS.indexOf(b);
+    });
+
+    if (ordered.length === 0) {
+      const empty = el("div", "empty-state");
+      empty.textContent = "No manufacturing projects available.";
+      wrap.appendChild(empty);
+      return wrap;
+    }
+
+    const items: CarouselItem[] = ordered.map((project) => {
+      const isActive = project.id === activeMfg?.projectId;
+      const locked = !!project.requiresResearch && !hasResearch(campaign, project.requiresResearch);
+      return {
+        id: project.id,
+        stripLabel: project.title,
+        stripStatus: isActive ? "active" : locked ? "locked" : "ready",
+        render: () => this.renderManufacturingDetail(campaign, project, !!activeMfg),
+      };
+    });
+
+    const savedMfg = items.findIndex((it) => it.id === this.mfgCarouselProjectId);
+    const initial = savedMfg >= 0 ? savedMfg : 0;
+    wrap.appendChild(
+      this.mountCarousel(items, "Manufacturing projects", initial, (index) => {
+        this.mfgCarouselProjectId = items[index]?.id ?? null;
+      }),
+    );
+    return wrap;
+  }
+
+  /** Full-detail manufacturing slide: title, in-production progress OR complete
+   *  description + cost/duration chips, and the wired action button. */
+  private renderManufacturingDetail(
+    campaign: CampaignState,
+    project: ManufacturingProject,
+    workshopBusy: boolean,
+  ): HTMLElement {
+    const activeMfg = campaign.activeManufacturing;
+    const isActive = project.id === activeMfg?.projectId;
+    const isCraft = project.product.kind === "craft";
+    const node = el("article", `proj-detail${isCraft ? " craft-order" : ""}`);
+
+    const locked = !!project.requiresResearch && !hasResearch(campaign, project.requiresResearch);
+    const canManufacture = canStartManufacturing(campaign, project.id);
+    const cost = manufacturingCost(campaign, project.id);
+    // A craft product also needs a free hangar berth — surfaced distinctly so a
+    // full hangar never reads as the generic "Need resources".
+    const hangarFull = isCraft && !locked && freeHangarSlots(campaign) < 1;
+    const requiresTitle = project.requiresResearch
+      ? RESEARCH_PROJECTS.find((candidate) => candidate.id === project.requiresResearch)?.title ??
+        project.requiresResearch
+      : "";
+
+    const head = el("div", "proj-detail-head");
+    const badge = el("span", `proj-badge ${isActive ? "active" : locked ? "locked" : "available"}`);
+    const badgeIcon = el("span", "proj-badge-icon");
+    if (isActive) {
+      badgeIcon.textContent = "↻";
+      badge.append(badgeIcon, document.createTextNode("In production"));
+    } else if (locked) {
+      badgeIcon.textContent = "⊘";
+      badge.append(badgeIcon, document.createTextNode("Research required"));
+    } else {
+      badgeIcon.textContent = "▸";
+      badge.append(badgeIcon, document.createTextNode(isCraft ? "Craft order" : "Buildable"));
+    }
+    head.appendChild(badge);
+    node.appendChild(head);
+
+    const title = el("h3", "proj-title");
+    title.textContent = project.title;
+    node.appendChild(title);
+
+    if (isActive && activeMfg) {
       const remaining = Math.max(0, activeMfg.completesAtHour - campaign.clock.elapsedHours);
       const duration = activeMfg.completesAtHour - activeMfg.startedAtHour;
       const fraction =
         duration > 0
           ? Math.min(1, Math.max(0, (campaign.clock.elapsedHours - activeMfg.startedAtHour) / duration))
           : 0;
-      const card = el("section", "tab-card");
-      const strong = el("strong");
-      strong.textContent = `${project?.title ?? activeMfg.projectId} in production`;
+      const desc = el("p", "proj-desc");
+      desc.textContent = project.description;
       const bar = el("div", "progress");
       const fill = el("i");
       fill.style.width = `${Math.round(fraction * 100)}%`;
       bar.appendChild(fill);
-      const copy = el("p", "card-copy");
-      copy.textContent = `${formatHours(remaining)} remaining — workshop is fabricating.`;
-      card.append(strong, bar, copy);
-      wrap.appendChild(card);
+      const meta = el("div", "proj-meta-line");
+      meta.textContent = `${formatHours(remaining)} remaining — workshop is fabricating.`;
+      node.append(desc, bar, meta);
+      return node;
     }
 
-    const available = MANUFACTURING_PROJECTS.filter((project) => project.id !== activeMfg?.projectId);
-    if (available.length > 0) {
-      const label = el("div", "section-label");
-      label.textContent = "Buildable items";
-      wrap.appendChild(label);
-      for (const project of available) {
-        wrap.appendChild(this.renderManufacturingCard(campaign, project, !!activeMfg));
-      }
-    }
-    return wrap;
-  }
-
-  private renderManufacturingCard(
-    campaign: CampaignState,
-    project: ManufacturingProject,
-    workshopBusy: boolean,
-  ): HTMLElement {
-    const isCraft = project.product.kind === "craft";
-    const card = el("section", `tab-card${isCraft ? " craft-order" : ""}`);
-    const locked = !!project.requiresResearch && !hasResearch(campaign, project.requiresResearch);
-    const canManufacture = canStartManufacturing(campaign, project.id);
-    const cost = manufacturingCost(campaign, project.id);
-    // A craft product also needs a free hangar berth. Surface that reason distinctly
-    // so a full hangar never reads as the generic "Need resources".
-    const hangarFull = isCraft && !locked && freeHangarSlots(campaign) < 1;
-    const requiresTitle = project.requiresResearch
-      ? RESEARCH_PROJECTS.find((candidate) => candidate.id === project.requiresResearch)?.title ??
-        project.requiresResearch
-      : "";
-    const title = el("strong");
-    title.textContent = project.title;
+    const desc = el("p", "proj-desc");
     const berthNote = isCraft ? " Occupies one hangar berth." : "";
-    const copy = el("p", "card-copy");
-    copy.textContent = workshopBusy
-      ? "Workshop is committed to another order."
-      : locked
-        ? `Requires ${requiresTitle}. ${project.description}`
-        : hangarFull
-          ? `${project.description} No free hangar berth — scrap or lose a craft first.`
-          : `${project.description} Cost ${formatCost(cost)}, ${formatHours(manufacturingDuration(campaign, project.id))}.${berthNote}`;
-    const row = el("div", "card-row");
-    const costLabel = el("span", "card-cost");
-    costLabel.textContent = formatCost(cost);
-    const button = el("button");
+    desc.textContent = locked
+      ? `Requires ${requiresTitle}. ${project.description}`
+      : hangarFull
+        ? `${project.description} No free hangar berth — scrap or lose a craft first.`
+        : `${project.description}${berthNote}`;
+    node.appendChild(desc);
+
+    if (!locked) {
+      const chips = el("div", "proj-cost-row");
+      chips.append(
+        span(formatCost(cost), "proj-cost"),
+        span(formatHours(manufacturingDuration(campaign, project.id)), "proj-duration"),
+      );
+      node.appendChild(chips);
+    }
+
+    const button = el("button", "proj-action");
     button.textContent = workshopBusy
       ? "Workshop busy"
       : locked
@@ -4128,9 +4295,8 @@ export class BaseView {
             : "Need resources";
     button.disabled = workshopBusy || !canManufacture;
     button.addEventListener("click", () => this.opts.onStartManufacturing(project.id));
-    row.append(costLabel, button);
-    card.append(title, copy, row);
-    return card;
+    node.appendChild(button);
+    return node;
   }
 
   /** Active construction (remaining hours) + buildable facilities (cost + Build). */

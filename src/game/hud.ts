@@ -24,7 +24,13 @@ import { coverDefenseFor } from "../sim/combat";
 import { visibleEnemyIds } from "../sim/index";
 import type { SoldierRank, SoldierStatGrowth } from "../campaign/types";
 import { UI_TOKENS, UI_BASE, UI_COMPONENTS, UI_PRIMITIVES } from "./uiTheme";
-import { formatCredits, formatDuration, formatPercent, ratioToPercent } from "./uiFormat";
+import {
+  formatCredits,
+  formatDuration,
+  formatPercent,
+  formatSignedCredits,
+  ratioToPercent,
+} from "./uiFormat";
 
 export interface HudHover {
   kind: "target" | "move" | "blocked";
@@ -137,6 +143,16 @@ export interface HudDebrief {
     held: number;
     capacity: number;
   };
+  /** Signed post-mission threat delta (after − before), in the same percent units as
+   *  {@link threat}. Negative reads as a reduction (good direction). Controller-derived. */
+  threatDelta?: number;
+  /** Signed funding delta (after − before), in credits. Positive reads as a gain (good). */
+  fundingDelta?: number;
+  /** Signed aggregate/highest regional panic delta, in percent units. Negative reads as a
+   *  panic reduction (good direction). Controller-derived. */
+  panicDelta?: number;
+  /** Mission objective progress lines, each flagged done/not-done. Controller-derived. */
+  objectives?: { label: string; done: boolean }[];
 }
 
 export interface HudCallbacks {
@@ -178,6 +194,21 @@ const STYLE_ID = "blacksite-hud-style";
 const LOG_TAIL = 7;
 /** Morale at/above this value reads as "Steady"; below PANIC_THRESHOLD reads as "PANIC". */
 const MORALE_STEADY_FLOOR = 67;
+
+/** Signed integer-percent string for strategic deltas: `+5%`, `-12%`, `0%`. */
+function signedPercent(delta: number): string {
+  if (!Number.isFinite(delta)) return "0%";
+  const rounded = Math.round(delta);
+  const sign = rounded > 0 ? "+" : "";
+  return `${sign}${rounded}%`;
+}
+
+/** Semantic tone for a signed strategic delta given which sign is the helpful
+ *  direction. Zero (or non-finite) is neutral. */
+function deltaTone(delta: number, goodWhenPositive: boolean): "good" | "bad" | "neutral" {
+  if (!Number.isFinite(delta) || Math.round(delta) === 0) return "neutral";
+  return delta > 0 === goodWhenPositive ? "good" : "bad";
+}
 
 const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMITIVES + "\n" + `
 :root {
@@ -336,11 +367,20 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
 }
 #hud .log .line.current { color: var(--ui-text); }
 
+/* Operative dossier docks TOP-left under the mission card. width 300 keeps its right
+   edge (14+300=314) left of the viewport's 20% line (320 at the 1600 test width) so
+   this persistent panel never intrudes on the battlefield's central 60% column,
+   whatever its height. It shares the left rail with .actions (bottom-anchored); the
+   capped max-heights below guarantee the two never collide. */
 #hud .unit {
   left: max(14px, env(safe-area-inset-left));
-  bottom: max(14px, env(safe-area-inset-bottom));
-  width: 320px;
-  max-height: calc(100vh - 160px);
+  top: 214px;
+  width: 300px;
+  /* Each rail panel gets just under half the viewport height; with .unit anchored at
+     top:214 and .actions anchored to the bottom, this leaves a constant ~32px gap
+     between them at ANY viewport height (unit_bottom = .5h+84, actions_top = .5h+116),
+     so they never collide and neither needs bespoke short-viewport handling. */
+  max-height: calc(50vh - 130px);
   padding: 15px;
   overflow-y: auto;
 }
@@ -387,12 +427,19 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
 #hud .stat b { display: block; margin-top: 4px; font: 750 15px/1 ui-monospace, monospace; }
 #hud .details-btn { min-height: 30px; min-width: 96px; margin-top: 10px; padding: 0 12px; font-size: 13px; text-transform: uppercase; }
 
+/* Action controls dock BOTTOM-left — never horizontally centered (was left:346 /
+   width:340, which parked its body over the battlefield's central focal column). At
+   width 300 its right edge (14+300=314) stays left of the viewport's 20% line (320
+   at 1600), so it never intrudes on the central 60%. The capped max-height keeps its
+   top below the top-anchored .unit above it. */
 #hud .actions {
-  left: 50%;
+  left: max(14px, env(safe-area-inset-left));
   bottom: max(14px, env(safe-area-inset-bottom));
-  width: 438px;
-  padding: 14px;
-  transform: translateX(-50%);
+  width: 300px;
+  /* See .unit: half-height cap keeps a constant gap above this bottom-anchored card. */
+  max-height: calc(50vh - 130px);
+  overflow-y: auto;
+  padding: 13px 14px;
 }
 #hud .context { display: flex; justify-content: space-between; gap: 16px; min-height: 42px; }
 #hud .context h3 { margin: 3px 0 0; font-size: 14px; line-height: 1.2; }
@@ -484,10 +531,13 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
 #hud .cover-tag.exposed { color: var(--hud-red); }
 #hud .cover-tag.none { color: var(--hud-muted); }
 
+/* Strike-team roster docks bottom-RIGHT. width 300 keeps its left edge
+   (1600-14-300=1286) right of the viewport's 80% line (1280 at 1600) so it stays
+   clear of the battlefield's central 60% column. */
 #hud .squad {
   right: max(14px, env(safe-area-inset-right));
   bottom: 75px;
-  width: 334px;
+  width: 300px;
   max-height: calc(100vh - 200px);
   padding: 13px;
   overflow-y: auto;
@@ -705,6 +755,35 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
 #hud .debrief-meta .rating.fair { color: var(--hud-amber); background: rgba(251,191,36,.12); }
 #hud .debrief-meta .rating.poor { color: var(--hud-red); background: rgba(251,113,133,.14); }
 
+/* Signed strategic-delta chips. The value colour carries the direction (green =
+   good, red = worse, muted = no change); a thin left accent reinforces it. */
+#hud .debrief-stat.delta { border-left-width: 3px; }
+#hud .debrief-stat.delta.good { border-left-color: rgba(74,222,128,.55); }
+#hud .debrief-stat.delta.bad { border-left-color: rgba(251,113,133,.55); }
+#hud .debrief-stat.delta.neutral { border-left-color: var(--ui-border-console); }
+#hud .debrief-stat.delta.good b { color: var(--hud-green); }
+#hud .debrief-stat.delta.bad b { color: var(--hud-red); }
+#hud .debrief-stat.delta.neutral b { color: var(--hud-muted); }
+
+/* Objective checklist — one row per mission goal, done/pending marker + label. */
+#hud .debrief-objectives { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+#hud .debrief-objectives li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--ui-border-console);
+  border-radius: var(--ui-radius-sm);
+  background: var(--ui-panel-glass);
+  box-shadow: var(--ui-glow-inner);
+}
+#hud .debrief-objectives li.done { border-color: rgba(74,222,128,.28); }
+#hud .debrief-objectives .obj-mark { flex: 0 0 auto; font: 800 14px/1 ui-monospace, monospace; }
+#hud .debrief-objectives li.done .obj-mark { color: var(--hud-green); }
+#hud .debrief-objectives li.pending .obj-mark { color: var(--hud-muted); }
+#hud .debrief-objectives .obj-label { color: var(--ui-text); font: 600 13px/1.4 ui-monospace, monospace; }
+#hud .debrief-objectives li.pending .obj-label { color: var(--hud-muted); }
+
 /* Roster lists (KIA + survivors). */
 #hud .debrief-roster { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
 #hud .debrief-roster li {
@@ -754,6 +833,30 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
 #hud .banner.campaign-win .banner-card { border-color: rgba(74,222,128,.5); box-shadow: 0 30px 120px rgba(74,222,128,.16), 0 30px 100px rgba(0,0,0,.55); }
 #hud .banner.campaign-lose .banner-card { border-color: rgba(251,113,133,.55); box-shadow: 0 30px 120px rgba(251,113,133,.16), 0 30px 100px rgba(0,0,0,.55); }
 
+/* Debrief mode — the after-action report is the dominant screen, not a compact
+   banner. Widen the card, fill the height, and let the report body scroll while the
+   title and the single CONTINUE action stay pinned. */
+#hud .banner.debrief-mode { padding: clamp(16px, 3vh, 34px); }
+#hud .banner.debrief-mode .banner-card {
+  width: min(940px, 100%);
+  max-height: calc(100vh - clamp(32px, 6vh, 68px));
+  padding: clamp(20px, 3.4vw, 38px);
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+}
+#hud .banner.debrief-mode .banner-card > .eyebrow { text-align: left; }
+#hud .banner.debrief-mode h1 { margin: 6px 0 8px; font-size: clamp(28px, 4.4vw, 44px); text-align: left; }
+#hud .banner.debrief-mode .briefing-lede { max-width: none; text-align: left; }
+/* The report body is the scrollable region; title above and actions below are fixed. */
+#hud .banner.debrief-mode .banner-report {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+#hud .banner.debrief-mode .banner-actions { margin-top: 16px; flex: 0 0 auto; justify-content: flex-end; }
+
 /* Soldier dossier (details overlay). */
 #hud .dossier h2 { margin: 4px 0 0; font-size: 26px; line-height: 1; letter-spacing: .03em; }
 #hud .dossier .rank { margin-top: 6px; color: var(--hud-cyan); font: 700 13px/1 ui-monospace, monospace; letter-spacing: .1em; text-transform: uppercase; }
@@ -768,8 +871,10 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
 
 @media (max-width: 1120px) {
   #hud .objective, #hud .log { display: none; }
-  #hud .actions { left: 348px; width: 410px; transform: none; }
-  #hud .squad { width: 292px; }
+  /* Keep the action controls bottom-left (never centered) and tighten the rail. */
+  #hud .actions { width: 288px; }
+  #hud .unit { width: 288px; }
+  #hud .squad { width: 288px; }
 }
 @media (max-width: 820px) {
   #hud .mission { width: 226px; padding: 11px 12px; }
@@ -778,9 +883,11 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   #hud .tools button { min-width: 38px; width: 38px; padding: 0; }
   #hud .squad { display: none; }
   #hud .unit {
+    top: auto;
     right: max(10px, env(safe-area-inset-right));
     bottom: max(10px, env(safe-area-inset-bottom));
     width: auto;
+    max-height: calc(100vh - 40px);
     padding: 11px 152px 11px 12px;
   }
   #hud .identity { margin-bottom: 7px; }
@@ -791,6 +898,7 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
     right: max(10px, env(safe-area-inset-right));
     bottom: 146px;
     width: auto;
+    max-height: none;
     padding: 10px;
   }
   #hud .reserve-row,
@@ -1253,11 +1361,12 @@ export class Hud {
     this.bannerTitle = el("h1");
     this.bannerCopy = el("p", "briefing-lede");
     this.bannerCopy.textContent = "Mission report transmitted to base command.";
-    this.bannerReport = el("div", "debrief-grid");
+    this.bannerReport = el("div", "banner-report");
     this.bannerReport.hidden = true;
     const bannerActions = el("div", "banner-actions");
     this.bannerReturnBtn = el("button");
-    this.bannerReturnBtn.textContent = "Return to Base";
+    this.bannerReturnBtn.textContent = "Continue";
+    this.bannerReturnBtn.title = "Dismiss the after-action report and return to base command";
     this.bannerReturnBtn.addEventListener("click", () => this.cb.onReturnToBase());
     this.bannerNewCampaignBtn = el("button");
     this.bannerNewCampaignBtn.textContent = "New Campaign";
@@ -2010,6 +2119,7 @@ export class Hud {
         "campaign",
         "campaign-win",
         "campaign-lose",
+        "debrief-mode",
       );
       return;
     }
@@ -2028,7 +2138,7 @@ export class Hud {
             : "Squad Lost";
     this.bannerCopy.textContent = debrief?.summary ?? "Mission report transmitted to base command.";
     this.bannerReport.hidden = !debrief;
-    this.bannerReport.className = "";
+    this.bannerReport.className = "banner-report";
     if (debrief) {
       this.bannerReport.replaceChildren(this.renderDebriefReport(debrief));
     } else {
@@ -2038,6 +2148,9 @@ export class Hud {
     this.bannerReturnBtn.classList.toggle("ui-cta", !campaignOver);
     this.bannerNewCampaignBtn.classList.toggle("ui-cta", campaignOver);
     this.banner.classList.add("show");
+    // A mission debrief becomes a dominant, full-screen after-action report (wide,
+    // scrollable, left-aligned body) rather than a compact centered banner.
+    this.banner.classList.toggle("debrief-mode", !!debrief);
     this.banner.classList.toggle("win", win);
     this.banner.classList.toggle("lose", !win);
     this.banner.classList.toggle("campaign", campaignOver);
@@ -2151,6 +2264,9 @@ export class Hud {
     root.appendChild(this.renderLootRow(debrief.reward));
     if (debrief.captures) root.appendChild(this.renderCapturesSection(debrief.captures));
     root.appendChild(this.renderDebriefMeta(debrief));
+    if (debrief.objectives && debrief.objectives.length > 0) {
+      root.appendChild(this.renderObjectivesSection(debrief.objectives));
+    }
     root.appendChild(this.renderCasualtySection(debrief));
     root.appendChild(this.renderSurvivorSection(debrief));
     return root;
@@ -2244,7 +2360,70 @@ export class Hud {
       this.debriefStat("Threat", formatPercent(debrief.threat)),
       this.debriefStat("Funding", formatCredits(debrief.funding)),
     );
+    // Signed strategic deltas (controller-derived, additive-optional). Green when the
+    // change moves in the helpful direction — panic/threat DOWN, funding UP — red when
+    // it worsens, neutral at zero. Aligned in the second grid row under their absolutes.
+    if (debrief.panicDelta !== undefined) {
+      grid.appendChild(
+        this.debriefDeltaStat("Panic Δ", signedPercent(debrief.panicDelta), deltaTone(debrief.panicDelta, false)),
+      );
+    }
+    if (debrief.threatDelta !== undefined) {
+      grid.appendChild(
+        this.debriefDeltaStat("Threat Δ", signedPercent(debrief.threatDelta), deltaTone(debrief.threatDelta, false)),
+      );
+    }
+    if (debrief.fundingDelta !== undefined) {
+      grid.appendChild(
+        this.debriefDeltaStat("Funding Δ", formatSignedCredits(debrief.fundingDelta), deltaTone(debrief.fundingDelta, true)),
+      );
+    }
     return grid;
+  }
+
+  /** A signed strategic-delta chip: label + coloured signed value. Tone drives the
+   *  value colour (good/bad/neutral) so the direction reads without prose. */
+  private debriefDeltaStat(
+    label: string,
+    value: string,
+    tone: "good" | "bad" | "neutral",
+  ): HTMLElement {
+    const node = el("div", `debrief-stat delta ${tone}`);
+    const span = el("span");
+    span.textContent = label;
+    const strong = el("b");
+    strong.textContent = value;
+    node.append(span, strong);
+    return node;
+  }
+
+  /** Mission objective progress: a checklist of the operation's goals, each flagged
+   *  done/pending, with a completed count in the section head. */
+  private renderObjectivesSection(
+    objectives: NonNullable<HudDebrief["objectives"]>,
+  ): HTMLElement {
+    const section = el("div", "debrief-section");
+    const head = el("div", "debrief-section-head");
+    const eyebrow = el("div", "eyebrow");
+    eyebrow.textContent = "Objectives";
+    const done = objectives.filter((o) => o.done).length;
+    const count = el("span", "debrief-count");
+    count.textContent = `${done}/${objectives.length} complete`;
+    head.append(eyebrow, count);
+    section.appendChild(head);
+
+    const list = el("ul", "debrief-objectives");
+    for (const obj of objectives) {
+      const li = el("li", obj.done ? "done" : "pending");
+      const mark = el("span", "obj-mark");
+      mark.textContent = obj.done ? "✔" : "○";
+      const label = el("span", "obj-label");
+      label.textContent = obj.label;
+      li.append(mark, label);
+      list.appendChild(li);
+    }
+    section.appendChild(list);
+    return section;
   }
 
   private debriefScoreStat(
