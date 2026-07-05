@@ -42,7 +42,7 @@ import type {
 // PSI is the psionics tuning block (TU cost, range, MC hard cap). It is a value
 // re-export from the sim's public types, not the index barrel, so import it
 // directly — same path src/game/hud.ts already uses for MORALE/STANCE.
-import { PSI } from "../sim/types";
+import { PSI, STANCE } from "../sim/types";
 import type {
   BaseLocation,
   CampaignState,
@@ -989,6 +989,8 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
       else beginTargeting("heal", itemId);
     },
     onPrimeItem: (itemId) => primeSelected(itemId),
+    onRetrieveItem: (itemId) => retrieveSelected(itemId),
+    onStowItem: (itemId) => stowSelected(itemId),
     onPsiAttack: (kind) => beginPsiTargeting(kind),
     onSetStance: (stance) => {
       const sel = selectedUnit();
@@ -1261,6 +1263,22 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
     void dispatch({ type: "primeItem", unitId: sel.id, itemId, fuseTurns: 1 });
   }
 
+  /** Move a stowed backpack item into hand for BACKPACK.RETRIEVE_TU_PERCENT. */
+  function retrieveSelected(itemId: string): void {
+    if (busy || state.status !== "playing") return;
+    const sel = selectedUnit();
+    if (!sel) return;
+    void dispatch({ type: "retrieveItem", unitId: sel.id, itemId });
+  }
+
+  /** Move a hand item back into the backpack for BACKPACK.STOW_TU_PERCENT. */
+  function stowSelected(itemId: string): void {
+    if (busy || state.status !== "playing") return;
+    const sel = selectedUnit();
+    if (!sel) return;
+    void dispatch({ type: "stowItem", unitId: sel.id, itemId });
+  }
+
   /** Immediately activate a motion scanner on the selected unit (self-use device). */
   function activateScanner(itemId: string): void {
     if (busy || state.status !== "playing") return;
@@ -1511,12 +1529,18 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
     };
   }
 
-  /** TU to enter `to` from the adjacent `from` (mirrors the sim's movement rule). */
-  function stepCost(from: Vec2, to: Vec2): number {
+  /**
+   * TU to enter `to` from the adjacent `from` (mirrors the sim's movement
+   * rule, including the kneel-move surcharge — see executeMove in battle.ts —
+   * so a kneeling unit's previewed TU cost matches what the command actually
+   * spends).
+   */
+  function stepCost(from: Vec2, to: Vec2, stanceMult = 1): number {
     const diagonal = from.x !== to.x && from.y !== to.y;
     const tile = tileTypeAt(state.grid, to.x, to.y);
     const base = tile && !tile.blocksMove ? tile.moveCost : Infinity;
-    return diagonal ? Math.floor(base * TU_COST.DIAGONAL_MULT) : base;
+    const diagonalMult = diagonal ? TU_COST.DIAGONAL_MULT : 1;
+    return Math.floor(base * diagonalMult * stanceMult);
   }
 
   interface MovePreview {
@@ -1609,8 +1633,9 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
     let prev: Vec2 = unit.pos;
     let spent = 0;
     const budget = Math.max(0, unit.tu - reservedTu(unit));
+    const stanceMult = unit.stance === "kneel" ? STANCE.KNEEL_MOVE_MULT : 1;
     for (const step of result.path) {
-      const cost = stepCost(prev, step);
+      const cost = stepCost(prev, step, stanceMult);
       if (!Number.isFinite(cost) || spent + cost > budget) break;
       spent += cost;
       affordable.push(step);

@@ -9,6 +9,7 @@ import {
 import {
   advanceGeoscape,
   canLaunchInterceptor,
+  CONTACT_PENALTY_SCALE,
   createUfoContact,
   CRASH_SITE_LIFETIME_HOURS,
   FUNDING_REPORT_INTERVAL_HOURS,
@@ -45,6 +46,7 @@ import {
   constructedFacilities,
   createCampaign,
   defectedRegions,
+  DIFFICULTY_CONFIGS,
   deploymentSoldiers,
   deploymentWeaponIds,
   difficultyConfig,
@@ -78,6 +80,7 @@ import {
   STARTING_REGIONAL_PANIC,
   THREAT_LOSS_THRESHOLD,
   updateCampaignBase,
+  ARC_FAILURE_RELIEF,
 } from "../src/campaign/storage";
 import { ITEMS, WEAPONS } from "../src/sim/content";
 import type { CampaignState, Craft, MissionType, UfoContact } from "../src/campaign/types";
@@ -254,9 +257,14 @@ describe("campaign state", () => {
   });
 
   it("advances geoscape time and detects UFO contacts for mission launch", () => {
-    const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 12345);
+    // Month-0 contactInterval is stretched by the arc-stretch ramp: base 18h (no
+    // radar-2) becomes round(18 * 1.6) = 29h. Seed 12345 rolls a "dangerous, escapes"
+    // UFO at that new hour, so this scenario uses seed 98, which still rolls an
+    // easily-interceptable scout, to keep testing the same detect->intercept->crash
+    // ->mission flow.
+    const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 98);
     const searching = advanceGeoscape(campaign, 6);
-    const detected = advanceGeoscape(searching, 12);
+    const detected = advanceGeoscape(searching, 23);
     const forecast = interceptionForecast(detected);
     const intercepted = interceptUfo(detected);
     const operation = generateOperation(intercepted);
@@ -271,17 +279,17 @@ describe("campaign state", () => {
     });
     expect(searching.ufoContact).toBeUndefined();
     expect(detected.clock).toEqual({
-      day: 1,
-      hour: 18,
-      elapsedHours: 18,
-      lastContactHour: 18,
+      day: 2,
+      hour: 5,
+      elapsedHours: 29,
+      lastContactHour: 29,
       lastFundingHour: 0,
     });
     expect(detected.ufoContact?.id).toMatch(/^UFO-01-/);
     expect(detected.ufoContact?.status).toBe("tracked");
-    // Seed 12345/hour 18 rolls a scout (16h lifetime) — ufoType now drives expiry, not the mission.
+    // Seed 98/hour 29 rolls a scout (30h lifetime) — ufoType now drives expiry, not the mission.
     expect(detected.ufoContact?.ufoType).toBe("scout");
-    expect(detected.ufoContact?.expiresAtHour).toBe(18 + UFO_TYPE_PROFILES.scout.lifetimeHours);
+    expect(detected.ufoContact?.expiresAtHour).toBe(29 + UFO_TYPE_PROFILES.scout.lifetimeHours);
     expect(canLaunchInterceptor(detected)).toBe(true);
     expect(forecast).toMatchObject({
       contactId: detected.ufoContact?.id,
@@ -304,8 +312,8 @@ describe("campaign state", () => {
     expect(regionalPanicFor(intercepted, detected.ufoContact!.region)).toBe(
       regionalPanicFor(detected, detected.ufoContact!.region)! - interceptRelief,
     );
-    expect(intercepted.ufoContact?.interceptedAtHour).toBe(18);
-    expect(intercepted.ufoContact?.expiresAtHour).toBe(18 + CRASH_SITE_LIFETIME_HOURS);
+    expect(intercepted.ufoContact?.interceptedAtHour).toBe(29);
+    expect(intercepted.ufoContact?.expiresAtHour).toBe(29 + CRASH_SITE_LIFETIME_HOURS);
     expect(intercepted.ufoContact?.interceptorDamage).toBeGreaterThan(0);
     expect(intercepted.interceptor.damage).toBe(intercepted.ufoContact?.interceptorDamage);
     expect(intercepted.interceptor.sorties).toBe(1);
@@ -326,38 +334,45 @@ describe("campaign state", () => {
   });
 
   it("penalizes ignored UFO contacts and radar detects the next contact sooner", () => {
-    const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 12345);
-    const detected = advanceGeoscape(campaign, 18);
+    // Month-0 contactInterval is stretched by the arc-stretch ramp: base 18h (no
+    // radar-2) becomes round(18 * 1.6) = 29h, and base 12h (radar-2) becomes
+    // round(12 * 1.6) = 19h. Seed 98 keeps rolling an easily-classified scout.
+    const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 98);
+    const detected = advanceGeoscape(campaign, 29);
     const expired = advanceGeoscape(detected, UFO_CONTACT_LIFETIME_HOURS);
     const stocked = {
       ...campaign,
       resources: { credits: 1500, alloys: 50, elerium: 10, alienData: 20 },
     };
     const radar = completeFacilityConstruction(stocked, "radar-2");
-    const radarDetected = advanceGeoscape(radar, 12);
+    const radarDetected = advanceGeoscape(radar, 19);
 
     expect(detected.ufoContact).toBeDefined();
     expect(expired.ufoContact).toBeUndefined();
-    // Veteran threatGainMult (0.55) scales the ignored-contact threat gain: round(6 * 0.55) = 3.
-    expect(expired.strategic.threat - campaign.strategic.threat).toBe(3);
-    expect(campaign.strategic.funding - expired.strategic.funding).toBe(15);
-    // Baseline ignore panic (18 local) is now scaled by veteran panicMult 0.75: round(18 * 0.75) = 14.
+    // Veteran threatGainMult (0.55) and the arc-stretch CONTACT_PENALTY_SCALE (0.3)
+    // both scale the ignored-contact threat gain: round(6 * 0.55 * 0.3) = 1.
+    expect(expired.strategic.threat - campaign.strategic.threat).toBe(1);
+    // Funding cut is eased the same way: round(15 * 0.3) = 5.
+    expect(campaign.strategic.funding - expired.strategic.funding).toBe(5);
+    // Baseline ignore panic (18 local) is scaled by CONTACT_PENALTY_SCALE (0.3) THEN
+    // veteran panicMult (0.75): round(round(18 * 0.3) * 0.75) = 4.
     expect(regionalPanicFor(expired, detected.ufoContact!.region)).toBe(
-      regionalPanicFor(campaign, detected.ufoContact!.region)! + 14,
+      regionalPanicFor(campaign, detected.ufoContact!.region)! + 4,
     );
     expect(highestRegionalPanic(expired).region).toBe(detected.ufoContact!.region);
     expect(expired.clock.lastContactHour).toBe(expired.clock.elapsedHours);
     expect(radarDetected.ufoContact).toBeDefined();
-    expect(radarDetected.clock.elapsedHours).toBe(12);
+    expect(radarDetected.clock.elapsedHours).toBe(19);
   });
 
   it("can fail an interception against a strong UFO and applies escape pressure", () => {
-    // Seed 8 rolls a terror ship (strength 5, speed 1.0) at hour 18: it OUTRUNS the
-    // starting Raptor (0.9), so it escapes the pursuit regardless of engagement
-    // score. radar-2 tips the score but not the speed gate — only a faster craft
-    // (a Phantom, 1.6) can force this hull down.
-    const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 8);
-    const detected = advanceGeoscape(campaign, 18);
+    // Month-0 contactInterval is stretched to round(18 * 1.6) = 29h (see the
+    // arc-stretch ramp in contactInterval). Seed 68 rolls a terror ship (strength 5,
+    // speed 1.0) at that hour: it OUTRUNS the starting Raptor (0.9), so it escapes
+    // the pursuit regardless of engagement score. radar-2 tips the score but not the
+    // speed gate — only a faster craft (a Phantom, 1.6) can force this hull down.
+    const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 68);
+    const detected = advanceGeoscape(campaign, 29);
     const forecast = interceptionForecast(detected);
     const failed = interceptUfo(detected);
     const stocked = {
@@ -406,12 +421,15 @@ describe("campaign state", () => {
     expect(failed.interceptor.damage).toBeGreaterThan(0);
     expect(failed.interceptor.repairedAtHour).toBeGreaterThan(failed.clock.elapsedHours);
     expect(failed.clock.lastContactHour).toBe(failed.clock.elapsedHours);
-    // Escaped-interception threat gain is scaled by veteran threatGainMult: round(6 * 0.55) = 3.
-    expect(failed.strategic.threat - detected.strategic.threat).toBe(3);
-    expect(detected.strategic.funding - failed.strategic.funding).toBe(15);
-    // Escape panic (8 local) is scaled by veteran panicMult 0.75: round(8 * 0.75) = 6.
+    // Escaped-interception threat gain is scaled by veteran threatGainMult AND the
+    // arc-stretch CONTACT_PENALTY_SCALE (0.3): round(6 * 0.55 * 0.3) = 1.
+    expect(failed.strategic.threat - detected.strategic.threat).toBe(1);
+    // Funding cut is eased the same way: round(15 * 0.3) = 5.
+    expect(detected.strategic.funding - failed.strategic.funding).toBe(5);
+    // Escape panic (8 local) is scaled by CONTACT_PENALTY_SCALE (0.3) THEN veteran
+    // panicMult (0.75): round(round(8 * 0.3) * 0.75) = 2.
     expect(regionalPanicFor(failed, detected.ufoContact!.region)).toBe(
-      regionalPanicFor(detected, detected.ufoContact!.region)! + 6,
+      regionalPanicFor(detected, detected.ufoContact!.region)! + 2,
     );
     // radar-2 alone: still outrun, still a dangerous forecast that escapes.
     expect(radarForecast?.succeeds).toBe(false);
@@ -427,14 +445,15 @@ describe("campaign state", () => {
   });
 
   it("repairs interceptor damage over geoscape time while the standby interceptor covers launches", () => {
-    // Seed 33 rolls a harvester (strength 3) at hour 18; the auto-resolve shoots it down,
-    // dealing 41% damage to int-1 (a 48h repair window). While int-1 is grounded a fresh
-    // tracked crash-site contact appears, so the standby interceptor (int-2) covers the
+    // Month-0 contactInterval is stretched to round(18 * 1.6) = 29h (see the
+    // arc-stretch ramp in contactInterval). Seed 33 rolls a scout at that hour; the
+    // auto-resolve shoots it down. While int-1 is grounded a fresh tracked
+    // crash-site contact appears, so the standby interceptor (int-2) covers the
     // launch. (CRASH_SITE_LIFETIME_HOURS now equals int-1's 48h repair window, so advancing
     // by it would repair the primary exactly when the crash site expires; staging a fresh
     // tracked contact isolates the standby-launch behaviour from that timing collision.)
     const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 33);
-    const detected = advanceGeoscape(campaign, 18);
+    const detected = advanceGeoscape(campaign, 29);
     const damaged = interceptUfo(detected);
     const repairHours = damaged.interceptor.repairedAtHour! - damaged.clock.elapsedHours;
     // Stage a fresh tracked crash-site contact for the standby to engage while int-1 repairs.
@@ -448,7 +467,7 @@ describe("campaign state", () => {
       resources: { credits: 1500, alloys: 50, elerium: 10, alienData: 20 },
     };
     const withWorkshop = completeFacilityConstruction(stocked, "workshop-2");
-    const workshopDetected = advanceGeoscape(withWorkshop, 18);
+    const workshopDetected = advanceGeoscape(withWorkshop, 29);
     const workshopDamaged = interceptUfo(workshopDetected);
 
     expect(repairHours).toBe(interceptorRepairHours(detected, damaged.interceptor.damage));
@@ -496,18 +515,23 @@ describe("campaign state", () => {
     expect(firstReport.resources.credits).toBe(campaign.resources.credits + 253);
     expect(firstReport.strategic.score).toBe(campaign.strategic.score + 25);
 
-    // Veteran fundingPressureMult (0.85) scales the pressure cuts: round(45 * 0.85) = 38, round(80 * 0.85) = 68.
-    expect(highThreat.strategic.funding).toBe(campaign.strategic.funding - 38);
-    expect(highThreat.lastFundingReport?.summary).toContain("High threat cut future funding by 38c");
+    // Veteran fundingPressureMult (0.85) AND the arc-stretch CONTACT_PENALTY_SCALE
+    // (0.3, easing this recurring no-decay monthly cut for the longer 8-op arc)
+    // both scale the pressure: round(45 * 0.85 * 0.3) = 11, round(80 * 0.85 * 0.3) = 20.
+    const threatCut = Math.round(45 * DIFFICULTY_CONFIGS.veteran.fundingPressureMult * CONTACT_PENALTY_SCALE.veteran);
+    const panicCut = Math.round(80 * DIFFICULTY_CONFIGS.veteran.fundingPressureMult * CONTACT_PENALTY_SCALE.veteran);
+    expect(highThreat.strategic.funding).toBe(campaign.strategic.funding - threatCut);
+    expect(highThreat.lastFundingReport?.summary).toContain(`High threat cut future funding by ${threatCut}c`);
 
-    expect(highPanic.strategic.funding).toBe(campaign.strategic.funding - 68);
-    expect(highPanic.lastFundingReport?.summary).toContain("regional panic cut 68c");
+    expect(highPanic.strategic.funding).toBe(campaign.strategic.funding - panicCut);
+    expect(highPanic.lastFundingReport?.summary).toContain(`regional panic cut ${panicCut}c`);
   });
 
   it.each<[string, number]>([
     ["rookie", 310],
     ["veteran", 387],
-    ["commander", 464],
+    // commander upkeepMult retuned 1.2 -> 1.15 (round13 §3f rebalance): round(387*1.15)=445.
+    ["commander", 445],
   ])("scales monthly upkeep by difficulty upkeepMult (%s)", (difficulty, expectedUpkeep) => {
     const campaign = createCampaign(
       { lat: 2, lon: 14.2, region: "Africa" },
@@ -561,9 +585,12 @@ describe("campaign state", () => {
     expect(afterLoss.missionsCompleted).toBe(1);
     expect(afterLoss.strategic.threat).toBeGreaterThan(afterWin.strategic.threat);
     expect(afterLoss.strategic.funding).toBeLessThan(afterWin.strategic.funding);
-    // Failure panic (+18 base) is scaled by veteran panicMult 0.75: round(18 * 0.75) = 14.
+    // Failure panic (+18 base) is scaled DOWN by the arc-stretch ARC_FAILURE_RELIEF
+    // (0.3, easing failure penalties for the longer 8-op arc) THEN veteran panicMult
+    // (0.75): round(round(18 * 0.3) * 0.75) = 4.
     expect(regionalPanicFor(afterLoss, secondOperation.region)).toBe(
-      regionalPanicFor(afterWin, secondOperation.region)! + 14,
+      regionalPanicFor(afterWin, secondOperation.region)! +
+        Math.round(Math.round(18 * ARC_FAILURE_RELIEF.veteran) * DIFFICULTY_CONFIGS.veteran.panicMult),
     );
     expect(afterLoss.resources.credits).toBe(afterWin.resources.credits + 50);
     expect(afterLoss.resources.alloys).toBe(afterWin.resources.alloys);
@@ -775,6 +802,10 @@ describe("campaign state", () => {
 
   it("can win or lose the campaign through strategic outcomes", () => {
     let winning = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 12345);
+    // The ops-fallback HQ reveal (and canLaunchFinalAssault) also require the first
+    // council report to have fired (lastCouncilMonth >= 1) — stage that directly so
+    // this test can focus on the ops-milestone behavior without advancing 30 days.
+    winning = { ...winning, lastCouncilMonth: 1 };
     for (let i = 0; i < CAMPAIGN_VICTORY_OPERATIONS; i++) {
       winning = recordMissionResult(winning, "success", generateOperation(winning), `2026-06-${15 + i}T00:00:00.000Z`);
     }
@@ -796,13 +827,16 @@ describe("campaign state", () => {
     });
 
     let losing = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 12345);
-    // The raised doom-clock ceiling (THREAT_LOSS_THRESHOLD) plus the veteran threatGainMult
-    // (0.55) mean five failures no longer collapse a fresh campaign. Stage a campaign already
-    // deep in the doom clock so the accumulated failure penalties (round(16 * 0.55) = 9 each)
-    // tip it over the threshold exactly on the fifth defeat.
+    // The raised doom-clock ceiling (THREAT_LOSS_THRESHOLD) plus the veteran
+    // threatGainMult (0.55) AND the arc-stretch ARC_FAILURE_RELIEF (0.3, easing
+    // failure penalties for the longer 8-op arc) mean five failures no longer
+    // collapse a fresh campaign. Stage a campaign already deep in the doom clock so
+    // the accumulated failure penalties (round(16 * 0.55 * 0.3) = 3 each) tip it
+    // over the threshold exactly on the fifth defeat.
+    const perFailureThreatGain = Math.round(16 * DIFFICULTY_CONFIGS.veteran.threatGainMult * ARC_FAILURE_RELIEF.veteran);
     losing = {
       ...losing,
-      strategic: { ...losing.strategic, threat: THREAT_LOSS_THRESHOLD - 45 },
+      strategic: { ...losing.strategic, threat: THREAT_LOSS_THRESHOLD - perFailureThreatGain * 5 },
     };
     for (let i = 0; i < 5; i++) {
       losing = recordMissionResult(losing, "failure", generateOperation(losing), `2026-06-${15 + i}T00:00:00.000Z`);
@@ -983,9 +1017,12 @@ describe("campaign state", () => {
 
     const failedWithoutRadar = recordMissionResult(campaign, "failure", baseOperation, "2026-06-15T00:00:00.000Z");
     const failedWithRadar = recordMissionResult(radar, "failure", radarOperation, "2026-06-15T00:00:00.000Z");
-    // Failure threat gain is scaled by veteran threatGainMult (0.55): round(16 * 0.55) = 9 without radar, round(12 * 0.55) = 7 with radar.
-    expect(failedWithoutRadar.strategic.threat - campaign.strategic.threat).toBe(9);
-    expect(failedWithRadar.strategic.threat - radar.strategic.threat).toBe(7);
+    // Failure threat gain is scaled by veteran threatGainMult (0.55) AND the
+    // arc-stretch ARC_FAILURE_RELIEF (0.3): round(16 * 0.55 * 0.3) = 3 without
+    // radar, round(12 * 0.55 * 0.3) = 2 with radar.
+    const veteranThreatGain = DIFFICULTY_CONFIGS.veteran.threatGainMult * ARC_FAILURE_RELIEF.veteran;
+    expect(failedWithoutRadar.strategic.threat - campaign.strategic.threat).toBe(Math.round(16 * veteranThreatGain));
+    expect(failedWithRadar.strategic.threat - radar.strategic.threat).toBe(Math.round(12 * veteranThreatGain));
 
     expect(researchCost(campaign, "plasmaWeapons")).toEqual(RESEARCH_COSTS.plasmaWeapons);
     expect(researchCost(annex, "plasmaWeapons")).toEqual({
@@ -1281,8 +1318,10 @@ describe("infiltration and defection", () => {
     const expired = advanceGeoscape(staged, 6);
 
     expect(expired.ufoContact).toBeUndefined();
-    // crashSite baseline gain (10) is scaled by veteran panicMult 0.75: round(10 * 0.75) = 8.
-    expect(regionalInfiltrationFor(expired, "Europe")).toBe(8);
+    // crashSite baseline gain (10) is scaled by the arc-stretch CONTACT_PENALTY_SCALE
+    // (0.3, easing this no-decay penalty for the longer 8-op arc) THEN veteran
+    // panicMult (0.75): round(round(10 * 0.3) * 0.75) = 2.
+    expect(regionalInfiltrationFor(expired, "Europe")).toBe(2);
     // The ignored contact raises infiltration, not the fresh campaign.
     expect(regionalInfiltrationFor(campaign, "Europe")).toBe(0);
     expect(defectedRegions(expired)).toEqual([]);
@@ -1299,10 +1338,12 @@ describe("infiltration and defection", () => {
     const landed = run("landedUfo");
     const terror = run("terror");
 
-    // Infiltration gains are scaled by veteran panicMult 0.75: round(10*0.75)=8, round(20*0.75)=15, round(30*0.75)=23.
-    expect(regionalInfiltrationFor(crash, "Europe")).toBe(8);
-    expect(regionalInfiltrationFor(landed, "Europe")).toBe(15);
-    expect(regionalInfiltrationFor(terror, "Europe")).toBe(23);
+    // Infiltration gains are scaled by CONTACT_PENALTY_SCALE (0.3) THEN veteran
+    // panicMult (0.75): round(round(10*0.3)*0.75)=2, round(round(20*0.3)*0.75)=5,
+    // round(round(30*0.3)*0.75)=7.
+    expect(regionalInfiltrationFor(crash, "Europe")).toBe(2);
+    expect(regionalInfiltrationFor(landed, "Europe")).toBe(5);
+    expect(regionalInfiltrationFor(terror, "Europe")).toBe(7);
     expect(regionalInfiltrationFor(terror, "Europe")!).toBeGreaterThan(
       regionalInfiltrationFor(crash, "Europe")!,
     );
@@ -1314,8 +1355,8 @@ describe("infiltration and defection", () => {
       ufoContact: stagedContact("Europe", "crashSite", 6),
     };
     state = advanceGeoscape(state, 6);
-    // Each crash-site contact adds round(10 * 0.75) = 8 infiltration at veteran.
-    expect(regionalInfiltrationFor(state, "Europe")).toBe(8);
+    // Each crash-site contact adds round(round(10 * 0.3) * 0.75) = 2 infiltration at veteran.
+    expect(regionalInfiltrationFor(state, "Europe")).toBe(2);
 
     // A second ignored crash-site contact deepens the same region's meter.
     state = {
@@ -1323,7 +1364,7 @@ describe("infiltration and defection", () => {
       ufoContact: stagedContact("Europe", "crashSite", state.clock.elapsedHours + 6),
     };
     state = advanceGeoscape(state, 6);
-    expect(regionalInfiltrationFor(state, "Europe")).toBe(16);
+    expect(regionalInfiltrationFor(state, "Europe")).toBe(4);
   });
 
   it("defects a nation when infiltration reaches 100, cutting funding permanently", () => {
@@ -1331,16 +1372,20 @@ describe("infiltration and defection", () => {
     // Veteran share: round(600 / 8) = 75 council credits withdrawn on defection.
     const share = Math.round(base.strategic.funding / COUNCIL_REGIONS.length);
 
-    // Europe sits one terror contact (+30) away from maxing out.
+    // A terror contact's infiltration gain is now eased by the arc-stretch
+    // CONTACT_PENALTY_SCALE (0.3) before veteran panicMult (0.75):
+    // round(round(30 * 0.3) * 0.75) = 7. Europe sits one terror contact away from
+    // maxing out.
+    const terrorGain = Math.round(Math.round(30 * CONTACT_PENALTY_SCALE.veteran) * DIFFICULTY_CONFIGS.veteran.panicMult);
     const nearDefection = {
       ...base,
-      infiltration: { ...STARTING_INFILTRATION, Europe: 80 },
+      infiltration: { ...STARTING_INFILTRATION, Europe: 100 - terrorGain },
       ufoContact: stagedContact("Europe", "terror", 6),
     };
     // Same scenario, but Europe stays just short of 100 (no crossing).
     const noDefect = {
       ...base,
-      infiltration: { ...STARTING_INFILTRATION, Europe: 69 },
+      infiltration: { ...STARTING_INFILTRATION, Europe: 100 - terrorGain - 1 },
       ufoContact: stagedContact("Europe", "terror", 6),
     };
 

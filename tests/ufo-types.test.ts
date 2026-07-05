@@ -106,8 +106,10 @@ describe("UFO type profiling", () => {
     expect(b.expiresAtHour).toBe(a.expiresAtHour);
 
     // advanceGeoscape spawns the same ufoType for the same campaign + elapsed hours.
-    const runA = advanceGeoscape(freshCampaign(), 18);
-    const runB = advanceGeoscape(freshCampaign(), 18);
+    // Month-0 contactInterval is stretched to round(18 * 1.6) = 29h (see the
+    // arc-stretch ramp in contactInterval).
+    const runA = advanceGeoscape(freshCampaign(), 29);
+    const runB = advanceGeoscape(freshCampaign(), 29);
     expect(runA.ufoContact?.ufoType).toBeDefined();
     expect(runB.ufoContact?.ufoType).toBe(runA.ufoContact?.ufoType);
   });

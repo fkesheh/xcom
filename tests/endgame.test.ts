@@ -50,9 +50,14 @@ function capture(templateId: string, rank: CaptiveRank): MissionCapture {
   return { templateId, rank };
 }
 
-/** Drive N successful crash-site operations to advance missionsCompleted. */
+/**
+ * Drive N successful crash-site operations to advance missionsCompleted. The
+ * ops-fallback HQ reveal (and canLaunchFinalAssault) also require the first
+ * council report to have fired (lastCouncilMonth >= 1) — stage that directly so
+ * these tests can focus on ops/interrogation gating without advancing 30 days.
+ */
 function winOps(campaign: CampaignState, n: number): CampaignState {
-  let c = campaign;
+  let c: CampaignState = { ...campaign, lastCouncilMonth: 1 };
   for (let i = 0; i < n; i++) {
     c = recordMissionResult(c, "success", generateOperation(c), {
       ...roster(c),
@@ -398,6 +403,10 @@ describe("endgame — interrogation research gating", () => {
       ...createCampaign(BASE, SEED),
       completedResearch: ["alienBiotech", "alienInterrogation", "leaderInterrogation"],
       alienHq: { location: { lat: 10, lon: 10, region: "Africa" }, revealed: true },
+      // canLaunchFinalAssault also requires the first council report to have fired
+      // (lastCouncilMonth >= 1); stage that directly since this test is about the
+      // interrogation-research gate, not council timing.
+      lastCouncilMonth: 1,
     };
     expect(canLaunchFinalAssault(base)).toBe(false);
     const staged = seedCaptives(base, ["commander"]);

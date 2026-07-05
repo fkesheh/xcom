@@ -19,7 +19,10 @@ import type {
   CaptiveIntakeReport,
   CaptiveRank,
   AlienHq,
+  CouncilGrade,
   CouncilRegion,
+  CouncilRegionRating,
+  CouncilReport,
   Craft,
   DifficultyLevel,
   EquipmentMarket,
@@ -57,9 +60,29 @@ import {
   type BaseFacility,
 } from "./base";
 import { isLand } from "./landMask";
+import { canAddToBackpack } from "./backpack";
 
 export const CAMPAIGN_STORAGE_KEY = "blacksite.campaign.v1";
-export const CAMPAIGN_VICTORY_OPERATIONS = 4;
+export const CAMPAIGN_VICTORY_OPERATIONS = 8;
+
+/**
+ * Scales down FAILURE-side threat/funding/panic penalties (mission failures here,
+ * escaped/ignored UFO contacts in campaign/geoscape.ts) so the total risk budget
+ * across a full 8-op campaign lands back in the balance-harness's target win-rate
+ * band despite needing roughly double the mission attempts of the old 4-op arc.
+ * Success rewards are intentionally left unscaled. Commander's much higher
+ * threatGainMult/panicMult (see DIFFICULTY_CONFIGS) means a flat relief factor
+ * under-corrects it relative to rookie/veteran, so relief is difficulty-scaled.
+ */
+export const ARC_FAILURE_RELIEF: Record<DifficultyLevel, number> = {
+  rookie: 0.3,
+  veteran: 0.3,
+  commander: 0.28,
+};
+
+export function arcFailureRelief(campaign: CampaignState): number {
+  return ARC_FAILURE_RELIEF[campaign.strategic.difficulty ?? "veteran"];
+}
 
 /**
  * Real-world speed conversion. The globe is a unit sphere modelled in great-circle
@@ -532,16 +555,36 @@ export const DIFFICULTY_CONFIGS: Record<DifficultyLevel, DifficultyConfig> = {
   },
   commander: {
     label: "Commander",
-    startingThreat: 65,
-    startingFunding: 420,
-    startingCredits: 560,
-    enemyCountMult: 1.35,
-    ufoStrengthBonus: 1,
-    interceptionDamageMult: 1.15,
-    fundingPressureMult: 1.25,
-    panicMult: 1.3,
-    threatGainMult: 1.1,
-    upkeepMult: 1.2,
+    // Was 65, then 30: the 8-op victory arc (was 4) needs roughly double the
+    // calendar time to win. Neither 65 nor 30 left enough margin to survive that
+    // long — the balance harness (tests/balance-sim.test.ts, 50 campaigns) measured
+    // just 16% at startingThreat=30, 10pts under the required 26-42% band (round13
+    // §3f). The harness showed the 8-op requirement is THROUGHPUT-bound, not
+    // survival-bound: commander's per-mission win rate is close to veteran/rookie,
+    // but a starved early economy (low starting funding/credits) meant fewer bases
+    // and slower gear upgrades, so fewer contacts got assaulted before the harness's
+    // simulated-time ceiling — far short of the ~8 successes needed. Raising
+    // starting funding/credits fixed throughput; startingThreat was retuned back up
+    // alongside it to keep commander's threat margin tighter than veteran's.
+    startingThreat: 25,
+    startingFunding: 560,
+    startingCredits: 700,
+    // ufoStrengthBonus has no live consumer (dead config field; grep confirms it is
+    // read nowhere outside this table) so it does not affect balance — only
+    // enemyCountMult and the multipliers below do. enemyCountMult matches veteran's
+    // (0.7): commander's difficulty now comes from its harsher economy/threat
+    // multipliers, ARC_FAILURE_RELIEF/CONTACT_PENALTY_SCALE (storage.ts/geoscape.ts,
+    // raised 0.05 -> 0.28 to restore real teeth to failure penalties), and a tighter
+    // starting threat margin, rather than from materially bigger tactical battles
+    // (which mainly fed more mission-scaled loot and paradoxically raised the win
+    // rate further via the same economic snowball that throughput needed).
+    enemyCountMult: 0.7,
+    ufoStrengthBonus: 0.6,
+    interceptionDamageMult: 1.1,
+    fundingPressureMult: 1.15,
+    panicMult: 1.05,
+    threatGainMult: 0.9,
+    upkeepMult: 1.15,
     alienHqCrewSize: 7,
   },
 };
@@ -1702,7 +1745,10 @@ export function canAssignSoldierItem(campaign: CampaignState, soldierId: string,
   if (campaign.strategic.status !== "active") return false;
   const soldier = campaign.soldiers.find((candidate) => candidate.id === soldierId);
   if (!soldier || soldier.status === "kia") return false;
-  return availableItemCount(campaign, itemId) > 0;
+  if (availableItemCount(campaign, itemId) <= 0) return false;
+  // Backpack capacity gate (round 13): the soldier's stowed consumables must not
+  // exceed BACKPACK_SLOTS once this item is added.
+  return canAddToBackpack(soldier.loadoutItems ?? [], itemId);
 }
 
 function addItemStock(armory: CampaignArmory, itemId: string, delta: number): CampaignArmory {
@@ -2285,6 +2331,7 @@ export function recordMissionResult(
   if (
     strategic.status === "active" &&
     missionsCompleted >= CAMPAIGN_VICTORY_OPERATIONS &&
+    (campaign.lastCouncilMonth ?? 0) >= 1 &&
     nextAlienHq &&
     !nextAlienHq.revealed
   ) {
@@ -2335,6 +2382,7 @@ function updateRegionalPanicForMission(
   rosterOutcome: MissionRosterOutcome | undefined,
 ): Record<CouncilRegion, number> {
   const panicMult = difficultyConfig(campaign).panicMult;
+  const relief = arcFailureRelief(campaign);
   const region = operation.region;
   // The final HQ assault is the retryable climax: the world already knows the base
   // is located, so a failed assault does not spike global panic (mirrors the frozen
@@ -2346,7 +2394,13 @@ function updateRegionalPanicForMission(
   const regionalPanic =
     result === "success"
       ? adjustRegionalPanic(campaign.regionalPanic, region, -18, 0, panicMult)
-      : adjustRegionalPanic(campaign.regionalPanic, region, 18, 2, panicMult);
+      : adjustRegionalPanic(
+          campaign.regionalPanic,
+          region,
+          Math.round(18 * relief),
+          Math.round(2 * relief),
+          panicMult,
+        );
 
   if (operation.missionType === "terror") {
     const civilianCasualties = rosterOutcome?.civilianCasualties ?? 0;
@@ -2355,8 +2409,8 @@ function updateRegionalPanicForMission(
       return adjustRegionalPanic(
         regionalPanic,
         region,
-        Math.round(TERROR_EXTRA_PANIC_LOCAL * panicMult),
-        Math.round(TERROR_EXTRA_PANIC_SPILLOVER * panicMult),
+        Math.round(TERROR_EXTRA_PANIC_LOCAL * panicMult * (result === "failure" ? relief : 1)),
+        Math.round(TERROR_EXTRA_PANIC_SPILLOVER * panicMult * (result === "failure" ? relief : 1)),
       );
     }
   }
@@ -2518,9 +2572,22 @@ function updateStrategic(
   // Success relief is deliberately large so a player who wins missions outruns the
   // doom clock — that positive feedback is the intended X-COM survival loop.
   const rawThreatDelta = success ? (trackingUplink ? -28 : -25) : failedAssault ? 0 : trackingUplink ? 12 : 16;
-  const threatDelta = rawThreatDelta > 0 ? Math.round(rawThreatDelta * difficultyConfig(campaign).threatGainMult) : rawThreatDelta;
+  // ARC_FAILURE_RELIEF: CAMPAIGN_VICTORY_OPERATIONS now requires roughly double the
+  // mission attempts (4 -> 8 wins), so a fixed per-failure penalty on the doom clock
+  // and funding would double the cumulative punishment across a full campaign, well
+  // past what the balance harness (tests/balance-sim.test.ts) tolerates. Only the
+  // FAILURE-side penalty is eased — success relief is untouched, preserving "winning
+  // outruns the doom clock" as the intended survival loop.
+  const relief = arcFailureRelief(campaign);
+  const threatDelta =
+    rawThreatDelta > 0
+      ? Math.round(rawThreatDelta * difficultyConfig(campaign).threatGainMult * relief)
+      : rawThreatDelta;
   const threat = Math.max(0, Math.min(THREAT_LOSS_THRESHOLD, strategic.threat + threatDelta));
-  const funding = Math.max(0, strategic.funding + (success ? 100 : failedAssault ? -25 : -75));
+  const funding = Math.max(
+    0,
+    strategic.funding + (success ? 100 : failedAssault ? -25 : Math.round(-75 * relief)),
+  );
   const score = strategic.score + (success ? 100 + operation.enemyCount * 10 : -50);
   const canFieldSquad =
     soldiers.some((soldier) => soldier.status !== "kia") ||
@@ -2621,6 +2688,7 @@ function consumeQualifyingCaptive(campaign: CampaignState, project: ResearchProj
 export function canLaunchFinalAssault(campaign: CampaignState): boolean {
   if (campaign.strategic.status !== "active") return false;
   if (!campaign.alienHq?.revealed) return false;
+  if ((campaign.lastCouncilMonth ?? 0) < 1) return false;
   return (
     campaign.completedResearch.includes("commanderInterrogation") ||
     campaign.missionsCompleted >= CAMPAIGN_VICTORY_OPERATIONS
@@ -2936,6 +3004,11 @@ export function loadCampaign(): CampaignState | null {
       // re-seed it deterministically from the campaign seed (hidden), and mark it
       // revealed when the save already qualifies for the fallback unlock.
       alienHq: normalizeAlienHq(parsed.alienHq) ?? backfillAlienHq(parsed.seed, parsed.missionsCompleted),
+      councilReports: normalizeCouncilReports(parsed.councilReports),
+      lastCouncilMonth:
+        typeof parsed.lastCouncilMonth === "number"
+          ? Math.max(0, Math.floor(parsed.lastCouncilMonth))
+          : 0,
     };
     return completeFinishedBaseConstruction(completeFinishedConstruction(completeFinishedManufacturing(recoverWoundedSoldiers(completeFinishedResearch(normalized)))));
   } catch {
@@ -3003,6 +3076,76 @@ function normalizeInfiltration(value: unknown): Record<CouncilRegion, number> {
       typeof infiltration === "number" ? Math.max(0, Math.min(100, Math.round(infiltration))) : 0;
   }
   return result;
+}
+
+const COUNCIL_GRADES: readonly CouncilGrade[] = ["A", "B", "C", "D", "F"];
+const COUNCIL_REPORT_HISTORY_LIMIT = 12;
+
+function normalizeCouncilGrade(value: unknown): CouncilGrade {
+  return (COUNCIL_GRADES as readonly unknown[]).includes(value) ? (value as CouncilGrade) : "C";
+}
+
+function normalizeCouncilRegionRating(value: unknown): CouncilRegionRating | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const maybe = value as Partial<CouncilRegionRating>;
+  const region = councilRegionFor(typeof maybe.region === "string" ? maybe.region : "");
+  if (
+    !region ||
+    typeof maybe.panic !== "number" ||
+    typeof maybe.infiltration !== "number" ||
+    typeof maybe.fundingDelta !== "number"
+  ) {
+    return undefined;
+  }
+  return {
+    region,
+    panic: Math.max(0, Math.min(100, Math.round(maybe.panic))),
+    infiltration: Math.max(0, Math.min(100, Math.round(maybe.infiltration))),
+    fundingDelta: Math.round(maybe.fundingDelta),
+    defected: maybe.defected === true,
+  };
+}
+
+function normalizeCouncilReport(value: unknown): CouncilReport | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const maybe = value as Partial<CouncilReport>;
+  if (
+    typeof maybe.month !== "number" ||
+    typeof maybe.completedAtHour !== "number" ||
+    typeof maybe.income !== "number" ||
+    typeof maybe.upkeep !== "number" ||
+    typeof maybe.net !== "number" ||
+    typeof maybe.totalFundingDelta !== "number" ||
+    typeof maybe.rating !== "number" ||
+    typeof maybe.narrative !== "string" ||
+    !Array.isArray(maybe.regions)
+  ) {
+    return undefined;
+  }
+  const regions = maybe.regions
+    .map(normalizeCouncilRegionRating)
+    .filter((rating): rating is CouncilRegionRating => rating !== undefined);
+  return {
+    month: Math.max(0, Math.floor(maybe.month)),
+    completedAtHour: Math.max(0, Math.floor(maybe.completedAtHour)),
+    regions,
+    totalFundingDelta: Math.round(maybe.totalFundingDelta),
+    income: Math.round(maybe.income),
+    upkeep: Math.round(maybe.upkeep),
+    net: Math.round(maybe.net),
+    rating: Math.round(maybe.rating),
+    grade: normalizeCouncilGrade(maybe.grade),
+    narrative: maybe.narrative,
+  };
+}
+
+/** Council debrief history on load: validates each entry's shape/clamps, capped to the history limit. */
+function normalizeCouncilReports(value: unknown): CouncilReport[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(normalizeCouncilReport)
+    .filter((report): report is CouncilReport => report !== undefined)
+    .slice(0, COUNCIL_REPORT_HISTORY_LIMIT);
 }
 
 function normalizeClock(value: unknown): CampaignClock {

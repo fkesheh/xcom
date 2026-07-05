@@ -143,7 +143,9 @@ describe("campaign save/load normalization", () => {
   });
 
   it("preserves an in-progress engaging encounter so canResolveInterception stays true", () => {
-    const detected = advanceGeoscape(freshCampaign(), 18);
+    // Month-0 contactInterval is stretched to round(18 * 1.6) = 29h (see the
+    // arc-stretch ramp in contactInterval).
+    const detected = advanceGeoscape(freshCampaign(), 29);
     const started = startInterceptionEncounter(detected);
     expect(started.ufoContact?.status).toBe("engaging");
     expect(started.interception).toBeDefined();

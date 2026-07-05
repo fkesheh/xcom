@@ -84,14 +84,27 @@ function templateIdForRank(rank: EnemyRank, index: number): string {
   }
 }
 
-/** Build a carried item instance: grenades are single-use, medkits hold 3 charges. */
-function makeItemInstance(id: string): ItemInstance {
-  return { itemId: id, uses: id === "medkit" ? 3 : 1 };
+/**
+ * Build a carried item instance: grenades are single-use, medkits hold 3
+ * charges. `stowed` mirrors the backpack feature (see
+ * BACKPACK.RETRIEVE_TU_PERCENT / ItemInstance.location) — player consumables
+ * start stowed and must be retrieved before use; the equipped weapon is the
+ * hand and is tracked separately via Unit.weaponId, not as an ItemInstance.
+ * Hostile templates keep items hand-ready (`stowed:false`): the enemy AI
+ * (ai.ts, frozen this round) throws grenades directly without a retrieve step.
+ */
+function makeItemInstance(id: string, stowed: boolean): ItemInstance {
+  return {
+    itemId: id,
+    uses: id === "medkit" ? 3 : 1,
+    ...(stowed ? { location: "backpack" as const } : {}),
+  };
 }
 
 /** Map a template's item ids to starting carried instances. */
 function itemInstancesFor(template: UnitTemplate): ItemInstance[] {
-  return (template.items ?? []).map(makeItemInstance);
+  const stowed = template.faction === "player";
+  return (template.items ?? []).map((id) => makeItemInstance(id, stowed));
 }
 
 const DEFAULT_WIDTH = 30;
@@ -261,7 +274,7 @@ export function createSkirmish(opts: SkirmishOptions): BattleState {
     applyStatBonus(unit, opts.playerStatBonuses?.[i]);
     const extra = opts.playerItems?.[i];
     if (extra && extra.length > 0) {
-      unit.items = [...(unit.items ?? []), ...extra.map(makeItemInstance)];
+      unit.items = [...(unit.items ?? []), ...extra.map((id) => makeItemInstance(id, true))];
     }
     units.push(unit);
     nextId++;

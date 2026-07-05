@@ -232,6 +232,13 @@ export interface ItemInstance {
   primed?: boolean;
   /** Grenade: turns until detonation once primed (0 = impact-detonated on throw). */
   fuseTurns?: number;
+  /**
+   * Carry location. "hand" = ready to use/throw this turn; "backpack" = stowed,
+   * must be retrieved (costing TU) before it can be used. Undefined is treated as
+   * "hand" (battle-only state, never persisted). setup.ts stows fresh loadout
+   * items as "backpack".
+   */
+  location?: "hand" | "backpack";
 }
 
 /** How a panicking unit behaves for the turn. */
@@ -437,6 +444,8 @@ export type Command =
   | { type: "throwItem"; unitId: UnitId; target: Vec2; itemId: string }
   | { type: "useItem"; unitId: UnitId; targetId: UnitId; itemId: string }
   | { type: "primeItem"; unitId: UnitId; itemId: string; fuseTurns: number }
+  | { type: "retrieveItem"; unitId: UnitId; itemId: string }
+  | { type: "stowItem"; unitId: UnitId; itemId: string }
   | { type: "psiAttack"; unitId: UnitId; targetId: UnitId; kind: PsiKind }
   | { type: "endTurn" };
 
@@ -640,8 +649,22 @@ export const STANCE = {
   KNEEL_ACCURACY_BONUS: 24,
   /** Hit-chance reduction against a kneeling target (presents a smaller profile). */
   KNEEL_TARGET_DEFENSE: 0.25,
-  /** Movement TU multiplier while kneeling (kneeling moves are a bit costlier). */
-  KNEEL_MOVE_MULT: 1.25,
+  /** Movement TU multiplier while kneeling (kneeling moves pay a ~+50% surcharge per tile). */
+  KNEEL_MOVE_MULT: 1.5,
+} as const;
+
+/**
+ * Backpack / hand carry tuning. A soldier's consumable items start the battle
+ * stowed in the backpack (see {@link ItemInstance.location}); using or throwing a
+ * stowed item first requires a "retrieveItem" command that moves it to a hand and
+ * spends TU. "stowItem" is the reverse. Costs are a percentage of the unit's MAX
+ * TU (same model as item/shot costs), floored to an integer at execution time.
+ */
+export const BACKPACK = {
+  /** TU cost (% of max TU) to retrieve one stowed item into a hand this turn. */
+  RETRIEVE_TU_PERCENT: 15,
+  /** TU cost (% of max TU) to stow a hand item back into the backpack. */
+  STOW_TU_PERCENT: 8,
 } as const;
 
 /**

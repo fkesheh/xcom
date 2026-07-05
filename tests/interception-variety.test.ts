@@ -364,7 +364,10 @@ describe("interception outcomes", () => {
 
 describe("headless interceptUfo", () => {
   it("resolves a tracked contact in a single call with no lingering encounter", () => {
-    const detected = advanceGeoscape(freshCampaign(), 18);
+    // Month-0 contactInterval is stretched to round(18 * 1.6) = 29h (see the
+    // arc-stretch ramp in contactInterval). Seed 98 rolls an easily-interceptable
+    // scout at that hour (the default SEED now rolls a UFO that outruns pursuit).
+    const detected = advanceGeoscape(freshCampaign(98), 29);
     const intercepted = interceptUfo(detected);
     expect(intercepted.interception).toBeUndefined();
     expect(intercepted.lastInterceptionReport).toBeDefined();

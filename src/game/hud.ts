@@ -5,7 +5,7 @@
  * stay in src/sim and the controller remains responsible for dispatching them.
  */
 
-import { MORALE, STANCE } from "../sim/types";
+import { BACKPACK, MORALE, STANCE } from "../sim/types";
 import type {
   BattleState,
   Item,
@@ -23,6 +23,7 @@ import type {
 import { coverDefenseFor } from "../sim/combat";
 import { visibleEnemyIds } from "../sim/index";
 import type { SoldierRank, SoldierStatGrowth } from "../campaign/types";
+import { BACKPACK_SLOTS, backpackUsedSlots } from "../campaign/backpack";
 import { UI_TOKENS, UI_BASE, UI_COMPONENTS, UI_PRIMITIVES } from "./uiTheme";
 import {
   formatCredits,
@@ -167,6 +168,10 @@ export interface HudCallbacks {
   onThrowItem?: (itemId: string) => void;
   onUseItem?: (itemId: string) => void;
   onPrimeItem?: (itemId: string) => void;
+  /** Move a stowed backpack item into hand, spending BACKPACK.RETRIEVE_TU_PERCENT. */
+  onRetrieveItem?: (itemId: string) => void;
+  /** Move a hand item back into the backpack, spending BACKPACK.STOW_TU_PERCENT. */
+  onStowItem?: (itemId: string) => void;
   /**
    * Enter psi-targeting mode for the selected operative. The next enemy click
    * resolves into a `psiAttack` command (see main.ts). Omitted when the unit has
@@ -548,7 +553,16 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   pointer-events: none;
 }
 #hud .item-line button:disabled .item-count { opacity: .4; }
+#hud .item-line button.stow { min-width: 26px; padding: 0 6px; font: 800 12px/1 ui-monospace, monospace; }
 #hud .items-empty { color: var(--hud-muted); font: 600 13px/1.3 ui-monospace, monospace; padding: 4px 2px; }
+
+/* Backpack panel — stowed items (greyed, retrieve-only) + a used/total slot counter. */
+#hud .backpack-row { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--ui-border); }
+#hud .backpack-header { display: flex; justify-content: flex-end; }
+#hud .backpack-slots { color: var(--hud-muted); font: 700 11px/1 ui-monospace, monospace; letter-spacing: .03em; }
+#hud .backpack-stack { display: flex; flex-wrap: wrap; gap: 6px; }
+#hud .backpack-line button.stowed { opacity: .45; }
+#hud .backpack-line button.stowed:disabled { cursor: default; }
 
 /* Psionics — two icon sub-buttons (Panic + Mind Control) that ride the action
    strip. Each pairs a glyph with its TU cost; the MC button reads "SPENT" once the
@@ -932,7 +946,8 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
     padding: 10px;
   }
   #hud .action-strip,
-  #hud .items-row { display: none; }
+  #hud .items-row,
+  #hud .backpack-row { display: none; }
   #hud .modes { margin-top: 7px; }
   #hud .modes button { min-height: 48px; }
   #hud .endturn { right: 20px; bottom: 36px; min-width: 124px; min-height: 46px; font-size: 12px; }
@@ -982,6 +997,19 @@ export function itemActionTuCost(
 ): number {
   const factor = action === "prime" ? 0.5 : 1;
   return Math.ceil((maxTu * tuPercent * factor) / 100);
+}
+
+/** A backpack traffic action: pull a stowed item into hand, or stow a hand one. */
+export type BackpackActionKind = "retrieve" | "stow";
+
+/**
+ * TU cost to retrieve/stow one item. Mirrors `executeRetrieveItem` /
+ * `executeStowItem` in src/sim/battle.ts exactly (percent of max TU, floored).
+ */
+export function backpackActionTuCost(maxTu: number, action: BackpackActionKind): number {
+  const percent =
+    action === "retrieve" ? BACKPACK.RETRIEVE_TU_PERCENT : BACKPACK.STOW_TU_PERCENT;
+  return Math.floor((maxTu * percent) / 100);
 }
 
 /**
@@ -1078,6 +1106,9 @@ export class Hud {
   private readonly reserveButtons = new Map<ReserveMode, HTMLButtonElement>();
   private readonly itemsRow: HTMLDivElement;
   private readonly itemsStack: HTMLDivElement;
+  private readonly backpackRow: HTMLDivElement;
+  private readonly backpackHeader: HTMLDivElement;
+  private readonly backpackStack: HTMLDivElement;
   private readonly stanceButton: HTMLButtonElement;
   private readonly psiRow: HTMLDivElement;
   private readonly psiPanicButton: HTMLButtonElement;
@@ -1333,6 +1364,13 @@ export class Hud {
     this.itemsStack = el("div", "items-stack");
     this.itemsRow.appendChild(this.itemsStack);
     actions.appendChild(this.itemsRow);
+
+    // Backpack panel: stowed items with a "retrieve" affordance + slot counter.
+    this.backpackRow = el("div", "backpack-row");
+    this.backpackHeader = el("div", "backpack-header");
+    this.backpackStack = el("div", "backpack-stack");
+    this.backpackRow.append(this.backpackHeader, this.backpackStack);
+    actions.appendChild(this.backpackRow);
     this.root.appendChild(actions);
 
     const squad = el("section", "panel squad");
@@ -1974,31 +2012,98 @@ export class Hud {
     if (!selected || items.length === 0) {
       this.itemsRow.style.display = "none";
       this.itemsStack.replaceChildren();
+      this.backpackRow.style.display = "none";
+      this.backpackHeader.replaceChildren();
+      this.backpackStack.replaceChildren();
       return;
     }
-    this.itemsRow.style.display = "";
 
     const maxTu = selected.stats.timeUnits;
     const playerActing =
       !runtime.busy &&
       state.activeFaction === "player" &&
       state.status === "playing";
-    const lines: HTMLElement[] = [];
 
-    for (const inst of items) {
+    const handItems = items.filter((inst) => inst.location !== "backpack");
+    const backpackItems = items.filter((inst) => inst.location === "backpack");
+
+    // Hand items — usable/throwable/primable as before, plus a "stow" affordance.
+    this.itemsRow.style.display = "";
+    const lines: HTMLElement[] = [];
+    for (const inst of handItems) {
       const def = state.items?.[inst.itemId];
       if (!def) continue;
-      const line = this.buildItemLine(inst, def, maxTu, selected, playerActing);
-      lines.push(line);
+      lines.push(this.buildItemLine(inst, def, maxTu, selected, playerActing));
     }
-
     if (lines.length === 0) {
       const empty = el("div", "items-empty");
-      empty.textContent = "No usable items";
+      empty.textContent = "No items in hand";
       this.itemsStack.replaceChildren(empty);
     } else {
       this.itemsStack.replaceChildren(...lines);
     }
+
+    // Backpack panel — stowed items, each showing the retrieve TU cost, plus a
+    // used/BACKPACK_SLOTS slot counter. Slots are counted against the whole
+    // carried inventory (hand + backpack), matching the campaign loadout model.
+    this.backpackRow.style.display = "";
+    const usedSlots = backpackUsedSlots(items.map((inst) => inst.itemId));
+    const slotCount = el("span", "backpack-slots");
+    slotCount.textContent = `${usedSlots}/${BACKPACK_SLOTS}`;
+    this.backpackHeader.replaceChildren(slotCount);
+
+    const backpackLines: HTMLElement[] = [];
+    for (const inst of backpackItems) {
+      const def = state.items?.[inst.itemId];
+      if (!def) continue;
+      backpackLines.push(this.buildBackpackLine(inst, def, maxTu, selected, playerActing));
+    }
+    if (backpackLines.length === 0) {
+      const empty = el("div", "items-empty");
+      empty.textContent = "Backpack empty";
+      this.backpackStack.replaceChildren(empty);
+    } else {
+      this.backpackStack.replaceChildren(...backpackLines);
+    }
+  }
+
+  /** A stowed item's line: greyed icon + a "retrieve" (R) affordance. */
+  private buildBackpackLine(
+    inst: ItemInstance,
+    def: Item,
+    maxTu: number,
+    selected: Unit,
+    playerActing: boolean,
+  ): HTMLElement {
+    const cost = backpackActionTuCost(maxTu, "retrieve");
+    const outOfUses = inst.uses <= 0;
+    const cantAfford = selected.tu < cost;
+    const glyph = ITEM_ICON[def.kind] ?? "▪";
+
+    const line = el("div", "item-line backpack-line");
+    const main = el("button", "stowed");
+    main.textContent = glyph;
+    main.disabled = true;
+    main.setAttribute("aria-label", `${def.name} (stowed)`);
+    main.title = `${def.name} is stowed — retrieve it before use or throw.`;
+    if (def.kind !== "stunRod") {
+      const count = el("span", "item-count");
+      count.textContent = String(inst.uses);
+      main.appendChild(count);
+    }
+    line.appendChild(main);
+
+    const retrieve = el("button", "prime");
+    retrieve.textContent = "R";
+    retrieve.setAttribute("aria-label", `Retrieve ${def.name}`);
+    retrieve.disabled = !playerActing || outOfUses || cantAfford;
+    retrieve.title = cantAfford
+      ? `Retrieve ${def.name} — not enough TU (need ${cost})`
+      : `Retrieve ${def.name} for ${cost} TU`;
+    retrieve.addEventListener("click", () => this.cb.onRetrieveItem?.(inst.itemId));
+    line.appendChild(retrieve);
+
+    return line;
   }
 
   private buildItemLine(
@@ -2069,6 +2174,16 @@ export class Hud {
       prime.addEventListener("click", () => this.cb.onPrimeItem?.(inst.itemId));
       line.appendChild(prime);
     }
+
+    // Stow: move this hand item back into the backpack.
+    const stowCost = backpackActionTuCost(maxTu, "stow");
+    const stow = el("button", "stow");
+    stow.textContent = "S";
+    stow.setAttribute("aria-label", `Stow ${def.name}`);
+    stow.disabled = !playerActing || outOfUses || selected.tu < stowCost;
+    stow.title = `Stow ${def.name} for ${stowCost} TU`;
+    stow.addEventListener("click", () => this.cb.onStowItem?.(inst.itemId));
+    line.appendChild(stow);
 
     return line;
   }

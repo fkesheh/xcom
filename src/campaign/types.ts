@@ -118,6 +118,49 @@ export interface FundingReport {
   summary: string;
 }
 
+/** Letter grade for a monthly council performance rating. */
+export type CouncilGrade = "A" | "B" | "C" | "D" | "F";
+
+/** Per-region line in an end-of-month council debrief. */
+export interface CouncilRegionRating {
+  region: CouncilRegion;
+  /** Region panic 0..100 at report time. */
+  panic: number;
+  /** Region alien infiltration 0..100 at report time. */
+  infiltration: number;
+  /** This region's council funding change this month (credits; negative = cut). */
+  fundingDelta: number;
+  /** Whether this region has signed a pact with the aliens (infiltration maxed). */
+  defected: boolean;
+}
+
+/**
+ * End-of-month council debrief. Fired once per 30-day boundary by advanceGeoscape
+ * (see FUNDING_REPORT_INTERVAL_HOURS). Surfaced as a blocking review modal by the
+ * geoscape UI. Persisted in CampaignState.councilReports (normalized by
+ * loadCampaign); the UI decides whether to re-show the modal on reload.
+ */
+export interface CouncilReport {
+  /** 1-based month index (first end-of-month report is month 1). */
+  month: number;
+  /** Campaign clock elapsedHours at which the report fired. */
+  completedAtHour: number;
+  regions: CouncilRegionRating[];
+  /** Sum of all region funding deltas this month (credits). */
+  totalFundingDelta: number;
+  /** Council income transferred this month (credits, pre-upkeep). */
+  income: number;
+  /** Monthly base/facility/soldier upkeep (credits). */
+  upkeep: number;
+  /** income - upkeep (credits). */
+  net: number;
+  /** Numeric monthly performance rating (higher is better; drives the grade). */
+  rating: number;
+  grade: CouncilGrade;
+  /** One-line narrative debrief for the modal. */
+  narrative: string;
+}
+
 export interface InterceptorState {
   damage: number;
   sorties: number;
@@ -435,6 +478,19 @@ export interface CampaignState {
   infiltration?: Partial<Record<CouncilRegion, number>>;
   clock: CampaignClock;
   lastFundingReport?: FundingReport;
+  /**
+   * End-of-month council debriefs, newest first (bounded history). Appended by
+   * advanceGeoscape at each month boundary. loadCampaign MUST normalize this or it
+   * silently drops on reload.
+   */
+  councilReports?: CouncilReport[];
+  /**
+   * Highest month index for which a council report has already fired. Guards
+   * against re-firing when a fast-forward crosses several month boundaries in one
+   * tick, and against re-firing on reload. Defaults to 0. loadCampaign MUST
+   * normalize this.
+   */
+  lastCouncilMonth?: number;
   interceptor: InterceptorState;
   /** The hangar fleet: 2 interceptors + 1 transport (Skyranger) at start. */
   fleet?: Craft[];

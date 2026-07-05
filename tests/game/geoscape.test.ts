@@ -39,11 +39,14 @@ describe("geoscape coordinate picking", () => {
   });
 
   it("keeps geoscape time advancement available while contacts are active", () => {
-    const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 12345);
-    const detected = advanceGeoscape(campaign, 18);
+    // Month-0 contactInterval is stretched to round(18 * 1.6) = 29h (see the
+    // arc-stretch ramp in contactInterval). Seed 98 rolls an easily-interceptable
+    // scout that reliably crashes (the default SEED now rolls a UFO that escapes).
+    const campaign = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 98);
+    const detected = advanceGeoscape(campaign, 29);
     const damaged = interceptUfo(detected);
     const afterCrashExpires = advanceGeoscape(damaged, CRASH_SITE_LIFETIME_HOURS);
-    const repairingWithContact = advanceGeoscape(afterCrashExpires, 18);
+    const repairingWithContact = advanceGeoscape(afterCrashExpires, 29);
     const lost = { ...campaign, strategic: { ...campaign.strategic, status: "lost" as const } };
 
     expect(geoscapeTimeAction(campaign)).toEqual({

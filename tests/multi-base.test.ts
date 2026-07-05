@@ -157,10 +157,11 @@ describe("multi-base construction", () => {
     expect(withExtra.clock.elapsedHours).toBe(0);
     expect(withExtra.clock.lastContactHour).toBe(0);
 
-    // 16h cleanly separates interval 18 (0 extras) from interval 15 (1 extra):
-    // 16 < 18 -> no contact; 16 >= 15 -> contact.
-    const afterA = advanceGeoscape(withoutExtra, 16);
-    const afterB = advanceGeoscape(withExtra, 16);
+    // Month-0 contactInterval is stretched by the arc-stretch ramp (round(x * 1.6)):
+    // 18 (0 extras) -> 29, 15 (1 extra) -> 24. 26h cleanly separates them:
+    // 26 < 29 -> no contact; 26 >= 24 -> contact.
+    const afterA = advanceGeoscape(withoutExtra, 26);
+    const afterB = advanceGeoscape(withExtra, 26);
 
     expect(afterA.ufoContact).toBeFalsy();
     expect(afterB.ufoContact).toBeTruthy();

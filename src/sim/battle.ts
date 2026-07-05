@@ -31,7 +31,7 @@ import type {
   UnitStance,
   Vec2,
 } from "./types";
-import { DIR8_VECTORS, MORALE, MOTION_SCANNER, PROX_MINE, PSI, SMOKE, STANCE, STUN, TU_COST } from "./types";
+import { BACKPACK, DIR8_VECTORS, MORALE, MOTION_SCANNER, PROX_MINE, PSI, SMOKE, STANCE, STUN, TU_COST } from "./types";
 import { cellIndex, destroyCoverAt, moveCost } from "./grid";
 import { blocksMove, inBounds } from "./grid";
 import { canSee, dir8Towards, lineOfFire, visibleEnemyIds, visibleTiles } from "./los";
@@ -681,6 +681,23 @@ function consumeItem(unit: Unit, inst: ItemInstance): void {
 }
 
 /**
+ * Find a usable-this-action carried instance of `itemId`: one with charges
+ * left that is in hand (`location==="hand"` or undefined, per
+ * {@link ItemInstance.location}). A stowed match, if any, is reported
+ * separately so callers can distinguish "no such item" from "stowed —
+ * retrieve first".
+ */
+function findHandItem(
+  unit: Unit,
+  itemId: string,
+): { inst: ItemInstance | undefined; stowed: boolean } {
+  const usable = unit.items?.filter((it) => it.itemId === itemId && it.uses > 0) ?? [];
+  const inst = usable.find((it) => it.location !== "backpack");
+  const stowed = !inst && usable.some((it) => it.location === "backpack");
+  return { inst, stowed };
+}
+
+/**
  * Destroy every destructible cover tile within `radius` (Chebyshev) of `center`.
  * The blast runs AFTER unit damage ({@link resolveBlast}) so the explosion is
  * resolved against the original map; each destroyed tile then becomes a
@@ -717,7 +734,8 @@ function destroyCoverInBlast(state: BattleState, center: Vec2, radius: number): 
  * Throwing does NOT trigger reaction fire.
  */
 function performThrow(state: BattleState, unit: Unit, target: Vec2, itemId: string): GameEvent[] {
-  const inst = unit.items?.find((it) => it.itemId === itemId && it.uses > 0);
+  const { inst, stowed } = findHandItem(unit, itemId);
+  if (stowed) return [{ type: "blocked", reason: "stowed - retrieve first" }];
   const def = state.items?.[itemId];
   if (
     !inst ||
@@ -828,7 +846,8 @@ function executeUseItem(
   targetId: UnitId,
   itemId: string,
 ): GameEvent[] {
-  const inst = unit.items?.find((it) => it.itemId === itemId && it.uses > 0);
+  const { inst, stowed } = findHandItem(unit, itemId);
+  if (stowed) return [{ type: "blocked", reason: "stowed - retrieve first" }];
   const def = state.items?.[itemId];
 
   // Motion scanner: a self-carried device. Activates on the user regardless of
@@ -961,7 +980,8 @@ function executePrimeItem(
   itemId: string,
   fuseTurns: number,
 ): GameEvent[] {
-  const inst = unit.items?.find((it) => it.itemId === itemId && it.uses > 0);
+  const { inst, stowed } = findHandItem(unit, itemId);
+  if (stowed) return [{ type: "blocked", reason: "stowed - retrieve first" }];
   const def = state.items?.[itemId];
   if (!inst || !def || def.kind !== "grenade") {
     return [{ type: "blocked", reason: "no grenade" }];
@@ -1536,9 +1556,48 @@ export function applyCommand(state: BattleState, cmd: Command): GameEvent[] {
       return executeUseItem(state, unit, cmd.targetId, cmd.itemId);
     case "primeItem":
       return executePrimeItem(state, unit, cmd.itemId, cmd.fuseTurns);
+    case "retrieveItem":
+      // SEAM (round 13 inventory track): move a stowed item to hand for BACKPACK.RETRIEVE_TU_PERCENT.
+      return executeRetrieveItem(state, unit, cmd.itemId);
+    case "stowItem":
+      // SEAM (round 13 inventory track): move a hand item to backpack for BACKPACK.STOW_TU_PERCENT.
+      return executeStowItem(state, unit, cmd.itemId);
     case "psiAttack":
       return executePsiAttack(state, unit, cmd.targetId, cmd.kind);
   }
+}
+
+/**
+ * Move a stowed item into hand, ready to use/throw this turn. Costs
+ * BACKPACK.RETRIEVE_TU_PERCENT of the unit's max TU, floored. No state change
+ * (and no TU spent) when the item can't be found or TU is insufficient. No
+ * GameEvent shape fits a location swap without extending types.ts (frozen),
+ * so this emits none — the HUD re-reads unit state after every command.
+ */
+function executeRetrieveItem(_state: BattleState, unit: Unit, itemId: string): GameEvent[] {
+  const inst = unit.items?.find((it) => it.itemId === itemId && it.location === "backpack");
+  if (!inst) return [{ type: "blocked", reason: "no such item" }];
+  const cost = Math.floor((unit.stats.timeUnits * BACKPACK.RETRIEVE_TU_PERCENT) / 100);
+  if (unit.tu < cost) return [{ type: "blocked", reason: "not enough TU" }];
+  unit.tu -= cost;
+  inst.location = "hand";
+  return [];
+}
+
+/**
+ * Move a hand item back into the backpack. Symmetric to
+ * {@link executeRetrieveItem}, costing BACKPACK.STOW_TU_PERCENT.
+ */
+function executeStowItem(_state: BattleState, unit: Unit, itemId: string): GameEvent[] {
+  const inst = unit.items?.find(
+    (it) => it.itemId === itemId && it.location !== "backpack",
+  );
+  if (!inst) return [{ type: "blocked", reason: "no such item" }];
+  const cost = Math.floor((unit.stats.timeUnits * BACKPACK.STOW_TU_PERCENT) / 100);
+  if (unit.tu < cost) return [{ type: "blocked", reason: "not enough TU" }];
+  unit.tu -= cost;
+  inst.location = "backpack";
+  return [];
 }
 
 /** Thin, side-effect-free wrapper around combat.previewShot for the UI. */

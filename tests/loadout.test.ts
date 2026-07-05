@@ -101,18 +101,32 @@ describe("soldier loadout items", () => {
 
   it("blocks assignment when armory stock is exhausted", () => {
     const campaign = freshCampaign();
-    const soldierId = campaign.soldiers[0]!.id;
+    // Backpack capacity caps any single soldier at 4 grenades, so spread the 8-unit
+    // armory stock across two soldiers (4 each) to exhaust it without ever hitting
+    // the per-soldier backpack cap during setup.
+    const firstId = campaign.soldiers[0]!.id;
+    const secondId = campaign.soldiers[1]!.id;
     let next = campaign;
-    for (let i = 0; i < 8; i += 1) {
-      next = assignSoldierItem(next, soldierId, "grenade");
+    for (let i = 0; i < 4; i += 1) {
+      next = assignSoldierItem(next, firstId, "grenade");
+    }
+    for (let i = 0; i < 4; i += 1) {
+      next = assignSoldierItem(next, secondId, "grenade");
     }
     expect(availableItemCount(next, "grenade")).toBe(0);
-    expect(canAssignSoldierItem(next, soldierId, "grenade")).toBe(false);
+    expect(soldierItemIds(next, firstId).length).toBe(4);
+    expect(soldierItemIds(next, secondId).length).toBe(4);
 
-    const blocked = assignSoldierItem(next, soldierId, "grenade");
+    // A third soldier with an empty backpack (plenty of room) is still blocked,
+    // proving the block is driven by stock exhaustion, not backpack capacity.
+    const thirdId = campaign.soldiers[2]!.id;
+    expect(soldierItemIds(next, thirdId)).toEqual([]);
+    expect(canAssignSoldierItem(next, thirdId, "grenade")).toBe(false);
+
+    const blocked = assignSoldierItem(next, thirdId, "grenade");
 
     expect(blocked).toBe(next);
-    expect(soldierItemIds(next, soldierId).length).toBe(8);
+    expect(soldierItemIds(next, thirdId)).toEqual([]);
   });
 
   it("refuses to assign items to unknown or fallen soldiers", () => {

@@ -161,7 +161,7 @@ export interface GeoscapeTimeAction {
 }
 
 /** Which left-edge chip's modal is open. */
-type GeoModalKind = "objective" | "contact" | "fleet" | "reports";
+type GeoModalKind = "objective" | "contact" | "fleet" | "reports" | "council";
 
 /** Status-dot tone for a floating left-edge chip. */
 type GeoChipTone = "info" | "warn" | "danger" | "muted" | "done";
@@ -303,16 +303,36 @@ const SPEED_OPTIONS: readonly SpeedOption[] = [
 const SPEED_TICKS: Record<number, { hours: number; ms: number }> = {
   1: { hours: 1 / 60, ms: 700 }, // ~1 game-min/tick  ≈ 0.024 game-h/s (near real-time)
   5: { hours: 5 / 60, ms: 400 }, // ~5 game-min/tick  ≈ 0.21 game-h/s (~12.5 game-min/s)
-  30: { hours: 0.5, ms: 250 }, //  30 game-min/tick  ≈ 2 game-h/s (a full day in ~12s)
+  30: { hours: 1.0, ms: 250 }, //  60 game-min/tick ≈ 4 game-h/s (a full day in ~6s)
 };
 
 /** Auto-pause toast kind; pairs an icon with the color so the alert is never color-alone. */
-type EventKind = "info" | "won" | "lost";
+type EventKind = "info" | "won" | "lost" | "council";
 interface EventInfo {
   kind: EventKind;
   text: string;
-  /** Granular discriminator NAV maps onto a base-facility beacon (see GeoCampaignEvent). */
+  /** Granular discriminator NAV maps onto a base-facility beacon (see GeoCampaignEvent).
+   *  BaseAlertKind (base view, frozen for this track) has no dedicated council slot, so
+   *  the council event reuses "fundingReport" for that external routing — the geoscape's
+   *  own blocking modal (kind "council") is what actually surfaces the debrief. */
   alertKind: GeoCampaignEventKind;
+}
+
+/** Alert kinds that demand the player's attention and force-pause time flow. Routine
+ *  radar noise (ufoDetected spawns, interceptionReport filings) stays a toast-only,
+ *  non-pausing notice so 30x fast-forward doesn't get yanked back every few seconds. */
+const FORCE_PAUSE_ALERT_KINDS: ReadonlySet<GeoCampaignEventKind> = new Set([
+  "ufoShotDown",
+  "ufoLanded",
+  "fundingReport",
+  "missionReport",
+  "campaignWon",
+  "campaignLost",
+]);
+
+function shouldForcePause(info: EventInfo): boolean {
+  if (info.kind === "won" || info.kind === "lost" || info.kind === "council") return true;
+  return FORCE_PAUSE_ALERT_KINDS.has(info.alertKind);
 }
 
 /** Notable campaign fields tracked across renders so auto-pause only fires on real events. */
@@ -324,6 +344,7 @@ interface EventSnapshot {
   interceptionReport: number | null;
   missionsCompleted: number;
   status: string;
+  lastCouncilMonth: number;
 }
 
 // Bridge state for the current remount-based controller (src/game/main.ts rebuilds the
@@ -742,6 +763,41 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   border-radius: var(--ui-radius-sm);
   background: var(--ui-panel);
 }
+/* End-of-month council review modal: per-region funding-delta grid. */
+#geoscape .geo-council-summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--ui-sp-3);
+  padding-bottom: var(--ui-sp-2);
+  margin-bottom: var(--ui-sp-2);
+  border-bottom: 1px solid var(--ui-border-console);
+}
+#geoscape .geo-council-grade {
+  font: 700 var(--ui-text-lg)/1 var(--ui-font-mono);
+  color: var(--ui-amber);
+}
+#geoscape .geo-council-narrative {
+  color: var(--ui-muted);
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-leading);
+  margin-bottom: var(--ui-sp-2);
+}
+#geoscape .geo-council-row {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 1fr 1fr;
+  gap: var(--ui-sp-2);
+  padding: var(--ui-sp-1) 0;
+  border-top: 1px solid var(--ui-border-console);
+  font-size: var(--ui-text-xs);
+}
+#geoscape .geo-council-row:first-child { border-top: none; }
+#geoscape .geo-council-row.head {
+  color: var(--ui-muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  font-size: 10px;
+}
+#geoscape .geo-council-row.defected strong { color: var(--ui-red); }
 #geoscape .geo-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1413,6 +1469,7 @@ function snapshotEvent(campaign: CampaignState | null): EventSnapshot {
     interceptionReport: campaign?.lastInterceptionReport?.completedAtHour ?? null,
     missionsCompleted: campaign?.missionsCompleted ?? 0,
     status: campaign?.strategic.status ?? "active",
+    lastCouncilMonth: campaign?.lastCouncilMonth ?? 0,
   };
 }
 
@@ -1427,6 +1484,9 @@ function detectEvent(prev: EventSnapshot, campaign: CampaignState | null): Event
   if (prev.status !== next.status) {
     if (next.status === "won") return { kind: "won", text: "Containment achieved", alertKind: "campaignWon" };
     if (next.status === "lost") return { kind: "lost", text: "Containment failed", alertKind: "campaignLost" };
+  }
+  if (next.lastCouncilMonth > prev.lastCouncilMonth) {
+    return { kind: "council", text: "Council review complete", alertKind: "fundingReport" };
   }
   if (prev.contactId === null && next.contactId !== null) {
     return { kind: "info", text: `UFO detected — ${next.region ?? "unknown sector"}`, alertKind: "ufoDetected" };
@@ -2351,8 +2411,12 @@ export class GeoscapeView {
     if (lastEventSnapshot !== null) {
       const info = detectEvent(lastEventSnapshot, this.campaign);
       if (info) {
-        this.setTimeSpeed(0);
+        // Auto-pause diet: only demand-attention events (won/lost, ufoLanded, council
+        // review, funding/mission reports) yank time back to 0x. Routine UFO spawns and
+        // interception-report filings still toast but let fast-forward keep running.
+        if (shouldForcePause(info)) this.setTimeSpeed(0);
         this.showToast(info);
+        if (info.kind === "council") this.openCouncilModal();
         // Surface the event to NAV so it can beacon the matching base facility +
         // toast when the player is back at base (the geoscape's own toast fired
         // above for the on-globe case).
@@ -2835,6 +2899,13 @@ export class GeoscapeView {
     this.refreshOpenModal();
   }
 
+  /** Opens the blocking end-of-month council debrief modal (see notifyCampaignEvent /
+   *  detectEvent). Fired once per council-report crossing; the report stays viewable
+   *  afterward via the "reports" chip's council card, which does not re-block. */
+  private openCouncilModal(): void {
+    this.openGeoModal("council");
+  }
+
   private closeGeoModal(): void {
     this.modalBackdrop?.remove();
     this.modalBackdrop = null;
@@ -2856,6 +2927,7 @@ export class GeoscapeView {
       contact: "UFO contact",
       fleet: "Fleet status",
       reports: "Council reports",
+      council: "Council review",
     };
     this.modalTitleEl.textContent = titles[kind];
     this.modalBodySlot.replaceChildren(...this.buildModalBody(kind));
@@ -2875,7 +2947,70 @@ export class GeoscapeView {
         rows.append(this.councilCard(), this.fundingCard(), this.projectCard());
         return [rows];
       }
+      case "council":
+        return [this.councilReportModalBody()];
     }
+  }
+
+  /** Blocking end-of-month council debrief: per-region funding-delta table, the
+   *  monthly rating/grade, and a one-line narrative. Rendered from the newest
+   *  entry in campaign.councilReports (fired by advanceGeoscape at each 30-day
+   *  boundary — see openCouncilModal / detectEvent). */
+  private councilReportModalBody(): HTMLElement {
+    const wrap = el("div", "geo-rows");
+    const report = this.campaign?.councilReports?.[0];
+    if (!report) {
+      const empty = el("section", "geo-row");
+      const title = el("strong");
+      title.textContent = "No council review yet";
+      const copy = el("p");
+      copy.textContent = "The council issues its first monthly review after 30 campaign days.";
+      empty.append(title, copy);
+      wrap.append(empty);
+      return wrap;
+    }
+    const summary = el("div", "geo-council-summary");
+    const grade = el("span", "geo-council-grade");
+    grade.textContent = report.grade;
+    const summaryText = el("span");
+    summaryText.textContent =
+      `Month ${report.month} · rating ${report.rating} · net ${formatSignedCredits(report.net)} ` +
+      `(income ${formatCredits(report.income)}, upkeep ${formatCredits(report.upkeep)})`;
+    summary.append(grade, summaryText);
+    const narrative = el("p", "geo-council-narrative");
+    narrative.textContent = report.narrative;
+    const head = el("div", "geo-council-row head");
+    head.append(
+      Object.assign(el("span"), { textContent: "Region" }),
+      Object.assign(el("span"), { textContent: "Panic" }),
+      Object.assign(el("span"), { textContent: "Infiltration" }),
+      Object.assign(el("span"), { textContent: "Funding Δ" }),
+    );
+    const rows = [head];
+    for (const region of report.regions) {
+      const row = el("div", region.defected ? "geo-council-row defected" : "geo-council-row");
+      const name = el("strong");
+      name.textContent = region.defected ? `${region.region} (defected)` : region.region;
+      row.append(
+        name,
+        Object.assign(el("span"), { textContent: formatPercent(region.panic) }),
+        Object.assign(el("span"), { textContent: formatPercent(region.infiltration) }),
+        Object.assign(el("span"), { textContent: formatSignedCredits(region.fundingDelta) }),
+      );
+      rows.push(row);
+    }
+    const total = el("div", "geo-council-row");
+    const totalLabel = el("strong");
+    totalLabel.textContent = "Total";
+    total.append(
+      totalLabel,
+      Object.assign(el("span"), { textContent: "" }),
+      Object.assign(el("span"), { textContent: "" }),
+      Object.assign(el("span"), { textContent: formatSignedCredits(report.totalFundingDelta) }),
+    );
+    rows.push(total);
+    wrap.append(summary, narrative, ...rows);
+    return wrap;
   }
 
   /**

@@ -4,8 +4,12 @@ import type {
   CampaignClock,
   CampaignResources,
   CampaignState,
+  CouncilGrade,
   CouncilRegion,
+  CouncilRegionRating,
+  CouncilReport,
   Craft,
+  DifficultyLevel,
   FundingReport,
   InterceptionEncounter,
   InterceptionOutcome,
@@ -203,10 +207,53 @@ function hash(seed: number): number {
   return x >>> 0;
 }
 
-function contactInterval(campaign: CampaignState): number {
+/** Month-0 spawn intervals are stretched ~1.6x (≈-38% spawn rate); the multiplier
+ * decays back toward baseline (1.0) by ~month 4 as the campaign escalates. */
+const CONTACT_INTERVAL_EARLY_FACTOR = 1.6;
+const CONTACT_INTERVAL_MONTH_STEP = 0.12;
+// Floor at baseline (1.0), not below it: the ramp front-loads FEWER spawns early and
+// settles back at the ORIGINAL rate by ~month 5 — it must never overshoot into a
+// higher-than-baseline late-game spawn rate, which would pile threat pressure onto
+// the back half of the now-longer (8-ops) victory arc.
+const CONTACT_INTERVAL_FLOOR_FACTOR = 1.0;
+
+/**
+ * The stretched victory arc (CAMPAIGN_VICTORY_OPERATIONS 4->8, see storage.ts) roughly
+ * doubles the number of UFO contacts a campaign must weather before it can win. Threat,
+ * regional panic, and funding lost to an escaped/ignored contact never decay on their
+ * own (only mission SUCCESS relieves them), so without retuning, doubling contact
+ * exposure pushes most campaigns past THREAT_LOSS_THRESHOLD / PANIC_LOSS_THRESHOLD / a
+ * dry funding well long before reaching 8 wins. Scale down the per-event escape/ignore
+ * penalties so the total risk budget across a full 8-op arc lands back in the
+ * balance-harness target band (see tests/balance-sim.test.ts). Commander's much
+ * higher threatGainMult/panicMult (DIFFICULTY_CONFIGS, storage.ts) under-corrects
+ * at a flat scale, so relief is difficulty-scaled (mirrors storage.ts's
+ * arcFailureRelief for mission-failure penalties).
+ */
+export const CONTACT_PENALTY_SCALE: Record<DifficultyLevel, number> = {
+  rookie: 0.3,
+  veteran: 0.3,
+  commander: 0.28,
+};
+
+export function contactPenaltyScale(campaign: CampaignState): number {
+  return CONTACT_PENALTY_SCALE[campaign.strategic.difficulty ?? "veteran"];
+}
+
+function contactIntervalMonthFactor(elapsedHours: number): number {
+  const monthIndex = Math.floor(elapsedHours / FUNDING_REPORT_INTERVAL_HOURS);
+  return Math.max(
+    CONTACT_INTERVAL_FLOOR_FACTOR,
+    CONTACT_INTERVAL_EARLY_FACTOR - CONTACT_INTERVAL_MONTH_STEP * monthIndex,
+  );
+}
+
+function contactInterval(campaign: CampaignState, elapsedHours: number): number {
   const base = hasBaseFacility(campaign, "radar-2") ? 12 : 18;
   const extra = campaign.bases?.length ?? 0;
-  return Math.max(6, base - extra * 3);
+  const raw = base - extra * 3;
+  const monthFactor = contactIntervalMonthFactor(elapsedHours);
+  return Math.max(6, Math.round(raw * monthFactor));
 }
 
 /** Squared great-circle-ish distance from a base to a lat/lon (lat/lon weighted by cos(lat)). */
@@ -572,11 +619,21 @@ function applyInterceptionOutcome(
     report.outcome = kind;
     report.salvageQuality = 0;
     const cfg = difficultyConfig(campaign);
-    const regionalPanic = adjustRegionalPanic(afterCraft.regionalPanic, contact.region, 8, 1, cfg.panicMult);
+    const relief = contactPenaltyScale(campaign);
+    const regionalPanic = adjustRegionalPanic(
+      afterCraft.regionalPanic,
+      contact.region,
+      Math.round(8 * relief),
+      Math.round(1 * relief),
+      cfg.panicMult,
+    );
     const strategic = statusAfterStrategicChange({ ...afterCraft, regionalPanic }, {
       ...afterCraft.strategic,
-      threat: Math.min(THREAT_LOSS_THRESHOLD, afterCraft.strategic.threat + Math.round(6 * cfg.threatGainMult)),
-      funding: Math.max(0, afterCraft.strategic.funding - 15),
+      threat: Math.min(
+        THREAT_LOSS_THRESHOLD,
+        afterCraft.strategic.threat + Math.round(6 * cfg.threatGainMult * relief),
+      ),
+      funding: Math.max(0, afterCraft.strategic.funding - Math.round(15 * relief)),
       score: afterCraft.strategic.score - 20,
     });
     return {
@@ -1158,6 +1215,7 @@ function statusAfterStrategicChange(campaign: CampaignState, strategic: Strategi
 
 function penalizeIgnoredContact(campaign: CampaignState, strategic: StrategicState): CampaignState {
   const cfg = difficultyConfig(campaign);
+  const relief = contactPenaltyScale(campaign);
   const trackingUplink = hasBaseFacility(campaign, "radar-2");
   // panicMult was previously omitted (hardcoded to 1), so ignored contacts hammered
   // panic at full strength regardless of difficulty. Pass the difficulty scaler now.
@@ -1166,15 +1224,15 @@ function penalizeIgnoredContact(campaign: CampaignState, strategic: StrategicSta
   const regionalPanic = adjustRegionalPanic(
     campaign.regionalPanic,
     campaign.ufoContact?.region ?? campaign.base.region,
-    trackingUplink ? 12 : 18,
-    trackingUplink ? 0 : 1,
+    Math.round((trackingUplink ? 12 : 18) * relief),
+    Math.round((trackingUplink ? 0 : 1) * relief),
     cfg.panicMult,
   );
-  const threatGain = Math.round((trackingUplink ? 4 : 6) * cfg.threatGainMult);
+  const threatGain = Math.round((trackingUplink ? 4 : 6) * cfg.threatGainMult * relief);
   const next = {
     ...strategic,
     threat: Math.min(THREAT_LOSS_THRESHOLD, strategic.threat + threatGain),
-    funding: Math.max(0, strategic.funding - (trackingUplink ? 10 : 15)),
+    funding: Math.max(0, strategic.funding - Math.round((trackingUplink ? 10 : 15) * relief)),
     score: strategic.score - 25,
   };
   const updated = { ...campaign, regionalPanic };
@@ -1304,7 +1362,9 @@ function applyContactTerror(campaign: CampaignState, contact: UfoContact): Campa
   const panicMult = difficultyConfig(campaign).panicMult;
   // Match the scaled baseline that penalizeIgnoredContact actually applied, so the
   // report's panic total reflects the real effect rather than the raw pre-scale value.
-  const baselineLocal = Math.round((hasBaseFacility(campaign, "radar-2") ? 12 : 18) * panicMult);
+  const baselineLocal = Math.round(
+    Math.round((hasBaseFacility(campaign, "radar-2") ? 12 : 18) * contactPenaltyScale(campaign)) * panicMult,
+  );
   const bonusLocal = Math.round(bonus.local * panicMult);
   const totalLocal = baselineLocal + bonusLocal;
 
@@ -1324,12 +1384,15 @@ function applyContactTerror(campaign: CampaignState, contact: UfoContact): Campa
 
   // An un-addressed UFO deepens alien infiltration of its region, scaled by how brazen
   // the mission was. Infiltration is a one-way ratchet here — only ignored contacts
-  // raise it, so a commander who keeps intercepting never loses a nation.
+  // raise it, so a commander who keeps intercepting never loses a nation. It never
+  // decays, so over the now roughly-doubled 8-op arc it would defect far more nations
+  // (each a PERMANENT funding cut, see applyDefection) than the original 4-op tuning
+  // intended — apply the same arc-stretch relief as the other no-decay penalties.
   const infiltrationBefore = campaignInfiltration(next);
   const infiltrationAfter = adjustRegionalInfiltration(
     infiltrationBefore,
     contact.region,
-    contactInfiltrationGain(contact),
+    Math.round(contactInfiltrationGain(contact) * contactPenaltyScale(next)),
     panicMult,
   );
   next = { ...next, infiltration: infiltrationAfter };
@@ -1435,6 +1498,72 @@ function makeFundingReport(
   };
 }
 
+const COUNCIL_REPORT_HISTORY_LIMIT = 12;
+
+/** Council debrief letter grade from a numeric monthly performance rating. */
+function councilGradeFor(rating: number): CouncilGrade {
+  if (rating >= 50) return "A";
+  if (rating >= 20) return "B";
+  if (rating >= 0) return "C";
+  if (rating >= -30) return "D";
+  return "F";
+}
+
+function averageRegionalPanic(campaign: CampaignState): number {
+  const values = Object.values(campaign.regionalPanic);
+  return values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
+}
+
+/**
+ * Build the end-of-month council debrief. Deterministic from campaign state alone
+ * (no Math.random): per-region funding deltas are a base regional share cut by that
+ * region's panic/infiltration, and the numeric rating blends net funding, overall
+ * strategic score, and average regional panic into a letter grade.
+ */
+function makeCouncilReport(
+  campaign: CampaignState,
+  reportHour: number,
+  income: number,
+  upkeep: number,
+  strategic: StrategicState,
+): CouncilReport {
+  const month = Math.floor(reportHour / FUNDING_REPORT_INTERVAL_HOURS);
+  const net = income - upkeep;
+  const infiltration = campaignInfiltration(campaign);
+  const baseShare = income / COUNCIL_REGIONS.length;
+  const regions: CouncilRegionRating[] = COUNCIL_REGIONS.map((region) => {
+    const panic = campaign.regionalPanic[region] ?? 0;
+    const regionInfiltration = infiltration[region] ?? 0;
+    const defected = regionInfiltration >= 100;
+    const cutFraction = Math.min(1, (panic + regionInfiltration) / 200);
+    const fundingDelta = defected ? -Math.round(baseShare) : Math.round(baseShare * (1 - cutFraction));
+    return { region, panic, infiltration: regionInfiltration, fundingDelta, defected };
+  });
+  const totalFundingDelta = regions.reduce((sum, region) => sum + region.fundingDelta, 0);
+  const avgPanic = averageRegionalPanic(campaign);
+  const rating = Math.round(net / 10 + strategic.score / 5 - avgPanic);
+  const grade = councilGradeFor(rating);
+  const defectedCount = regions.filter((region) => region.defected).length;
+  const defectionNote =
+    defectedCount > 0
+      ? ` ${defectedCount} nation${defectedCount === 1 ? "" : "s"} lost to the aliens.`
+      : "";
+  const narrative =
+    `Council review — month ${month}: net ${net}c, rating ${rating} (grade ${grade}).` + defectionNote;
+  return {
+    month,
+    completedAtHour: reportHour,
+    regions,
+    totalFundingDelta,
+    income,
+    upkeep,
+    net,
+    rating,
+    grade,
+    narrative,
+  };
+}
+
 function applyFundingReports(campaign: CampaignState, clock: CampaignClock): CampaignState {
   let next: CampaignState = { ...campaign, clock };
   while (next.clock.lastFundingHour + FUNDING_REPORT_INTERVAL_HOURS <= clock.elapsedHours) {
@@ -1442,20 +1571,33 @@ function applyFundingReports(campaign: CampaignState, clock: CampaignClock): Cam
     const income = next.strategic.funding;
     const upkeep = monthlyUpkeep(next);
     const pressureMult = fundingPressureMult(next);
-    const threatPressure = Math.round(fundingPressure(next.strategic.threat) * pressureMult);
-    const panicPressure = Math.round(regionalFundingPressure(next) * pressureMult);
+    // Same arc-stretch relief as the per-event/per-mission failure penalties: this
+    // monthly funding cut recurs every 30 days with no decay, so a full 8-op arc
+    // (roughly double the old 4-op arc's calendar span) would otherwise starve
+    // funding to 0 long before victory, especially on commander (highest
+    // fundingPressureMult/startingThreat). See contactPenaltyScale.
+    const relief = contactPenaltyScale(next);
+    const threatPressure = Math.round(fundingPressure(next.strategic.threat) * pressureMult * relief);
+    const panicPressure = Math.round(regionalFundingPressure(next) * pressureMult * relief);
     const pressure = threatPressure + panicPressure;
     const strategic: StrategicState = statusAfterStrategicChange(next, {
       ...next.strategic,
       funding: Math.max(0, next.strategic.funding - pressure),
       score: next.strategic.score + Math.floor((income - upkeep) / 10),
     });
+    const councilReport = makeCouncilReport(next, reportHour, income, upkeep, strategic);
+    const councilReports = [councilReport, ...(next.councilReports ?? [])].slice(
+      0,
+      COUNCIL_REPORT_HISTORY_LIMIT,
+    );
     next = {
       ...next,
       resources: addCredits(next.resources, income - upkeep),
       strategic,
       clock: { ...next.clock, lastFundingHour: reportHour },
       lastFundingReport: makeFundingReport(next, reportHour, income, upkeep, strategic, threatPressure, panicPressure),
+      councilReports,
+      lastCouncilMonth: councilReport.month,
     };
   }
   return next;
@@ -1849,7 +1991,7 @@ export function advanceGeoscape(
     clock = { ...clock, lastContactHour: clock.elapsedHours };
   }
 
-  if (!contact && clock.elapsedHours >= clock.lastContactHour + contactInterval(campaign)) {
+  if (!contact && clock.elapsedHours >= clock.lastContactHour + contactInterval(campaign, clock.elapsedHours)) {
     const missionType = rollContactMissionType(nextCampaign, clock.elapsedHours);
     contact = createUfoContact(nextCampaign, clock.elapsedHours, missionType);
     clock = { ...clock, lastContactHour: clock.elapsedHours };

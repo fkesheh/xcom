@@ -88,6 +88,7 @@ import {
   soldierWeaponId,
 } from "../campaign/storage";
 import { generateOperation } from "../campaign/operations";
+import { BACKPACK_SLOTS, backpackRemainingSlots, canAddToBackpack } from "../campaign/backpack";
 import type {
   CampaignCaptive,
   CampaignSoldier,
@@ -772,6 +773,13 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   gap: 6px;
   align-items: center;
 }
+#base-view .backpack-capacity {
+  flex-basis: 100%;
+  color: var(--ui-muted);
+  font: 700 var(--ui-text-xs)/1 ui-monospace, monospace;
+  letter-spacing: .03em;
+}
+#base-view .backpack-capacity.full { color: #f87171; }
 #base-view .item-control {
   display: inline-flex;
   align-items: center;
@@ -3791,10 +3799,16 @@ export class BaseView {
       campaign.strategic.status === "active" && soldier.status !== "kia";
     const wired = this.opts.onAssignItem !== undefined && this.opts.onUnassignItem !== undefined;
     const carried = soldierItemIds(campaign, soldier.id);
+    const remaining = backpackRemainingSlots(carried);
+    const capacity = el("div", "backpack-capacity");
+    capacity.textContent = `Backpack: ${BACKPACK_SLOTS - remaining}/${BACKPACK_SLOTS} slots`;
+    capacity.classList.toggle("full", remaining === 0);
+    wrap.appendChild(capacity);
     for (const itemId of ITEM_IDS) {
       const meta = ITEMS[itemId];
       const held = carried.filter((id) => id === itemId).length;
       const stock = availableItemCount(campaign, itemId);
+      const fitsBackpack = canAddToBackpack(carried, itemId);
       const group = el("div", "item-control");
       const icon = el("span", "item-icon");
       icon.textContent = ITEM_ICON[itemId] ?? "■";
@@ -3823,11 +3837,13 @@ export class BaseView {
         "aria-label",
         `Assign one ${meta?.name ?? itemId} to ${soldier.name}`,
       );
-      plusBtn.disabled =
-        !interactive ||
-        !wired ||
-        held >= MAX_ITEM_CARRY ||
-        !canAssignSoldierItem(campaign, soldier.id, itemId);
+      const canAssign = canAssignSoldierItem(campaign, soldier.id, itemId);
+      plusBtn.disabled = !interactive || !wired || held >= MAX_ITEM_CARRY || !canAssign;
+      if (!canAssign && !fitsBackpack) {
+        plusBtn.title = "Backpack full";
+      } else if (held >= MAX_ITEM_CARRY) {
+        plusBtn.title = `Max ${MAX_ITEM_CARRY} carried`;
+      }
       plusBtn.addEventListener("click", (event: MouseEvent) => {
         event.stopPropagation();
         this.opts.onAssignItem?.(soldier.id, itemId);

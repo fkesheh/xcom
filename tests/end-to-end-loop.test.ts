@@ -525,6 +525,17 @@ describe("grenade in a real battle", () => {
     expect(throwerDist).toBeGreaterThanOrEqual(3);
     expect(throwerDist).toBeLessThanOrEqual(8);
 
+    // Grenades start stowed in the backpack; retrieve to hand before throwing.
+    const retrieveEvents = applyCommand(state, {
+      type: "retrieveItem",
+      unitId: thrower.id,
+      itemId: "grenade",
+    });
+    expect(retrieveEvents.find((e) => e.type === "blocked")).toBeUndefined();
+    expect(
+      thrower.items?.find((i) => i.itemId === "grenade")?.location,
+    ).toBe("hand");
+
     const hpBefore = new Map<number, number>(enemies.map((e) => [e.id, e.hp]));
     const events: GameEvent[] = applyCommand(state, {
       type: "throwItem",
@@ -566,7 +577,22 @@ describe("grenade in a real battle", () => {
 
 describe("medkit in a real battle", () => {
   it("a useItem command heals a wounded ally (capped at maxHp) on a generated map", () => {
-    const state = createSkirmish({ seed: 8, width: 30, height: 30, players: 4, enemies: 6 });
+    const state = createSkirmish({
+      seed: 8,
+      width: 30,
+      height: 30,
+      players: 4,
+      enemies: 6,
+      // Extra TU headroom so every player unit can retrieve its medkit from
+      // the backpack (BACKPACK.RETRIEVE_TU_PERCENT) and still afford the
+      // useItem action cost this turn.
+      playerStatBonuses: [
+        { timeUnits: 200 },
+        { timeUnits: 200 },
+        { timeUnits: 200 },
+        { timeUnits: 200 },
+      ],
+    });
 
     // The two closest player units deploy adjacent at the dropship (chebyshev 1).
     const players = livingUnits(state, "player");
@@ -594,6 +620,17 @@ describe("medkit in a real battle", () => {
     const maxHp = target!.stats.health;
     target!.hp = Math.max(1, Math.floor(maxHp / 4));
     const hpBefore = target!.hp;
+
+    // Medkit starts stowed in the backpack; retrieve to hand before using it.
+    const retrieveEvents = applyCommand(state, {
+      type: "retrieveItem",
+      unitId: medic!.id,
+      itemId: "medkit",
+    });
+    expect(retrieveEvents.find((e) => e.type === "blocked")).toBeUndefined();
+    expect(
+      medic!.items?.find((i) => i.itemId === "medkit")?.location,
+    ).toBe("hand");
 
     const events = applyCommand(state, {
       type: "useItem",

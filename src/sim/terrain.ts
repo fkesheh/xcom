@@ -578,15 +578,17 @@ const DESERT_BLOCKS: TerrainBlock[] = [
     "ssssssssss",
     "ssssssssss",
   ]),
-  // Small ruin: concrete walls part-collapsed to rubble, a window and a door.
+  // Small ruin: concrete walls with a window and a single door; loose rubble
+  // scattered just outside the footprint reads as a part-collapsed exterior
+  // without breaching the room's closed perimeter.
   block("desert_ruin", [
     "ssssssssss",
     "ss#####sss",
     "ss#OOO#sss",
     "ssnOOO#sss",
     "ss+OOO#sss",
-    "ss#OOOusss",
-    "ss##u##sss",
+    "ss#OOO#sss",
+    "ss#####sss",
     "sssuusssss",
     "ssssssssss",
     "ssssssssss",

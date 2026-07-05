@@ -22,6 +22,15 @@ interface FindPathOptions {
   maxCost?: number;
   /** Mark tiles occupied by other units as impassable. The goal is exempt. */
   isBlocked?: (x: number, y: number) => boolean;
+  /**
+   * Uniform per-step TU multiplier (e.g. a kneeling unit's
+   * `STANCE.KNEEL_MOVE_MULT` surcharge — see battle.ts `executeMove`), applied
+   * after the diagonal multiplier and floored, mirroring the executor's cost
+   * model so a previewed path's reported `cost` matches what actually gets
+   * spent. Defaults to 1 (no surcharge). Uniform across all steps, so route
+   * selection is unchanged — only the reported cost scales.
+   */
+  stanceMult?: number;
 }
 
 /** Chebyshev (8-direction / king-move) distance — the A* heuristic basis. */
@@ -119,7 +128,7 @@ export function findPath(
   goal: Vec2,
   opts: FindPathOptions = {},
 ): PathResult | null {
-  const { maxCost, isBlocked } = opts;
+  const { maxCost, isBlocked, stanceMult = 1 } = opts;
   const { width, height } = grid;
 
   if (!inBounds(grid, start.x, start.y) || !inBounds(grid, goal.x, goal.y)) {
@@ -198,7 +207,8 @@ export function findPath(
       }
 
       const base = moveCost(grid, nx, ny);
-      const enter = diagonal ? Math.floor(base * TU_COST.DIAGONAL_MULT) : base;
+      const diagonalMult = diagonal ? TU_COST.DIAGONAL_MULT : 1;
+      const enter = Math.floor(base * diagonalMult * stanceMult);
       const tentative = cg + enter;
 
       if (maxCost !== undefined && tentative > maxCost) continue;

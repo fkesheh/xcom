@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   advanceGeoscape,
+  CONTACT_PENALTY_SCALE,
   createUfoContact,
   CRASH_SITE_LIFETIME_HOURS,
   interceptUfo,
@@ -35,21 +36,23 @@ describe("un-addressed UFOs carry out their mission and cause terror", () => {
 
     const expired = advanceGeoscape(campaign, UFO_CONTACT_LIFETIME_HOURS);
 
-    // Baseline ignore penalty (18, no radar) and terror mission bonus (18) are BOTH scaled
-    // by veteran panicMult (0.75); the rolled UFO is a harvester (profile panicMult 1.0), so
-    // each term adds round(18 * 0.75) = 14, for +28 local panic.
-    expect(expired.ufoContact).toBeUndefined();
-    expect(regionalPanicFor(expired, region)!).toBe(
-      panicBefore +
-        Math.round(18 * DIFFICULTY_CONFIGS.veteran.panicMult) +
-        Math.round(18 * DIFFICULTY_CONFIGS.veteran.panicMult),
+    // Baseline ignore penalty (18, no radar) is scaled DOWN by the arc-stretch
+    // CONTACT_PENALTY_SCALE (the 8-op arc's no-decay penalties are eased) before
+    // veteran panicMult (0.75) is applied: round(round(18 * 0.3) * 0.75) = 4. The
+    // terror mission bonus (18) is untouched by that relief — only escape/ignore
+    // penalties are eased — so it still scales as round(18 * 0.75) = 14. Total +18.
+    const baselineDelta = Math.round(
+      Math.round(18 * CONTACT_PENALTY_SCALE.veteran) * DIFFICULTY_CONFIGS.veteran.panicMult,
     );
+    const bonusDelta = Math.round(18 * DIFFICULTY_CONFIGS.veteran.panicMult);
+    expect(expired.ufoContact).toBeUndefined();
+    expect(regionalPanicFor(expired, region)!).toBe(panicBefore + baselineDelta + bonusDelta);
 
     const report = expired.projectReports.find((entry) => entry.title === "Alien terror strike");
     expect(report).toBeDefined();
     expect(report!.summary).toContain(region);
-    // Report total mirrors the actual applied panic: scaled baseline (14) + scaled bonus (14) = 28.
-    expect(report!.summary).toContain("+28 panic");
+    // Report total mirrors the actual applied panic: scaled baseline (4) + bonus (14) = 18.
+    expect(report!.summary).toContain(`+${baselineDelta + bonusDelta} panic`);
   });
 
   it("is fully deterministic across repeated runs from the same seed", () => {
@@ -61,8 +64,10 @@ describe("un-addressed UFOs carry out their mission and cause terror", () => {
   });
 
   it("does NOT trigger the terror penalty for a freshly-intercepted (shot-down) crashed contact", () => {
-    // Seed 12345 spawns a tracked crashSite contact at hour 18 that interceptUfo forces down.
-    const detected = advanceGeoscape(freshCampaign(12345), 18);
+    // Seed 2 spawns a tracked crashSite contact at hour 29 (contactInterval's
+    // month-0 arc-stretch ramp lengthens the base 18h interval to round(18*1.6)=29)
+    // that interceptUfo forces down.
+    const detected = advanceGeoscape(freshCampaign(2), 29);
     expect(detected.ufoContact?.status).toBe("tracked");
     // This test is about the terror penalty on a CRASHED contact, not about fuel. The
     // engaging interceptor arrives mid-patrol with a half-drained tank; top the fleet up
@@ -80,9 +85,13 @@ describe("un-addressed UFOs carry out their mission and cause terror", () => {
     // Let the crash-site recovery window lapse.
     const expired = advanceGeoscape(shot, CRASH_SITE_LIFETIME_HOURS);
 
-    // Only the baseline ignore penalty fires, scaled by veteran panicMult: round(18 * 0.75) = 14.
+    // Only the baseline ignore penalty fires: round(round(18 * CONTACT_PENALTY_SCALE.veteran)
+    // * veteran panicMult) = round(round(18 * 0.3) * 0.75) = 4.
+    const baselineDelta = Math.round(
+      Math.round(18 * CONTACT_PENALTY_SCALE.veteran) * DIFFICULTY_CONFIGS.veteran.panicMult,
+    );
     expect(expired.projectReports.some((entry) => entry.id.startsWith("alien-activity-"))).toBe(false);
-    expect(regionalPanicFor(expired, region)!).toBe(panicBefore + 14);
+    expect(regionalPanicFor(expired, region)!).toBe(panicBefore + baselineDelta);
   });
 
   it("scales the terror panic up at commander difficulty via panicMult", () => {
@@ -109,13 +118,15 @@ describe("un-addressed UFOs carry out their mission and cause terror", () => {
     const commanderDelta =
       regionalPanicFor(commanderExpired, commanderRegion)! - regionalPanicFor(commander, commanderRegion)!;
 
-    // Both the baseline ignore penalty (18) and the terror bonus (18) are scaled by the
-    // difficulty panicMult (the baseline previously ignored it). The rolled UFO is a
-    // harvester (profile panicMult 1.0), so each term is round(18 * panicMult).
+    // The terror bonus (18) scales as round(18 * panicMult). The baseline ignore
+    // penalty (18) is also eased by the arc-stretch CONTACT_PENALTY_SCALE before
+    // panicMult applies: round(round(18 * CONTACT_PENALTY_SCALE[difficulty]) * panicMult).
     const rookiePanicMult = DIFFICULTY_CONFIGS.rookie.panicMult;
     const commanderPanicMult = DIFFICULTY_CONFIGS.commander.panicMult;
-    expect(rookieDelta).toBe(Math.round(18 * rookiePanicMult) + Math.round(18 * rookiePanicMult));
-    expect(commanderDelta).toBe(Math.round(18 * commanderPanicMult) + Math.round(18 * commanderPanicMult));
+    const rookieBaseline = Math.round(Math.round(18 * CONTACT_PENALTY_SCALE.rookie) * rookiePanicMult);
+    const commanderBaseline = Math.round(Math.round(18 * CONTACT_PENALTY_SCALE.commander) * commanderPanicMult);
+    expect(rookieDelta).toBe(rookieBaseline + Math.round(18 * rookiePanicMult));
+    expect(commanderDelta).toBe(commanderBaseline + Math.round(18 * commanderPanicMult));
     expect(commanderDelta).toBeGreaterThan(rookieDelta);
   });
 });

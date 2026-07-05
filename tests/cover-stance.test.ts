@@ -302,9 +302,9 @@ describe("kneeling movement cost", () => {
     expect(standEvents.some((e) => e.type === "moveStep")).toBe(true);
     expect(kneelEvents.some((e) => e.type === "moveStep")).toBe(true);
 
-    // Floor moveCost 4; kneeling: floor(4 * 1.25) = 5 > 4.
+    // Floor moveCost 4; kneeling: floor(4 * 1.5) = 6 > 4.
     expect(60 - standUnit.tu).toBe(4);
-    expect(60 - kneelUnit.tu).toBe(5);
+    expect(60 - kneelUnit.tu).toBe(6);
     expect(60 - kneelUnit.tu).toBeGreaterThan(60 - standUnit.tu);
   });
 });
