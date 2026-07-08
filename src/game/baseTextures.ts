@@ -331,6 +331,97 @@ function paintConcrete(size: number): AlbedoHeight {
   return { albedo: albedo.canvas, height: heightC.canvas };
 }
 
+/**
+ * CARVED ROCK: blue-black cavern stone with strata bands, mineral flecks, and
+ * fracture lines. Harmonizes with {@link BASE_PALETTE.rock} / rockLight so the
+ * cutaway cavity walls read as carved geology instead of flat boxes.
+ */
+function paintRock(size: number): AlbedoHeight {
+  const albedo = createCanvas(size);
+  const g = albedo.ctx;
+  // Lifted mid-tone so strata read under the warm key + fog instead of crushing
+  // into the void (palette rockLight alone is too dark for large cavity walls).
+  g.fillStyle = "#2a3544";
+  g.fillRect(0, 0, size, size);
+
+  // Broad mottled patches — lighter mineral veins + darker voids.
+  for (let i = 0; i < 90; i++) {
+    const x = Math.random() * size;
+    const y = Math.random() * size;
+    const r = 30 + Math.random() * 110;
+    const light = Math.random() < 0.45;
+    const rg = g.createRadialGradient(x, y, 0, x, y, r);
+    rg.addColorStop(
+      0,
+      light ? "rgba(72,92,118,0.4)" : "rgba(12,16,24,0.42)",
+    );
+    rg.addColorStop(1, "rgba(0,0,0,0)");
+    g.fillStyle = rg;
+    g.beginPath();
+    g.arc(x, y, r, 0, Math.PI * 2);
+    g.fill();
+  }
+
+  // Horizontal strata bands (subtle teal mineral veins — palette floor-line).
+  const vein = new Color(BASE_PALETTE.floorLine);
+  for (let i = 0; i < 14; i++) {
+    const y = (size / 14) * i + Math.random() * 8;
+    const wobble = 4 + Math.random() * 10;
+    g.strokeStyle = `rgba(${(vein.r * 255) | 0},${(vein.g * 255) | 0},${(vein.b * 255) | 0},${0.1 + Math.random() * 0.14})`;
+    g.lineWidth = 1 + Math.random() * 2.5;
+    g.beginPath();
+    g.moveTo(0, y);
+    for (let x = 0; x <= size; x += 16) {
+      g.lineTo(x, y + Math.sin(x * 0.04 + i) * wobble);
+    }
+    g.stroke();
+  }
+
+  // Fracture cracks.
+  const cracks: Pt[][] = [];
+  for (let i = 0; i < 12; i++) {
+    cracks.push(
+      genCrack(
+        Math.random() * size,
+        Math.random() * size,
+        Math.random() * Math.PI * 2,
+        20 + Math.random() * 60,
+      ),
+    );
+  }
+  for (const pts of cracks) strokePoints(g, pts, "rgba(6,8,12,0.65)", 1 + Math.random() * 1.4);
+  addNoise(g, size, 12);
+
+  // Heightmap: strata ridges + fracture grooves.
+  const heightC = createCanvas(size);
+  const hg = heightC.ctx;
+  hg.fillStyle = "#787878";
+  hg.fillRect(0, 0, size, size);
+  for (let i = 0; i < 14; i++) {
+    const y = (size / 14) * i + Math.random() * 6;
+    hg.strokeStyle = `rgba(${140 + ((Math.random() * 40) | 0)},${140 + ((Math.random() * 40) | 0)},${140 + ((Math.random() * 40) | 0)},0.35)`;
+    hg.lineWidth = 3 + Math.random() * 5;
+    hg.beginPath();
+    hg.moveTo(0, y);
+    for (let x = 0; x <= size; x += 16) {
+      hg.lineTo(x, y + Math.sin(x * 0.04 + i) * 6);
+    }
+    hg.stroke();
+  }
+  for (let i = 0; i < 50; i++) {
+    const x = Math.random() * size;
+    const y = Math.random() * size;
+    const r = 8 + Math.random() * 36;
+    const v = 90 + ((Math.random() * 60) | 0);
+    hg.fillStyle = `rgba(${v},${v},${v},0.2)`;
+    hg.beginPath();
+    hg.arc(x, y, r, 0, Math.PI * 2);
+    hg.fill();
+  }
+  for (const pts of cracks) strokePoints(hg, pts, "#0a0a0a", 1.2 + Math.random());
+  return { albedo: albedo.canvas, height: heightC.canvas };
+}
+
 /** WORN STEEL: brushed horizontal streaks, scoring scratches, rust blooms. */
 function paintWornSteel(size: number): AlbedoHeight {
   const albedo = createCanvas(size);
@@ -457,6 +548,7 @@ function paintScreen(size: number, color: number, label: string): HTMLCanvasElem
 let panelPair: TexturePair | null = null;
 let concretePair: TexturePair | null = null;
 let wornPair: TexturePair | null = null;
+let rockPair: TexturePair | null = null;
 const screenTexCache = new Map<string, CanvasTexture>();
 
 /** Shared riveted metal-panel textures (albedo + normal). Built once. */
@@ -495,6 +587,21 @@ export function wornSteelTextures(): TexturePair {
   return wornPair;
 }
 
+/** Shared carved-rock textures (albedo + normal). Built once. */
+export function rockTextures(): TexturePair {
+  if (!rockPair) {
+    const { albedo, height } = paintRock(1024);
+    rockPair = {
+      map: toTexture(albedo, true),
+      normalMap: toTexture(heightToNormal(height, 2.6), false),
+    };
+    // Large cavity walls need denser tiling than a 1×1 bay pad.
+    rockPair.map.repeat.set(2.5, 2.5);
+    rockPair.normalMap.repeat.set(2.5, 2.5);
+  }
+  return rockPair;
+}
+
 /** Emissive screen canvas texture for an accent colour + optional label. Cached. */
 export function screenTexture(color: number, label?: string): CanvasTexture {
   const key = `${color.toString(16)}|${label ?? ""}`;
@@ -515,6 +622,8 @@ const screenMatCache = new Map<string, MeshStandardMaterial>();
 const accentMatCache = new Map<string, MeshStandardMaterial>();
 let concreteMat: MeshStandardMaterial | null = null;
 let wornMat: MeshStandardMaterial | null = null;
+let rockMat: MeshStandardMaterial | null = null;
+let steelMat: MeshStandardMaterial | null = null;
 
 /**
  * Mark a cached, page-lifetime material as SHARED so a view's scene-teardown
@@ -589,6 +698,41 @@ export function wornSteelMaterial(): MeshStandardMaterial {
 }
 
 /**
+ * Carved-rock PBR material for the cutaway cavity (walls, bed, overhang).
+ * Replaces the flat {@link rockMaterial} from basePalette on the hub architecture.
+ */
+export function rockMaterial(): MeshStandardMaterial {
+  if (!rockMat) {
+    const tex = rockTextures();
+    rockMat = new MeshStandardMaterial({
+      map: tex.map,
+      normalMap: tex.normalMap,
+      normalScale: new Vector2(1.1, 1.1),
+      // Lift toward rockLight so strata read under the warm key instead of
+      // crushing into the fog/void.
+      color: new Color(0xc8d0dc),
+      metalness: 0.0,
+      roughness: 0.96,
+    });
+    markShared(rockMat);
+  }
+  return rockMat;
+}
+
+/**
+ * Structural brushed-steel PBR for hub pipes, shafts, and frames. Tinted to
+ * {@link BASE_PALETTE.steel} so it matches the facility bay vocabulary.
+ */
+export function steelMaterial(): MeshStandardMaterial {
+  if (!steelMat) {
+    // Reuse the riveted panel maps with a steel tint — same craft language as
+    // facility models, without allocating a second albedo painter.
+    steelMat = metalPanelMaterial(BASE_PALETTE.steel, { metalness: 0.58, roughness: 0.52 });
+  }
+  return steelMat;
+}
+
+/**
  * EMISSIVE readout SCREEN material: dark face with a glowing accent-colour
  * grid/bar-graph/label (map and emissiveMap share the canvas, so the readouts
  * glow). `color` is a facility accent hex; `label` is drawn at the top.
@@ -655,16 +799,25 @@ export function disposeBaseTextures(): void {
     disposeMaterial(wornMat);
     wornMat = null;
   }
+  if (rockMat) {
+    disposeMaterial(rockMat);
+    rockMat = null;
+  }
+  // steelMat is an entry in panelMatCache (via metalPanelMaterial) — already freed.
+  steelMat = null;
   panelPair?.map.dispose();
   panelPair?.normalMap.dispose();
   concretePair?.map.dispose();
   concretePair?.normalMap.dispose();
   wornPair?.map.dispose();
   wornPair?.normalMap.dispose();
+  rockPair?.map.dispose();
+  rockPair?.normalMap.dispose();
   for (const t of screenTexCache.values()) t.dispose();
   panelPair = null;
   concretePair = null;
   wornPair = null;
+  rockPair = null;
   screenTexCache.clear();
 }
 

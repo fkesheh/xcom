@@ -33,6 +33,10 @@ import {
   Vector3,
   WebGLRenderer,
 } from "three";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 
 import {
   CONTAINMENT_CAPACITY,
@@ -104,11 +108,13 @@ import { ITEMS, TEMPLATES, WEAPONS } from "../sim/content";
 import {
   accentMaterial,
   BASE_PALETTE,
+  type FacilityRole,
+} from "./basePalette";
+import {
   concreteMaterial,
   rockMaterial,
   steelMaterial,
-  type FacilityRole,
-} from "./basePalette";
+} from "./baseTextures";
 import { buildFacilityModel } from "./baseFacilities";
 import { buildFacilityInterior } from "./baseFacilityInteriors";
 import { CrewSystem } from "./basePeople";
@@ -1805,7 +1811,13 @@ export class BaseView {
   private readonly canvasWrap: HTMLDivElement;
   private readonly scene = new Scene();
   private readonly camera = new PerspectiveCamera(42, 1, 0.1, 100);
-  private readonly renderer = new WebGLRenderer({ antialias: true, alpha: true });
+  private readonly renderer = new WebGLRenderer({ antialias: true });
+  /** Post stack: RenderPass → UnrealBloom (emissive accents only) → OutputPass.
+   *  Mirrors the battlescape look so facility beacons / reactor cores bloom.
+   *  Requires an opaque canvas (alpha:false) — UnrealBloomPass composites
+   *  incorrectly over a transparent clear and washes the whole frame. */
+  private readonly composer: EffectComposer;
+  private readonly bloomPass: UnrealBloomPass;
   private readonly baseGroup = new Group();
   private readonly pulseMaterials: Array<{ material: MeshBasicMaterial; opacity: number }> = [];
   private readonly rotators: BaseRotator[] = [];
@@ -1861,6 +1873,9 @@ export class BaseView {
   /** The currently-mounted facility interior diorama (null in hub mode). Built
    *  by buildFacilityInterors on enter, disposed on exit to avoid leaks. */
   private interiorRoot: Group | null = null;
+  /** Per-dive room lights (key + fill + accent). Mounted with the diorama so
+   *  PBR maps read up close; torn down on exit so the hub lighting stays clean. */
+  private interiorLights: Group | null = null;
   /** Resting 3/4 interior hero framing — close, slightly elevated, looking into
    *  the now fully-enclosed diorama (floor + walls + ceiling). Pulled in and the
    *  target lifted so the sealed room fills the frame with lit surfaces instead
@@ -2011,8 +2026,18 @@ export class BaseView {
     // through contact shadows). PCFSoftShadowMap keeps edges soft + cinematic.
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = PCFSoftShadowMap;
+    // ACES + sRGB land via OutputPass. Exposure sits between the battlescape
+    // (0.82) and the pre-bloom base (1.12) so bay accents read without bleach.
     this.renderer.toneMapping = ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.12;
+    this.renderer.toneMappingExposure = 1.0;
+
+    // Soft bloom on the brightest beacons only. The cutaway packs many emissive
+    // accents into a small frame — keep strength tiny so silhouettes stay sharp.
+    this.composer = new EffectComposer(this.renderer);
+    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    this.bloomPass = new UnrealBloomPass(new Vector2(1, 1), 0.05, 0.18, 2.2);
+    this.composer.addPass(this.bloomPass);
+    this.composer.addPass(new OutputPass());
 
     this.camera.position.copy(this.camHome);
     this.camera.lookAt(0, 0, 0);
@@ -2066,6 +2091,7 @@ export class BaseView {
     // teardown mid-dive never leaks; the scene walk below handles the hub.
     this.clearInterior();
     disposeObject(this.scene);
+    this.composer.dispose();
     this.renderer.dispose();
     this.root.remove();
   }
@@ -2211,12 +2237,11 @@ export class BaseView {
     this.sharedConcrete = concreteMaterial();
     this.sharedSteel = steelMaterial();
     this.sharedRock = rockMaterial();
-    // Corridor surfaces — palette-derived only (no ad-hoc hex). The hallway
-    // floor is the bay concrete lifted toward the steel-edge tone so it reads
-    // as a distinct, slightly lighter paved strip; the strip-lights glow in the
-    // shared teal floor-line accent.
-    this.corridorFloor = concreteMaterial();
+    // Corridor surfaces — palette-derived only (no ad-hoc hex). Clone the shared
+    // concrete so tinting the hallway strip never mutates bay floors / pads.
+    this.corridorFloor = concreteMaterial().clone();
     this.corridorFloor.color.lerp(new Color(BASE_PALETTE.steelEdge), 0.16);
+    this.corridorFloor.userData.shared = false; // per-view clone — dispose with scene
     this.corridorStripMat = new MeshBasicMaterial({
       color: BASE_PALETTE.floorLine,
       transparent: true,
@@ -2225,15 +2250,15 @@ export class BaseView {
       depthWrite: false,
     });
 
-    // Rock-colored LINEAR fog with a near plane: the base (centered ~10 units
-    // from the camera) stays crisp while the back rock walls + void fade to
-    // black — moody depth falloff without crushing the hero subject.
-    this.scene.fog = new Fog(BASE_PALETTE.rock, 9, 20);
+    // Rock-colored LINEAR fog with a near plane: the base stays crisp while the
+    // far cavity walls fade gently — depth without crushing the carved rock.
+    this.scene.background = new Color(BASE_PALETTE.rock);
+    this.scene.fog = new Fog(BASE_PALETTE.rock, 14, 28);
 
-    // Low cool ambient — just enough to keep contact shadows legible without
-    // lifting the shadow side into mid grey. Tint from the steel anchor.
+    // Low cool ambient + a soft hemisphere fill so contact shadows stay
+    // legible without lifting the shadow side into mid grey. Tint from steel.
     this.scene.add(
-      new AmbientLight(new Color(BASE_PALETTE.steel).lerp(new Color(1, 1, 1), 0.3), 0.25),
+      new AmbientLight(new Color(BASE_PALETTE.steel).lerp(new Color(1, 1, 1), 0.3), 0.22),
     );
 
     // Warm key light — the excavation work-light. Strong and tight: a shadow
@@ -2241,8 +2266,8 @@ export class BaseView {
     // plus a small radius yields crisp contact shadows instead of a diffuse
     // wash. Tint pulled less toward neutral so warm key reads against cool fill.
     const key = new DirectionalLight(
-      new Color(BASE_PALETTE.accent.reactor).lerp(new Color(1, 1, 1), 0.55),
-      4.0,
+      new Color(BASE_PALETTE.accent.reactor).lerp(new Color(1, 1, 1), 0.5),
+      4.2,
     );
     key.position.set(5, 7.5, 6);
     key.target.position.set(0, 0, 0);
@@ -2263,11 +2288,29 @@ export class BaseView {
     // Cool rim/back light separates the facility silhouettes from the rock and
     // reinforces the warm-key / cool-fill split. Tint from the teal floor-line.
     const rim = new DirectionalLight(
-      new Color(BASE_PALETTE.floorLine).lerp(new Color(1, 1, 1), 0.15),
-      1.15,
+      new Color(BASE_PALETTE.floorLine).lerp(new Color(1, 1, 1), 0.12),
+      1.35,
     );
     rim.position.set(-6, 5, -5);
     this.scene.add(rim);
+
+    // Soft fill from below-front so the cutaway lip and corridor floors don't
+    // crush to black under the key's hard shadows.
+    const fill = new DirectionalLight(
+      new Color(BASE_PALETTE.steel).lerp(new Color(0.7, 0.8, 1), 0.4),
+      0.55,
+    );
+    fill.position.set(1, 2.5, 8);
+    this.scene.add(fill);
+
+    // Cool bounce off the carved rock cavity (back/left walls) so strata read
+    // instead of disappearing into the void behind the facilities.
+    const rockFill = new DirectionalLight(
+      new Color(BASE_PALETTE.floorLine).lerp(new Color(0.55, 0.65, 0.85), 0.5),
+      0.7,
+    );
+    rockFill.position.set(-4, 3.5, -6);
+    this.scene.add(rockFill);
 
     this.baseGroup.position.set(0, -0.12, 0);
     this.baseGroup.rotation.y = BASE_VIEW_YAW;
@@ -4530,6 +4573,7 @@ export class BaseView {
     });
     this.interiorGroup.add(diorama);
     this.interiorRoot = diorama;
+    this.mountInteriorLights(role);
     this.baseGroup.visible = false;
     // Clear any lingering hover affordance (tooltip + pointer cursor) from the
     // hub facility the player just clicked — the dive replaces that interaction.
@@ -4543,10 +4587,66 @@ export class BaseView {
     this.beginCameraTween(this.interiorCamPos, this.interiorCamTarget, 760);
   }
 
+  /**
+   * Warm key + cool fill + a soft accent point light sized for the sealed room.
+   * Hub directional lights are aimed at the cutaway footprint and leave the
+   * close-up diorama underlit; these replace them for the dive.
+   */
+  private mountInteriorLights(role: FacilityRole): void {
+    this.clearInteriorLights();
+    const lights = new Group();
+    const accentHex = BASE_PALETTE.accent[role];
+
+    const key = new DirectionalLight(
+      new Color(0xfff0e0).lerp(new Color(accentHex), 0.15),
+      2.4,
+    );
+    key.position.set(2.8, 4.2, 3.5);
+    key.target.position.set(0, 0.8, 0);
+    key.castShadow = true;
+    key.shadow.mapSize.set(1024, 1024);
+    key.shadow.camera.near = 0.5;
+    key.shadow.camera.far = 14;
+    key.shadow.camera.left = -4;
+    key.shadow.camera.right = 4;
+    key.shadow.camera.top = 4;
+    key.shadow.camera.bottom = -4;
+    key.shadow.bias = -0.0008;
+    key.shadow.normalBias = 0.03;
+    key.shadow.radius = 2;
+    lights.add(key, key.target);
+
+    const fill = new DirectionalLight(
+      new Color(BASE_PALETTE.floorLine).lerp(new Color(1, 1, 1), 0.35),
+      0.85,
+    );
+    fill.position.set(-3.2, 2.8, -1.5);
+    lights.add(fill);
+
+    const accent = new PointLight(accentHex, 2.2, 8, 1.6);
+    accent.position.set(0, 2.4, 0.4);
+    lights.add(accent);
+
+    this.interiorGroup.add(lights);
+    this.interiorLights = lights;
+  }
+
+  private clearInteriorLights(): void {
+    if (!this.interiorLights) return;
+    this.interiorGroup.remove(this.interiorLights);
+    this.interiorLights.traverse((child) => {
+      if (child instanceof PointLight || child instanceof DirectionalLight) {
+        child.dispose?.();
+      }
+    });
+    this.interiorLights = null;
+  }
+
   /** Dispose the mounted interior diorama (geometry + materials) and detach it,
    *  so diving into another facility or returning to the hub never leaks GPU
    *  memory. disposeObject dedupes shared resources. */
   private clearInterior(): void {
+    this.clearInteriorLights();
     if (!this.interiorRoot) return;
     disposeObject(this.interiorRoot);
     this.interiorGroup.remove(this.interiorRoot);
@@ -4614,6 +4714,8 @@ export class BaseView {
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height, false);
+    this.composer.setSize(width, height);
+    this.bloomPass.resolution.set(width, height);
   };
 
   private frame = (): void => {
@@ -4687,6 +4789,6 @@ export class BaseView {
       }
     }
     for (const crew of this.crewSystems) crew.tick(dt);
-    this.renderer.render(this.scene, this.camera);
+    this.composer.render();
   };
 }

@@ -103,32 +103,34 @@ const SHELL_MAT = {
   floor: new MeshStandardMaterial({
     map: _concreteTex.map,
     normalMap: _concreteTex.normalMap,
-    normalScale: new Vector2(0.7, 0.7),
+    normalScale: new Vector2(0.85, 0.85),
     color: 0xffffff,
-    emissive: new Color(0x4c5a6e),
-    emissiveIntensity: 1.05,
+    // Soft fill so the room isn't crushed black — low enough that the cracked
+    // concrete albedo + normals still read under the vat/work lights.
+    emissive: new Color(0x1a222c),
+    emissiveIntensity: 0.35,
     metalness: 0.0,
     roughness: 0.95,
   }),
   wall: new MeshStandardMaterial({
     map: _panelTex.map,
     normalMap: _panelTex.normalMap,
-    normalScale: new Vector2(0.6, 0.6),
+    normalScale: new Vector2(0.75, 0.75),
     color: 0xffffff,
-    emissive: new Color(0x3f4b5c),
-    emissiveIntensity: 0.85,
-    metalness: 0.5,
-    roughness: 0.55,
+    emissive: new Color(0x141a22),
+    emissiveIntensity: 0.28,
+    metalness: 0.55,
+    roughness: 0.52,
   }),
   ceiling: new MeshStandardMaterial({
     map: _panelTex.map,
     normalMap: _panelTex.normalMap,
-    normalScale: new Vector2(0.6, 0.6),
+    normalScale: new Vector2(0.7, 0.7),
     color: 0xffffff,
-    emissive: new Color(0x2c3644),
-    emissiveIntensity: 0.7,
-    metalness: 0.55,
-    roughness: 0.5,
+    emissive: new Color(0x10161e),
+    emissiveIntensity: 0.22,
+    metalness: 0.58,
+    roughness: 0.48,
   }),
 } as const;
 
@@ -276,8 +278,8 @@ const VAT_POINTS: Vector2[] = [
   new Vector2(0.19, 1.15),
   new Vector2(0.24, 1.24),
 ];
-const VAT_FLASK = new LatheGeometry(VAT_POINTS, 28);
-const VAT_FRAME_POST = new CylinderGeometry(0.035, 0.035, 1.32, 8);
+const VAT_FLASK = new LatheGeometry(VAT_POINTS, 48);
+const VAT_FRAME_POST = new CylinderGeometry(0.035, 0.035, 1.32, 12);
 
 // --- Workbench ---
 const BENCH_TOP = bevelBox(1.2, 0.08, 0.62, 0.02);
@@ -303,8 +305,8 @@ const STOOL_LEG = new CylinderGeometry(0.03, 0.03, 1, 8);
 // COMMAND — holo table, console desks, commander podium.
 const PODIUM = bevelBox(0.55, 1.0, 0.42, 0.03);
 const PODIUM_SCREEN = new PlaneGeometry(0.34, 0.24);
-const HOLO_BEAM = new CylinderGeometry(0.025, 0.025, 1, 8);
-const HOLO_RIM = new CylinderGeometry(0.64, 0.64, 0.035, 32);
+const HOLO_BEAM = new CylinderGeometry(0.025, 0.025, 1, 10);
+const HOLO_RIM = new CylinderGeometry(0.64, 0.64, 0.035, 48);
 const STATUS_WALL = new PlaneGeometry(2.8, 1.0);
 const TACTICAL_MAP = new PlaneGeometry(0.86, 0.62);
 const CONSOLE_DESK = bevelBox(1.05, 0.68, 0.52, 0.03);
@@ -335,9 +337,9 @@ const LOCKER = bevelBox(0.5, 1.8, 0.5, 0.02);
 tileUV(LOCKER, 1.2, 2.4);
 
 // HANGAR — interceptor ship on a pad + overhead crane.
-const PAD = new CylinderGeometry(2.0, 2.05, 0.04, 36);
-const PAD_RING = new CylinderGeometry(1.92, 1.92, 0.02, 36);
-const FUSELAGE = new CylinderGeometry(0.22, 0.16, 2.4, 18);
+const PAD = new CylinderGeometry(2.0, 2.05, 0.04, 48);
+const PAD_RING = new CylinderGeometry(1.92, 1.92, 0.02, 48);
+const FUSELAGE = new CylinderGeometry(0.22, 0.16, 2.4, 24);
 const NOSE_CONE = new ConeGeometry(0.16, 0.5, 18);
 const WING = bevelBox(1.7, 0.06, 0.62, 0.02);
 const TAIL_FIN = bevelBox(0.06, 0.5, 0.45, 0.02);
@@ -370,12 +372,12 @@ const RADAR_CONSOLE = bevelBox(0.95, 0.92, 0.52, 0.025);
 const SWEEP_SCREEN = new PlaneGeometry(0.7, 0.42);
 
 // REACTOR — cylindrical core + conduit pipes + cooling tanks.
-const CORE = new CylinderGeometry(0.55, 0.6, 1.8, 28);
-const CORE_TOP = new CylinderGeometry(0.6, 0.55, 0.16, 28);
-const CORE_BASE_RING = new CylinderGeometry(0.72, 0.78, 0.22, 28);
-const CONDUIT = new CylinderGeometry(0.09, 0.09, 1, 10);
-const COOLING_TANK = new CylinderGeometry(0.36, 0.36, 1.5, 18);
-const COOLING_CAP = new CylinderGeometry(0.38, 0.36, 0.1, 18);
+const CORE = new CylinderGeometry(0.55, 0.6, 1.8, 40);
+const CORE_TOP = new CylinderGeometry(0.6, 0.55, 0.16, 40);
+const CORE_BASE_RING = new CylinderGeometry(0.72, 0.78, 0.22, 40);
+const CONDUIT = new CylinderGeometry(0.09, 0.09, 1, 12);
+const COOLING_TANK = new CylinderGeometry(0.36, 0.36, 1.5, 24);
+const COOLING_CAP = new CylinderGeometry(0.38, 0.36, 0.1, 24);
 const REACTOR_CONSOLE = bevelBox(0.9, 0.9, 0.5, 0.025);
 const WARN_STRIPE = new BoxGeometry(0.45, 0.13, 0.05);
 
@@ -430,6 +432,8 @@ function add(
   mesh.position.set(position[0], position[1], position[2]);
   mesh.scale.set(scale[0], scale[1], scale[2]);
   mesh.rotation.set(rotation[0], rotation[1], rotation[2]);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
   group.add(mesh);
   return mesh;
 }

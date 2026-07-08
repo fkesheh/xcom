@@ -45,6 +45,12 @@ export const BASE_PALETTE = {
 
 export type FacilityRole = keyof typeof BASE_PALETTE.accent;
 
+/**
+ * Flat rock / steel / concrete factories kept for palette documentation and any
+ * caller that wants an untextured tint. The live hub + facility art imports the
+ * PBR variants from {@link ./baseTextures} (rockMaterial / steelMaterial /
+ * concreteMaterial there carry albedo + normal maps).
+ */
 /** Slight sheen steel for structural members (walls, frames, gantries). */
 export function steelMaterial(): MeshStandardMaterial {
   return new MeshStandardMaterial({ color: BASE_PALETTE.steel, metalness: 0.55, roughness: 0.55 });

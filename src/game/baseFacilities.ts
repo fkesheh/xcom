@@ -25,8 +25,13 @@ import {
   type BufferGeometry,
   SphereGeometry,
 } from "three";
-import { accentMaterial, rockMaterial, type FacilityRole } from "./basePalette";
-import { concreteMaterial, metalPanelMaterial, wornSteelMaterial } from "./baseTextures";
+import { accentMaterial, type FacilityRole } from "./basePalette";
+import {
+  concreteMaterial,
+  metalPanelMaterial,
+  rockMaterial,
+  wornSteelMaterial,
+} from "./baseTextures";
 
 export type { FacilityRole } from "./basePalette";
 
@@ -37,21 +42,21 @@ const GEO = {
   /** Thin slab — pads, bed platforms, ceiling strips. */
   slab: new BoxGeometry(1, 0.08, 1),
   /** Slim vertical post — beacons, bed frames, gantry legs. */
-  post: new CylinderGeometry(0.06, 0.06, 1, 10),
+  post: new CylinderGeometry(0.06, 0.06, 1, 14),
   /** Pillar — command hub pedestal, reactor supports. */
-  pillar: new CylinderGeometry(0.12, 0.12, 1, 14),
+  pillar: new CylinderGeometry(0.12, 0.12, 1, 20),
   /** Unit cylinder — cores, vats, pads (radius 0.5). */
-  core: new CylinderGeometry(0.5, 0.5, 1, 28),
+  core: new CylinderGeometry(0.5, 0.5, 1, 40),
   /** Flat disk — holotables, lamps, pads (radius 0.5, height 0.04). */
-  disk: new CylinderGeometry(0.5, 0.5, 0.04, 28),
+  disk: new CylinderGeometry(0.5, 0.5, 0.04, 40),
   /** Small beacon sphere (radius 0.05). */
-  bead: new SphereGeometry(0.05, 10, 8),
+  bead: new SphereGeometry(0.05, 14, 12),
   /** Tiny status-light cube. */
   dot: new BoxGeometry(0.06, 0.06, 0.06),
   /** Hemisphere — radar dish, cockpit canopy. */
-  dome: new SphereGeometry(0.5, 18, 10, 0, Math.PI * 2, 0, Math.PI * 0.5),
+  dome: new SphereGeometry(0.5, 28, 16, 0, Math.PI * 2, 0, Math.PI * 0.5),
   /** Open cone — forge nozzle / engine bell. */
-  cone: new ConeGeometry(0.5, 1, 20, 1, true),
+  cone: new ConeGeometry(0.5, 1, 28, 1, true),
 } as const;
 
 /**
@@ -130,6 +135,8 @@ function add(
   mesh.position.set(position[0], position[1], position[2]);
   mesh.scale.set(scale[0], scale[1], scale[2]);
   mesh.rotation.set(rotation[0], rotation[1], rotation[2]);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
   group.add(mesh);
   return mesh;
 }
