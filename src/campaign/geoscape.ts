@@ -1712,8 +1712,11 @@ function advanceFlightProgress(flight: ActiveFlight, hours: number): ActiveFligh
  * The FASTEST ready interceptor that is not already airborne (patrolling or
  * returning), so a manufactured advanced interceptor is scrambled ahead of a
  * slower Raptor. Ties keep the earliest craft in fleet order (stable).
+ *
+ * Kept for the Intercept launch path / tests that seed patrols manually; the
+ * geoscape no longer auto-scrambles on radar contact.
  */
-function chooseIdleInterceptor(
+export function chooseIdleInterceptor(
   campaign: CampaignState,
   flights: readonly ActiveFlight[],
 ): Craft | undefined {
@@ -1727,7 +1730,8 @@ function chooseIdleInterceptor(
   return best;
 }
 
-function makePatrolFlight(craft: Craft, campaign: CampaignState, contact: UfoContact): ActiveFlight {
+/** Build a patrol ActiveFlight from base toward a contact (tests / manual scramble). */
+export function makePatrolFlight(craft: Craft, campaign: CampaignState, contact: UfoContact): ActiveFlight {
   return {
     id: `${PATROL_ID_PREFIX}${craft.id}:${contact.id}`,
     craftId: craft.id,
@@ -1864,7 +1868,8 @@ function burnEngagingFuel(campaign: CampaignState): CampaignState {
  *    visibly gives chase without teleporting home;
  *  - when the UFO is gone (expired/escaped/shot down/assaulted) its patrol turns
  *    back toward the base as a fresh return flight;
- *  - a ready, idle interceptor auto-launches a patrol toward any tracked UFO;
+ *  - interceptors do NOT auto-scramble on radar contact — the player launches via
+ *    Intercept (startInterceptionEncounter); only existing patrols are advanced;
  *  - flights whose progress reaches 1 (arrived) are removed.
  * Fuel: each flight burns FUEL_BURN_PER_DEG per degree traveled from its engaging
  * craft; a craft that drops to the FUEL_RESERVE fraction turns back for base; and
@@ -1884,21 +1889,12 @@ function manageActiveFlights(
   }
 
   // 1. Re-aim existing patrols at the tracked UFO's latest position (homing).
-  const reAimed = flights.map((flight) =>
+  //    (No auto-scramble — craft stay in hangar until the player hits Intercept.)
+  const withSpawn = flights.map((flight) =>
     isPatrolFlight(flight) && tracked ? { ...flight, toLat: contact!.lat, toLon: contact!.lon } : flight,
   );
 
-  // 2. Auto-launch ONE patrol toward a tracked UFO if none is airborne yet and a
-  //    ready interceptor is idle. One scramble per UFO (the next craft stays in reserve).
-  let withSpawn = reAimed;
-  if (tracked && !reAimed.some((flight) => isPatrolFlight(flight))) {
-    const idle = chooseIdleInterceptor(campaign, reAimed);
-    if (idle) {
-      withSpawn = [...reAimed, makePatrolFlight(idle, campaign, contact!)];
-    }
-  }
-
-  // 3. Advance every flight along its route by dt and burn fuel from each engaging
+  // 2. Advance every flight along its route by dt and burn fuel from each engaging
   //    craft proportional to the great-circle distance it covered this tick.
   const burnByCraft = new Map<string, number>();
   const advanced = withSpawn.map((flight) => {
@@ -1910,14 +1906,14 @@ function manageActiveFlights(
   });
   const burnedFleet = applyFlightFuelBurn(baseFleet, burnByCraft);
 
-  // 4. Patrols that have caught a still-tracked UFO shadow it (clamp below arrival).
+  // 3. Patrols that have caught a still-tracked UFO shadow it (clamp below arrival).
   const shadowed = advanced.map((flight) =>
     isPatrolFlight(flight) && tracked && flight.progress >= PATROL_SHADOW_PROGRESS
       ? { ...flight, progress: PATROL_SHADOW_PROGRESS }
       : flight,
   );
 
-  // 5. Patrols whose UFO is gone OR whose craft is low on fuel turn for home.
+  // 4. Patrols whose UFO is gone OR whose craft is low on fuel turn for home.
   const converted: ActiveFlight[] = [];
   const kept = shadowed.flatMap((flight) => {
     const outOfFuel = !isReturnFlight(flight) && craftFuelBelowReserve(burnedFleet, flight.craftId);
@@ -1947,7 +1943,7 @@ function manageActiveFlights(
     return flight.progress < 1;
   });
 
-  // 6. Refuel crafts sitting in the hangar (no active flight) for the elapsed dt.
+  // 5. Refuel crafts sitting in the hangar (no active flight) for the elapsed dt.
   const finalFleet = refuelAtBase(burnedFleet, finalFlights, dt);
 
   return { flights: finalFlights, fleet: finalFleet };

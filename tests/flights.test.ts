@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { advanceGeoscape } from "../src/campaign/geoscape";
+import { advanceGeoscape, makePatrolFlight } from "../src/campaign/geoscape";
 import { createCampaign } from "../src/campaign/storage";
 import type { ActiveFlight, CampaignClock, CampaignState, UfoContact } from "../src/campaign/types";
 
@@ -49,12 +49,20 @@ function patrolOf(state: CampaignState): ActiveFlight | undefined {
   return (state.activeFlights ?? []).find((flight) => flight.id.startsWith("patrol:"));
 }
 
+/** Seed a manual patrol (player Intercept path) — geoscape no longer auto-scrambles. */
+function withManualPatrol(state: CampaignState): CampaignState {
+  const contact = state.ufoContact;
+  const craft = (state.fleet ?? []).find((c) => c.kind === "interceptor");
+  if (!contact || !craft) return state;
+  return { ...state, activeFlights: [makePatrolFlight(craft, state, contact)] };
+}
+
 // ===========================================================================
-// 1. AUTO-SPAWN — a ready interceptor launches toward a tracked UFO from base
+// 1. NO AUTO-SCRAMBLE — craft stay in hangar until the player hits Intercept
 // ===========================================================================
 
 describe("active patrol flights", () => {
-  it("auto-launches an interceptor patrol toward a tracked UFO from the base", () => {
+  it("does not auto-launch an interceptor when a UFO is merely tracked", () => {
     const start: CampaignState = {
       ...freshCampaign(),
       clock: clockAt(10, { lastContactHour: 10 }),
@@ -62,34 +70,42 @@ describe("active patrol flights", () => {
     };
 
     const advanced = advanceGeoscape(start, 1);
+    expect(patrolOf(advanced)).toBeUndefined();
+    expect(advanced.activeFlights ?? []).toEqual([]);
+  });
+
+  it("advances a player-launched patrol toward the tracked UFO", () => {
+    const start = withManualPatrol({
+      ...freshCampaign(),
+      clock: clockAt(10, { lastContactHour: 10 }),
+      ufoContact: trackedContactAt(4, 22, "Africa"),
+    });
+
+    const advanced = advanceGeoscape(start, 1);
     const patrol = patrolOf(advanced);
     expect(patrol).toBeDefined();
-    expect(patrol!.craftId).toMatch(/^int-/); // an interceptor craft
+    expect(patrol!.craftId).toMatch(/^int-/);
     expect(patrol!.kind).toBe("interceptor");
-    // Launched from the base, aimed at the UFO's current (advanced) position.
     expect(patrol!.fromLat).toBe(BASE.lat);
     expect(patrol!.fromLon).toBe(BASE.lon);
     expect(patrol!.toLat).toBe(advanced.ufoContact!.lat);
     expect(patrol!.toLon).toBe(advanced.ufoContact!.lon);
-    // No rubber-band: the patrol cruises at the interceptor's OWN speed (the
-    // starting Raptor's 0.9 deg/hour), not a UFO-proportional band.
     expect(patrol!.speedDegPerHour).toBe(36.2);
     expect(patrol!.progress).toBeGreaterThanOrEqual(0);
     expect(patrol!.progress).toBeLessThan(1);
   });
 
-  it("does not launch a second patrol while the interceptor is already airborne", () => {
-    const start: CampaignState = {
+  it("does not spawn a second patrol while one is already airborne", () => {
+    const start = withManualPatrol({
       ...freshCampaign(),
       clock: clockAt(10, { lastContactHour: 10 }),
       ufoContact: trackedContactAt(4, 22, "Africa"),
-    };
+    });
     const first = advanceGeoscape(start, 1);
     const second = advanceGeoscape(first, 1);
     const patrols = (second.activeFlights ?? []).filter((flight) =>
       flight.id.startsWith("patrol:"),
     );
-    // Only one interceptor is airborne for this UFO (no duplicate sorties).
     expect(patrols.length).toBe(1);
   });
 
@@ -110,11 +126,11 @@ describe("active patrol flights", () => {
 
 describe("flight advance determinism", () => {
   it("advances a patrol deterministically (identical inputs -> identical flights)", () => {
-    const start: CampaignState = {
+    const start = withManualPatrol({
       ...freshCampaign(),
       clock: clockAt(10, { lastContactHour: 10 }),
       ufoContact: trackedContactAt(20, 20, "Africa"),
-    };
+    });
 
     const a = advanceGeoscape(start, 3);
     const b = advanceGeoscape(start, 3);
@@ -164,13 +180,13 @@ describe("flight arrival", () => {
 
 describe("patrol return to base", () => {
   it("converts a patrol into a return-to-base flight when the UFO expires", () => {
-    const start: CampaignState = {
+    const start = withManualPatrol({
       ...freshCampaign(),
       clock: clockAt(10, { lastContactHour: 10 }),
       ufoContact: trackedContactAt(20, 20, "Africa", { expiresAtHour: 14 }),
-    };
+    });
 
-    // First leg: UFO still tracked (now hour 12) -> a patrol launches.
+    // First leg: UFO still tracked (now hour 12) -> patrol advances.
     const patrolling = advanceGeoscape(start, 2);
     const patrol = patrolOf(patrolling);
     expect(patrol).toBeDefined();

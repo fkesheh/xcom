@@ -318,9 +318,10 @@ interface EventInfo {
   alertKind: GeoCampaignEventKind;
 }
 
-/** Alert kinds that demand the player's attention and force-pause time flow. Routine
- *  radar noise (ufoDetected spawns, interceptionReport filings) stays a toast-only,
- *  non-pausing notice so 30x fast-forward doesn't get yanked back every few seconds. */
+/** Alert kinds that demand the player's attention and force-pause time flow.
+ *  UFO detection is handled separately: it drops fast-forward to 1× (not pause)
+ *  so the commander can react without freezing the globe. Routine
+ *  interceptionReport filings stay toast-only. */
 const FORCE_PAUSE_ALERT_KINDS: ReadonlySet<GeoCampaignEventKind> = new Set([
   "ufoShotDown",
   "ufoLanded",
@@ -334,6 +335,19 @@ function shouldForcePause(info: EventInfo): boolean {
   if (info.kind === "won" || info.kind === "lost" || info.kind === "council") return true;
   return FORCE_PAUSE_ALERT_KINDS.has(info.alertKind);
 }
+
+/** True when a new UFO contact just appeared — drop 30×/5× down to 1×. */
+function shouldDropToRealtime(info: EventInfo): boolean {
+  return info.alertKind === "ufoDetected";
+}
+
+/** @internal Exported for unit tests of the auto-pause / realtime-drop policy. */
+export {
+  detectEvent as detectGeoscapeEvent,
+  shouldForcePause as geoscapeShouldForcePause,
+  shouldDropToRealtime as geoscapeShouldDropToRealtime,
+  snapshotEvent as snapshotGeoscapeEvent,
+};
 
 /** Notable campaign fields tracked across renders so auto-pause only fires on real events. */
 interface EventSnapshot {
@@ -2411,10 +2425,12 @@ export class GeoscapeView {
     if (lastEventSnapshot !== null) {
       const info = detectEvent(lastEventSnapshot, this.campaign);
       if (info) {
-        // Auto-pause diet: only demand-attention events (won/lost, ufoLanded, council
-        // review, funding/mission reports) yank time back to 0x. Routine UFO spawns and
-        // interception-report filings still toast but let fast-forward keep running.
+        // Auto-pause diet: demand-attention events (won/lost, ufoLanded, council
+        // review, funding/mission reports) yank time back to 0x. A fresh UFO
+        // contact drops fast-forward to 1× so the commander can react without
+        // freezing the globe. Interception-report filings stay toast-only.
         if (shouldForcePause(info)) this.setTimeSpeed(0);
+        else if (shouldDropToRealtime(info) && this.timeSpeed > 1) this.setTimeSpeed(1);
         this.showToast(info);
         if (info.kind === "council") this.openCouncilModal();
         // Surface the event to NAV so it can beacon the matching base facility +

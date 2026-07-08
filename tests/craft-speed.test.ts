@@ -8,6 +8,7 @@ import {
   interceptionForecast,
   interceptionSpeedAdvantage,
   interceptUfo,
+  makePatrolFlight,
   startInterceptionEncounter,
   UFO_TYPE_PROFILES,
 } from "../src/campaign/geoscape";
@@ -180,34 +181,27 @@ describe("craft speed + combat stats round-trip save/load", () => {
 // ===========================================================================
 
 describe("patrol speed comes from the assigned craft (no rubber-band)", () => {
-  it("launches a Raptor patrol at the Raptor's own 36.2 deg/h regardless of UFO speed", () => {
+  it("builds a Raptor patrol at the Raptor's own 36.2 deg/h regardless of UFO speed", () => {
     // A slow harvester and a fast battleship both yield the SAME patrol speed — the
     // craft's own cruise — proving the speed is no longer proportional to the UFO's.
-    const slow = advanceGeoscape(
-      withContact({ ...createCampaign(BASE, SEED), clock: { ...createCampaign(BASE, SEED).clock, lastContactHour: 10 } }, trackedContact("harvester", 10)),
-      1,
-    );
-    const fast = advanceGeoscape(
-      withContact({ ...createCampaign(BASE, SEED), clock: { ...createCampaign(BASE, SEED).clock, lastContactHour: 10 } }, trackedContact("battleship", 10)),
-      1,
-    );
-    const patrolSlow = (slow.activeFlights ?? []).find((f) => f.id.startsWith("patrol:"));
-    const patrolFast = (fast.activeFlights ?? []).find((f) => f.id.startsWith("patrol:"));
-    expect(patrolSlow?.speedDegPerHour).toBe(36.2);
-    expect(patrolFast?.speedDegPerHour).toBe(36.2);
+    // (Geoscape no longer auto-scrambles; makePatrolFlight is the Intercept seed.)
+    const base = createCampaign(BASE, SEED);
+    const craft = (base.fleet ?? []).find((c) => c.kind === "interceptor")!;
+    const slowContact = trackedContact("harvester", 10);
+    const fastContact = trackedContact("battleship", 10);
+    expect(makePatrolFlight(craft, withContact(base, slowContact), slowContact).speedDegPerHour).toBe(36.2);
+    expect(makePatrolFlight(craft, withContact(base, fastContact), fastContact).speedDegPerHour).toBe(36.2);
   });
 
-  it("scrambles the fastest ready craft and flies the patrol at its own speed", () => {
+  it("builds a Phantom patrol at the Phantom's own speed when it is the engaging craft", () => {
     let campaign = completeResearch(completeResearch(richCampaign(), "alienBiotech"), "alienPropulsion");
     campaign = startManufacturing(campaign, "phantom");
     campaign = advanceGeoscape(campaign, manufacturingDuration(campaign, "phantom"));
     const withUfo = withContact(campaign, trackedContact("scout", campaign.clock.elapsedHours));
-    const advanced = advanceGeoscape(withUfo, 1);
-    const patrol = (advanced.activeFlights ?? []).find((f) => f.id.startsWith("patrol:"));
-    expect(patrol).toBeDefined();
-    // The Phantom (64.3) is the fastest ready craft, so it scrambles at its own speed.
-    expect(patrol!.craftId).toBe(chooseInterceptor(withUfo)!.id);
-    expect(patrol!.speedDegPerHour).toBe(64.3);
+    const phantom = chooseInterceptor(withUfo)!;
+    const patrol = makePatrolFlight(phantom, withUfo, withUfo.ufoContact!);
+    expect(patrol.craftId).toBe(phantom.id);
+    expect(patrol.speedDegPerHour).toBe(64.3);
   });
 });
 

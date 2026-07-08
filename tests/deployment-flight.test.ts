@@ -95,7 +95,7 @@ describe("deployment flight persists on arrival (non-blocking model)", () => {
   it("stays on the globe at progress 1 after advanceGeoscape (not retired like a patrol)", () => {
     const fresh = createCampaign(BASE, SEED);
     // Crashed contact a short hop from the base (~1 deg) so the Skyranger arrives fast
-    // and no interceptor patrol auto-launches (only tracked UFOs scramble one).
+    // and no interceptor patrol auto-launches (craft stay grounded until Intercept).
     const contact: UfoContact = {
       ...contactAt(49.2, 15.6),
       status: "crashed",

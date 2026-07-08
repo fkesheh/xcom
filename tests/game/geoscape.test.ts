@@ -9,7 +9,17 @@ import {
   isInterceptorReady,
 } from "../../src/campaign/geoscape";
 import { createCampaign } from "../../src/campaign/storage";
-import { canSelectBaseSite, geoscapeTimeAction, regionFor, uvToLatLon } from "../../src/game/geoscape";
+import {
+  canSelectBaseSite,
+  detectGeoscapeEvent,
+  geoscapeShouldDropToRealtime,
+  geoscapeShouldForcePause,
+  geoscapeTimeAction,
+  regionFor,
+  snapshotGeoscapeEvent,
+  uvToLatLon,
+} from "../../src/game/geoscape";
+import type { CampaignState, UfoContact } from "../../src/campaign/types";
 
 describe("geoscape coordinate picking", () => {
   it("maps sphere UV north/south in the same hemisphere as the visible map", () => {
@@ -72,5 +82,53 @@ describe("geoscape coordinate picking", () => {
       disabled: false,
     });
     expect(geoscapeTimeAction(lost).disabled).toBe(true);
+  });
+});
+
+describe("geoscape UFO detect time policy", () => {
+  it("detects a new UFO contact and drops fast-forward to 1× (does not force-pause)", () => {
+    const base = createCampaign({ lat: 2, lon: 14.2, region: "Africa" }, 98);
+    const prev = snapshotGeoscapeEvent(base);
+    const contact: UfoContact = {
+      id: "UFO-DETECT-TEST",
+      status: "tracked",
+      missionType: "crashSite",
+      lat: 4,
+      lon: 22,
+      region: "Africa",
+      detectedAtHour: 10,
+      expiresAtHour: 40,
+      missionSeed: 1,
+      strength: 1,
+    };
+    const withContact: CampaignState = { ...base, ufoContact: contact };
+    const info = detectGeoscapeEvent(prev, withContact);
+    expect(info).toMatchObject({ alertKind: "ufoDetected" });
+    expect(geoscapeShouldForcePause(info!)).toBe(false);
+    expect(geoscapeShouldDropToRealtime(info!)).toBe(true);
+  });
+
+  it("force-pauses on a landed UFO, not on an interception report", () => {
+    expect(
+      geoscapeShouldForcePause({
+        kind: "info",
+        text: "UFO landed",
+        alertKind: "ufoLanded",
+      }),
+    ).toBe(true);
+    expect(
+      geoscapeShouldForcePause({
+        kind: "info",
+        text: "Interception report filed",
+        alertKind: "interceptionReport",
+      }),
+    ).toBe(false);
+    expect(
+      geoscapeShouldDropToRealtime({
+        kind: "info",
+        text: "Interception report filed",
+        alertKind: "interceptionReport",
+      }),
+    ).toBe(false);
   });
 });
