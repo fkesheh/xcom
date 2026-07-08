@@ -2,6 +2,8 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   root: ".",
+  // Project Pages site lives at https://fkesheh.github.io/xcom/
+  base: process.env.GITHUB_PAGES === "true" ? "/xcom/" : "/",
   server: { port: 5173, open: false },
   build: {
     target: "es2022",
