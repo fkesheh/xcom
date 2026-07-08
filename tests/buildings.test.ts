@@ -204,6 +204,51 @@ describe("building footprints — sealed core themes (farmland/urban/desert)", (
       expect(m.enemySpawns.length).toBeGreaterThan(0);
     }
   });
+
+  it("scatters crate/barrel furniture inside some building interiors without sealing doors", () => {
+    let furnishedRooms = 0;
+    for (const themeId of SEALED_THEMES) {
+      for (const seed of SEEDS.slice(0, 20)) {
+        const m = gen(seed, themeId);
+        for (const fp of buildingsFor(m)) {
+          let props = 0;
+          let floors = 0;
+          for (let y = fp.rect.y; y < fp.rect.y + fp.rect.h; y++) {
+            for (let x = fp.rect.x; x < fp.rect.x + fp.rect.w; x++) {
+              const id = tileTypeAt(m.grid, x, y)?.id;
+              if (id === "crate" || id === "barrel") props++;
+              if (id && INTERIOR_FLOOR_IDS.has(id)) floors++;
+              // Never stamp furniture onto a door cell.
+              if (id === "door") {
+                /* ok */
+              }
+            }
+          }
+          if (props > 0) {
+            furnishedRooms++;
+            expect(props).toBeLessThanOrEqual(3);
+            expect(floors).toBeGreaterThan(0);
+            // Door apron stays clear: no prop orthogonally adjacent to a door.
+            for (let y = fp.rect.y; y < fp.rect.y + fp.rect.h; y++) {
+              for (let x = fp.rect.x; x < fp.rect.x + fp.rect.w; x++) {
+                const id = tileTypeAt(m.grid, x, y)?.id;
+                if (id !== "crate" && id !== "barrel") continue;
+                for (const [dx, dy] of [
+                  [1, 0],
+                  [-1, 0],
+                  [0, 1],
+                  [0, -1],
+                ] as const) {
+                  expect(tileTypeAt(m.grid, x + dx, y + dy)?.id).not.toBe("door");
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(furnishedRooms).toBeGreaterThan(0);
+  });
 });
 
 describe("building footprints — extra-pack themes (arctic/jungle/forest)", () => {

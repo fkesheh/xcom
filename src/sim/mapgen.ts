@@ -852,6 +852,128 @@ function scatterCover(
   }
 }
 
+/**
+ * Lightly furnish sealed building interiors with crate/barrel props so rooms
+ * read as fightable spaces rather than hollow shells. Outdoor scatterCover
+ * deliberately skips floors; this is the complementary indoor pass.
+ *
+ * Rules:
+ *  - Only replace interior floor tiles (floor_wood / floor_concrete).
+ *  - Never place on a door or orthogonally adjacent to a door (keep entrances open).
+ *  - Cap density low (at most ~1 prop per ~6 floor tiles, hard max 3 per room).
+ *  - After placement, undo LIFO until every remaining interior floor cell is
+ *    reachable from at least one door of that footprint (no orphaned corners).
+ */
+function scatterInteriorFurniture(
+  grid: Grid,
+  palette: TileType[],
+  rng: Rng,
+  footprints: ReadonlyArray<BuildingFootprint>,
+): void {
+  const crateIdx = paletteIndexById(palette, "crate");
+  const barrelIdx = paletteIndexById(palette, "barrel");
+  if (crateIdx < 0 && barrelIdx < 0) return;
+  const chooseKind = (): number => {
+    if (crateIdx < 0) return barrelIdx;
+    if (barrelIdx < 0) return crateIdx;
+    return rng.chance(0.65) ? crateIdx : barrelIdx;
+  };
+
+  for (const fp of footprints) {
+    const floors: Vec2[] = [];
+    const doors: Vec2[] = [];
+    for (let y = fp.rect.y; y < fp.rect.y + fp.rect.h; y++) {
+      for (let x = fp.rect.x; x < fp.rect.x + fp.rect.w; x++) {
+        const id = tileTypeAt(grid, x, y)?.id;
+        if (!id) continue;
+        if (INTERIOR_FLOOR_IDS.has(id)) floors.push({ x, y });
+        else if (id === "door") doors.push({ x, y });
+      }
+    }
+    if (floors.length === 0 || doors.length === 0) continue;
+
+    const candidates = floors.filter((c) => !hasDoorNeighbor(grid, c.x, c.y));
+    if (candidates.length === 0) continue;
+    rng.shuffle(candidates);
+
+    const target = Math.min(3, Math.max(0, Math.floor(floors.length / 6)));
+    if (target <= 0) continue;
+
+    const placed: Array<{ x: number; y: number; prevIndex: number }> = [];
+    for (const c of candidates) {
+      if (placed.length >= target) break;
+      // Skip if already covered (authored block may already have a crate).
+      const cur = tileTypeAt(grid, c.x, c.y);
+      if (!cur || !INTERIOR_FLOOR_IDS.has(cur.id)) continue;
+      placed.push({ x: c.x, y: c.y, prevIndex: grid.cells[cellIndex(grid, c.x, c.y)] as number });
+      setTile(grid, c.x, c.y, chooseKind());
+    }
+
+    if (placed.length === 0) continue;
+
+    // Only doors with a walkable OUTSIDE count as entrances — a door sealed
+    // against another wall must not "rescue" floors the player can never reach.
+    const entrances = doors.filter((d) => {
+      const out = outwardOf(fp.rect, d.x, d.y);
+      return !!out && walkable(grid, out.x, out.y);
+    });
+    if (entrances.length === 0) {
+      // No usable entrance — undo every prop so we never worsen a sealed room.
+      for (let i = placed.length - 1; i >= 0; i--) {
+        const p = placed[i] as { x: number; y: number; prevIndex: number };
+        setTile(grid, p.x, p.y, p.prevIndex);
+      }
+      continue;
+    }
+
+    // Reachability from usable entrances into every remaining interior floor cell.
+    // Sealed (non-entrance) doors are treated as walls so we cannot "cheat"
+    // through them into pockets the player can never enter from outside.
+    const entranceKeys = new Set(entrances.map((d) => cellIndex(grid, d.x, d.y)));
+    const allFloorsReachable = (): boolean => {
+      const seen = new Set<number>();
+      const stack: Vec2[] = [...entrances];
+      for (const d of entrances) seen.add(cellIndex(grid, d.x, d.y));
+      while (stack.length > 0) {
+        const cur = stack.pop() as Vec2;
+        for (const [dx, dy] of ORTHO) {
+          const nx = cur.x + dx;
+          const ny = cur.y + dy;
+          if (!inBounds(grid, nx, ny)) continue;
+          if (!walkable(grid, nx, ny)) continue;
+          // Stay inside this footprint — don't flood the whole map.
+          if (
+            nx < fp.rect.x ||
+            nx >= fp.rect.x + fp.rect.w ||
+            ny < fp.rect.y ||
+            ny >= fp.rect.y + fp.rect.h
+          ) {
+            continue;
+          }
+          const idx = cellIndex(grid, nx, ny);
+          if (seen.has(idx)) continue;
+          const id = tileTypeAt(grid, nx, ny)?.id;
+          if (id === "door" && !entranceKeys.has(idx)) continue;
+          seen.add(idx);
+          stack.push({ x: nx, y: ny });
+        }
+      }
+      for (const f of floors) {
+        const id = tileTypeAt(grid, f.x, f.y)?.id;
+        if (id && INTERIOR_FLOOR_IDS.has(id) && !seen.has(cellIndex(grid, f.x, f.y))) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    for (let i = placed.length - 1; i >= 0 && !allFloorsReachable(); i--) {
+      const p = placed[i] as { x: number; y: number; prevIndex: number };
+      setTile(grid, p.x, p.y, p.prevIndex);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Generator
 // ---------------------------------------------------------------------------
@@ -951,14 +1073,15 @@ export function generateMap(rng: Rng, opts: GenerateMapOptions = {}): GeneratedM
   const ufoInterior = firstTileById(grid, ufoRect, "ufo_floor") ?? { x: ufoRect.x, y: ufoRect.y };
   carveCorridor(grid, palette, anchor, ufoInterior, walkIndex);
 
-  // Scatter deterministic tactical cover (sandbags + low walls) over outdoor
-  // open ground — beside the road trunk, around structures — keeping spawns,
-  // the corridor, and the UFO/dropship footprints clear. Run before the flood
-  // so cover tiles are naturally excluded from the spawn candidates. Cover
-  // randomness is branched off the main stream so it never perturbs the downstream
-  // unit-setup / combat rolls (same seed => identical cover AND identical battle).
-  const coverRng = rng.clone();
-  scatterCover(grid, palette, coverRng, [dsRect, ufoRect], { anchor, target: ufoInterior });
+  // Cover / furniture randomness is branched off the main stream so it never
+  // perturbs downstream unit-setup / combat rolls. Interior and outdoor each
+  // get their OWN clone so outdoor cover placement stays identical to pre-
+  // furniture maps (same seed => same outdoor cover AND same battle).
+  scatterInteriorFurniture(grid, palette, rng.clone(), footprints);
+  scatterCover(grid, palette, rng.clone(), [dsRect, ufoRect], {
+    anchor,
+    target: ufoInterior,
+  });
 
   const comp = floodFill(grid, anchor);
 

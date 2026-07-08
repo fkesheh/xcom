@@ -1264,19 +1264,40 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
   }
 
   /** Move a stowed backpack item into hand for BACKPACK.RETRIEVE_TU_PERCENT. */
-  function retrieveSelected(itemId: string): void {
+  async function retrieveSelected(itemId: string): Promise<void> {
     if (busy || state.status !== "playing") return;
     const sel = selectedUnit();
     if (!sel) return;
-    void dispatch({ type: "retrieveItem", unitId: sel.id, itemId });
+    const beforeTu = sel.tu;
+    const name = sel.name;
+    const itemName = state.items?.[itemId]?.name ?? itemId;
+    await dispatch({ type: "retrieveItem", unitId: sel.id, itemId });
+    // Success emits no GameEvent (types frozen); confirm via TU spend + location.
+    const after = unitById(state, sel.id);
+    const inst = after?.items?.find((it) => it.itemId === itemId);
+    if (after && inst && inst.location !== "backpack" && after.tu < beforeTu) {
+      const spent = beforeTu - after.tu;
+      pushLog(`${name} retrieves ${itemName} (−${spent} TU)`);
+      hud.notify(`RETRIEVED ${itemName.toUpperCase()}`, "info");
+    }
   }
 
   /** Move a hand item back into the backpack for BACKPACK.STOW_TU_PERCENT. */
-  function stowSelected(itemId: string): void {
+  async function stowSelected(itemId: string): Promise<void> {
     if (busy || state.status !== "playing") return;
     const sel = selectedUnit();
     if (!sel) return;
-    void dispatch({ type: "stowItem", unitId: sel.id, itemId });
+    const beforeTu = sel.tu;
+    const name = sel.name;
+    const itemName = state.items?.[itemId]?.name ?? itemId;
+    await dispatch({ type: "stowItem", unitId: sel.id, itemId });
+    const after = unitById(state, sel.id);
+    const inst = after?.items?.find((it) => it.itemId === itemId);
+    if (after && inst && inst.location === "backpack" && after.tu < beforeTu) {
+      const spent = beforeTu - after.tu;
+      pushLog(`${name} stows ${itemName} (−${spent} TU)`);
+      hud.notify(`STOWED ${itemName.toUpperCase()}`, "info");
+    }
   }
 
   /** Immediately activate a motion scanner on the selected unit (self-use device). */
@@ -2200,13 +2221,16 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
       currentHover = move
         ? {
             kind: "move",
-            label: objectiveTarget
-              ? "Recover power source"
-              : extractionTarget
-                ? "Extract UFO core"
-                : move.reachable
-                  ? terrain?.label ?? "Destination"
-                  : "Advance to movement limit",
+            label: (() => {
+              const base = objectiveTarget
+                ? "Recover power source"
+                : extractionTarget
+                  ? "Extract UFO core"
+                  : move.reachable
+                    ? terrain?.label ?? "Destination"
+                    : "Advance to movement limit";
+              return sel.stance === "kneel" ? `${base} · kneeling ×${STANCE.KNEEL_MOVE_MULT}` : base;
+            })(),
             detail: objectiveTarget
                 ? recoverNow
                   ? "Click to secure the UFO core."
@@ -2217,7 +2241,9 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
                 : move.reachable
                   ? "Move the core carrier onto the dropship extraction zone."
                   : "Advance the core carrier toward the dropship extraction zone."
-            : terrain?.label,
+            : sel.stance === "kneel"
+              ? `${terrain?.label ?? "Destination"} — kneeling moves cost ×${STANCE.KNEEL_MOVE_MULT} TU`
+              : terrain?.label,
             moveCost: move.cost,
             tuAfter: sel.tu - move.cost,
             reachable: move.reachable,

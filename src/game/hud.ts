@@ -169,9 +169,9 @@ export interface HudCallbacks {
   onUseItem?: (itemId: string) => void;
   onPrimeItem?: (itemId: string) => void;
   /** Move a stowed backpack item into hand, spending BACKPACK.RETRIEVE_TU_PERCENT. */
-  onRetrieveItem?: (itemId: string) => void;
+  onRetrieveItem?: (itemId: string) => void | Promise<void>;
   /** Move a hand item back into the backpack, spending BACKPACK.STOW_TU_PERCENT. */
-  onStowItem?: (itemId: string) => void;
+  onStowItem?: (itemId: string) => void | Promise<void>;
   /**
    * Enter psi-targeting mode for the selected operative. The next enemy click
    * resolves into a `psiAttack` command (see main.ts). Omitted when the unit has
@@ -537,6 +537,7 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
 #hud .item-line { display: inline-flex; gap: 3px; }
 #hud .item-line button { position: relative; min-height: 38px; min-width: 40px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; font-size: 17px; line-height: 1; }
 #hud .item-line button.prime { min-width: 26px; padding: 0 6px; font: 800 12px/1 ui-monospace, monospace; }
+#hud .item-line button.prime.retrieve { min-width: 36px; letter-spacing: .04em; }
 #hud .item-line .item-count {
   position: absolute;
   top: -5px;
@@ -606,6 +607,17 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   font: 800 12px/1.2 ui-monospace, monospace;
   letter-spacing: .08em;
   animation: panic-pulse 1s ease-in-out infinite;
+}
+#hud .roster .kneel-tag {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--hud-cyan);
+  background: rgba(103,232,249,.14);
+  border: 1px solid rgba(103,232,249,.45);
+  font: 800 12px/1.2 ui-monospace, monospace;
+  letter-spacing: .08em;
 }
 #hud .roster .roster-bars { display: flex; gap: 3px; height: 3px; margin-top: 6px; }
 #hud .roster .roster-bars i { display: block; border-radius: 3px; background: var(--hud-cyan); }
@@ -945,9 +957,11 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
     max-height: none;
     padding: 10px;
   }
-  #hud .action-strip,
+  /* Keep items + backpack reachable on narrow viewports — consumables start
+     stowed, so hiding retrieve would soft-lock grenades/medkits. Compact only. */
+  #hud .action-strip { gap: 4px; }
   #hud .items-row,
-  #hud .backpack-row { display: none; }
+  #hud .backpack-row { margin-top: 4px; padding-top: 4px; }
   #hud .modes { margin-top: 7px; }
   #hud .modes button { min-height: 48px; }
   #hud .endturn { right: 20px; bottom: 36px; min-width: 124px; min-height: 46px; font-size: 12px; }
@@ -1884,15 +1898,20 @@ export class Hud {
 
     if (hover.kind === "move" && hover.moveCost !== undefined) {
       const after = hover.tuAfter ?? 0;
+      const kneeling = (selected.stance ?? "stand") === "kneel";
       hint.className = "move-hint move";
-      hint.replaceChildren(
+      const nodes: Array<Node> = [
         Object.assign(el("b"), { textContent: "Move" }),
         document.createTextNode(" — "),
         Object.assign(el("span", "cost"), { textContent: `${hover.moveCost} TU` }),
         document.createTextNode(
           hover.reachable === false ? ` · to limit, ${after} left` : ` · ${after} left`,
         ),
-      );
+      ];
+      if (kneeling) {
+        nodes.push(document.createTextNode(` · kneeling ×${STANCE.KNEEL_MOVE_MULT}`));
+      }
+      hint.replaceChildren(...nodes);
       hint.title = hover.label;
       return;
     }
@@ -2093,8 +2112,9 @@ export class Hud {
     }
     line.appendChild(main);
 
-    const retrieve = el("button", "prime");
-    retrieve.textContent = "R";
+    // Face "GET" (not "R") — R is the Reserve hotkey and would mislead players.
+    const retrieve = el("button", "prime retrieve");
+    retrieve.textContent = "GET";
     retrieve.setAttribute("aria-label", `Retrieve ${def.name}`);
     retrieve.disabled = !playerActing || outOfUses || cantAfford;
     retrieve.title = cantAfford
@@ -2205,6 +2225,12 @@ export class Hud {
         panic.textContent = "PANIC";
         panic.title = "Operative is panicking";
         top.appendChild(panic);
+      }
+      if (unit.alive && (unit.stance ?? "stand") === "kneel") {
+        const kneel = el("span", "kneel-tag");
+        kneel.textContent = "KNEEL";
+        kneel.title = "Operative is kneeling — moves cost more TU, accuracy up";
+        top.appendChild(kneel);
       }
 
       const bars = el("span", "roster-bars");
@@ -2738,10 +2764,10 @@ export class Hud {
 
     const grid = el("div", "briefing-grid");
     const steps: Array<[string, string, string]> = [
-      ["01", "Move", "Click a green path to advance. Every tile spends Time Units."],
+      ["01", "Move", "Click a green path to advance. Every tile spends Time Units. Kneel [K] for accuracy — kneeling moves cost more TU."],
       ["02", "Engage", "Hover a hostile for honest hit odds, then click to fire."],
       ["03", "Recover", "Click the power-source beacon to move adjacent or secure it."],
-      ["04", "Equip", "Throw frag grenades for blast damage, prime them to arm a fuse, use medkits on adjacent allies to heal, sweep with a motion scanner to reveal nearby enemies, and plant proximity mines to ambush movers."],
+      ["04", "Equip", "Grenades and medkits start in the backpack. Press GET (~15% TU) to retrieve into hand, then throw or use. Stow with S to free a hand."],
     ];
     for (const [number, heading, copy] of steps) {
       const step = el("div", "briefing-step");
@@ -2758,7 +2784,7 @@ export class Hud {
     const actions = el("div", "briefing-actions");
     const keys = el("span");
     keys.textContent =
-      "1/2/3 MODE · K KNEEL · R RESERVE · L RELOAD · ENTER END TURN · TAB CYCLE · WASD PAN · Q/E ROTATE · WHEEL ZOOM · H HELP · M MUTE";
+      "1/2/3 MODE · K KNEEL · R RESERVE · GET RETRIEVE · S STOW · L RELOAD · ENTER END TURN · TAB CYCLE · WASD PAN · Q/E ROTATE · WHEEL ZOOM · H HELP · M MUTE";
     const begin = el("button", "ui-cta");
     begin.textContent = "Deploy squad";
     begin.addEventListener("click", () => this.toggleBriefing(false));

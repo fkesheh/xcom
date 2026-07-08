@@ -4425,6 +4425,27 @@ export class GeoscapeView {
           ? "Regional confidence is unstable. Ignored UFOs will accelerate funding pressure."
           : "Council regions are containing panic. Successful recovery operations lower local pressure.";
     card.append(title, copy);
+
+    // Re-open the latest end-of-month debrief (promised by openCouncilModal docs).
+    const latest = campaign.councilReports?.[0];
+    if (latest) {
+      const review = el("div", "geo-council-summary");
+      const grade = el("span", "geo-council-grade");
+      grade.textContent = latest.grade;
+      const summaryText = el("span");
+      summaryText.textContent =
+        `Month ${latest.month} · rating ${latest.rating} · net ${formatSignedCredits(latest.net)}`;
+      review.append(grade, summaryText);
+      const open = el("button", "ui-btn");
+      open.type = "button";
+      open.textContent = "Open review";
+      open.title = "Re-open the latest council monthly debrief";
+      open.addEventListener("click", () => {
+        this.closeGeoModal();
+        this.openCouncilModal();
+      });
+      card.append(review, open);
+    }
     return card;
   }
 

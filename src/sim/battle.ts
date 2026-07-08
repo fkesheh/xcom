@@ -1572,7 +1572,8 @@ export function applyCommand(state: BattleState, cmd: Command): GameEvent[] {
  * BACKPACK.RETRIEVE_TU_PERCENT of the unit's max TU, floored. No state change
  * (and no TU spent) when the item can't be found or TU is insufficient. No
  * GameEvent shape fits a location swap without extending types.ts (frozen),
- * so this emits none — the HUD re-reads unit state after every command.
+ * so this emits none — the game layer (main.ts) confirms success via TU spend
+ * + location change and pushes a combat-log / toast itself.
  */
 function executeRetrieveItem(_state: BattleState, unit: Unit, itemId: string): GameEvent[] {
   const inst = unit.items?.find((it) => it.itemId === itemId && it.location === "backpack");
