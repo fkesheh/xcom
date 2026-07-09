@@ -507,12 +507,12 @@ describe("campaign state", () => {
       reportNumber: 1,
       completedAtHour: FUNDING_REPORT_INTERVAL_HOURS,
       income: 640,
-      upkeep: 387,
-      net: 253,
+      upkeep: 385,
+      net: 255,
       funding: 640,
       threat: 20,
     });
-    expect(firstReport.resources.credits).toBe(campaign.resources.credits + 253);
+    expect(firstReport.resources.credits).toBe(campaign.resources.credits + 255);
     expect(firstReport.strategic.score).toBe(campaign.strategic.score + 25);
 
     // Veteran fundingPressureMult (0.85) AND the arc-stretch CONTACT_PENALTY_SCALE
@@ -528,10 +528,10 @@ describe("campaign state", () => {
   });
 
   it.each<[string, number]>([
-    ["rookie", 310],
-    ["veteran", 387],
-    // commander upkeepMult retuned 1.2 -> 1.15 (round13 §3f rebalance): round(387*1.15)=445.
-    ["commander", 445],
+    ["rookie", 308],
+    ["veteran", 385],
+    // commander upkeepMult retuned 1.2 -> 1.15 (round13 §3f rebalance): round(385*1.15)=443.
+    ["commander", 443],
   ])("scales monthly upkeep by difficulty upkeepMult (%s)", (difficulty, expectedUpkeep) => {
     const campaign = createCampaign(
       { lat: 2, lon: 14.2, region: "Africa" },
@@ -950,6 +950,9 @@ describe("campaign state", () => {
 
     expect(constructedFacilities(campaign).map((facility) => facility.id)).toEqual([...STARTER_BASE_FACILITY_IDS]);
     expect(availableBaseFacilities(campaign).map((facility) => facility.id)).toEqual([
+      "hangar-4",
+      "command-1",
+      "power-1",
       "radar-2",
       "lab-2",
       MEDBAY_FACILITY_ID,
@@ -974,6 +977,9 @@ describe("campaign state", () => {
     expect(started.resources.alienData).toBe(recovered.resources.alienData - 2);
     expect(canBuildFacility(started, "lab-2")).toBe(false);
     expect(availableBaseFacilities(started).map((facility) => facility.id)).toEqual([
+      "hangar-4",
+      "command-1",
+      "power-1",
       "lab-2",
       MEDBAY_FACILITY_ID,
       "workshop-2",
@@ -1056,12 +1062,12 @@ describe("campaign state", () => {
   it("summarizes the starter base facilities for the base view", () => {
     const summary = summarizeBaseFacilities();
 
-    expect(STARTER_BASE_GRID).toEqual({ width: 8, height: 5 });
+    expect(STARTER_BASE_GRID).toEqual({ width: 6, height: 6 });
     expect(summary.facilities).toBe(STARTER_BASE_FACILITIES.length);
     expect(summary.powerUsed).toBe(32);
     expect(summary.powerCapacity).toBe(55);
-    expect(summary.staffAssigned).toBe(86);
-    expect(summary.hangarSlots).toBe(4);
+    expect(summary.staffAssigned).toBe(85);
+    expect(summary.hangarSlots).toBe(3);
   });
 
   it("spawns a base-defense contact at the base location and only under very high threat", () => {
@@ -1184,6 +1190,9 @@ describe("manufacturing catalog", () => {
     for (const id of RESEARCH_IDS) {
       ready = completeResearch(ready, id);
     }
+    // Classic starter has 3 hangars for 3 craft — free a berth before fabricating
+    // the Phantom interceptor (craft products need a free hangar slot).
+    ready = completeFacilityConstruction(ready, "hangar-4");
     for (const project of MANUFACTURING_PROJECTS) {
       expect(canStartManufacturing(ready, project.id), `${project.id} must be startable`).toBe(true);
       const completed = advanceGeoscape(

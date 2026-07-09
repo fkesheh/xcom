@@ -179,8 +179,10 @@ declare global {
 
 const STYLE_ID = "blacksite-base-style";
 const CELL = 1.32;
-const ROOM_GAP = 0.12;
-const BASE_VIEW_YAW = -0.56;
+/** Near-zero gap so orthogonally adjacent modules read as joined (classic
+ *  basescape), while still leaving a hairline so edges don't z-fight. */
+const ROOM_GAP = 0.04;
+const BASE_VIEW_YAW = -0.28;
 
 /** Consumable item ids rendered in the barracks backpack, in display order. */
 const ITEM_IDS: readonly string[] = Object.keys(ITEMS);
@@ -1727,9 +1729,8 @@ const ROOM_META: Record<RoomId, RoomDef> = {
 };
 
 /** Map a constructed facility's kind to the dedicated room that manages it.
- *  `command` never resolves here — it is intercepted by the click/hook path and
- *  opens the geoscape via {@link BaseViewOptions.onEnterCommandCenter}. `access`
- *  (the lift) has no room and falls back to the bare 3D overview. */
+ *  `access` / `command` never resolve here — they are intercepted by the click
+ *  path and open the geoscape via {@link BaseViewOptions.onEnterCommandCenter}. */
 function roomForFacilityKind(kind: FacilityKind): RoomId {
   switch (kind) {
     case "lab":
@@ -1752,9 +1753,9 @@ function roomForFacilityKind(kind: FacilityKind): RoomId {
     case "power":
       return "power";
     case "command":
-      // Command is the geoscape, not a DOM room; callers must intercept it.
-      throw new Error("command has no DOM room — enter via onEnterCommandCenter");
     case "access":
+      // Access lift / command center open the geoscape; callers must intercept.
+      throw new Error("access/command have no DOM room — enter via onEnterCommandCenter");
     default:
       return "overview";
   }
@@ -1766,11 +1767,12 @@ const ALERT_FACILITY: Record<BaseAlertKind, FacilityKind> = {
   ufoDetected: "radar",
   ufoShotDown: "hangar",
   interceptionReport: "hangar",
-  ufoLanded: "command",
-  fundingReport: "command",
-  missionReport: "command",
-  campaignWon: "command",
-  campaignLost: "command",
+  // Access lift is the classic geoscape / command entry point.
+  ufoLanded: "access",
+  fundingReport: "access",
+  missionReport: "access",
+  campaignWon: "access",
+  campaignLost: "access",
 };
 
 /** Resolve a constructed facility's art-directed role (silhouette + accent
@@ -1798,9 +1800,12 @@ function roleForFacilityKind(kind: FacilityKind): FacilityRole {
     case "containment":
       return "containment";
     case "access":
-    case "medbay":
-    case "stores":
+      // Access lift reads as the command hub (geoscape entry + power feed).
       return "command";
+    case "medbay":
+      return "barracks";
+    case "stores":
+      return "workshop";
     default:
       return "command";
   }
@@ -1865,8 +1870,9 @@ export class BaseView {
   /** One shared emissive strip-light material (palette floor-line teal) reused
    *  along every corridor edge + center travel line. */
   private corridorStripMat: MeshBasicMaterial | null = null;
-  /** Resting camera position; the frame loop adds a subtle idle drift on top. */
-  private readonly camHome = new Vector3(-0.3, 6.4, 7.5);
+  /** Resting camera — elevated 3/4 so the classic 6×6 footprint reads like the
+   *  original basescape (modules as a grid, not a neon pile). */
+  private readonly camHome = new Vector3(0.15, 9.2, 8.4);
   /** Dedicated interior mount at the scene root (no hub yaw/scale) so the dive-in
    *  diorama frames cleanly. Empty in hub mode; holds one {@link interiorRoot}. */
   private readonly interiorGroup = new Group();
@@ -2130,7 +2136,7 @@ export class BaseView {
    *  first constructed facility of that kind. Unbuilt kinds are a no-op. */
   private enterRoomForKind(kind: FacilityKind): void {
     if (this.disposed) return;
-    if (kind === "command") {
+    if (kind === "command" || kind === "access") {
       this.alertBeaconFacilityId = null;
       this.opts.onEnterCommandCenter();
       return;
@@ -2337,14 +2343,49 @@ export class BaseView {
       buildingId !== undefined && !padFacilities.some((f) => f.id === buildingId)
         ? findBaseFacility(buildingId)
         : undefined;
+    // Unexcavated dirt cells (no facility + no expansion pad) get rock plugs so
+    // the 6×6 grid reads as classic empty earth, not a floating concrete slab.
+    this.buildDirtCells(padFacilities, buildingFacility);
     for (const facility of padFacilities) this.buildExpansionPad(facility);
     if (buildingFacility) this.buildExpansionPad(buildingFacility);
     for (const facility of constructedFacilities(this.opts.campaign)) this.buildFacility(facility);
     // One-shot de-overlap of the facility name chips once every bay is placed.
     this.layoutFacilityLabels();
-    this.addOverheadSystems();
     this.addCrew();
     this.addPerimeterShafts();
+  }
+
+  /** Rock plugs for every grid cell that is neither a constructed facility nor
+   *  a buildable expansion pad — the classic "dirt" tiles of the basescape. */
+  private buildDirtCells(
+    pads: readonly BaseFacility[],
+    building: BaseFacility | undefined,
+  ): void {
+    const W = STARTER_BASE_GRID.width;
+    const H = STARTER_BASE_GRID.height;
+    const claimed = new Set<number>();
+    const claim = (f: BaseFacility): void => {
+      for (let dx = 0; dx < f.w; dx++)
+        for (let dy = 0; dy < f.h; dy++) claimed.add((f.y + dy) * W + (f.x + dx));
+    };
+    for (const f of constructedFacilities(this.opts.campaign)) claim(f);
+    for (const f of pads) claim(f);
+    if (building) claim(building);
+
+    const rock = this.sharedRock!;
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++) {
+        if (claimed.has(y * W + x)) continue;
+        const plug = new Mesh(
+          new BoxGeometry(CELL - 0.06, 0.22, CELL - 0.06),
+          rock,
+        );
+        const p = this.cellCenter(x, y, 1, 1);
+        plug.position.set(p.x, -0.02, p.z);
+        plug.receiveShadow = true;
+        plug.castShadow = true;
+        this.baseGroup.add(plug);
+      }
   }
 
   private buildTerrainSlab(): void {
@@ -2513,214 +2554,180 @@ export class BaseView {
     this.rotators.push({ object, axis, speed, baseRotation });
   }
 
-  /** Route the corridor network from the CURRENT facility layout (data-driven,
-   *  never hardcoded): pave the free grid cells that form hallways between bays,
-   *  give each constructed facility exactly one doorway onto the hall, and emit
-   *  per-component patrol loops for the crew. Corridors are strictly orthogonal
-   *  and only ever occupy FREE cells, so a hall can never cross a facility or
-   *  expansion footprint. */
+  /**
+   * Classic UFO basescape connectivity: facilities join when their footprints
+   * share an orthogonal edge. Empty dirt is NEVER paved (it stays rock /
+   * expansion pads). Doorway thresholds sit on the shared edges between
+   * adjacent constructed modules; crew patrol along those door midpoints so
+   * personnel walk the real module graph instead of floating hallway planks.
+   */
   private computeCorridorGraph(): CorridorGraph {
     const W = STARTER_BASE_GRID.width;
     const H = STARTER_BASE_GRID.height;
     const inBounds = (x: number, y: number): boolean => x >= 0 && x < W && y >= 0 && y < H;
     const key = (x: number, y: number): number => y * W + x;
 
-    // Occupancy: constructed facilities AND expansion pads both block corridors
-    // (pads render as solid rock niches). Only cells free of both get paved.
+    const constructed = constructedFacilities(this.opts.campaign);
     const facilityAt: (string | null)[] = new Array<string | null>(W * H).fill(null);
-    const blocked: boolean[] = new Array<boolean>(W * H).fill(false);
-    const accessKeys = new Set<number>();
-    for (const f of constructedFacilities(this.opts.campaign)) {
+    const byId = new Map<string, BaseFacility>();
+    for (const f of constructed) {
+      byId.set(f.id, f);
       for (let dx = 0; dx < f.w; dx++)
         for (let dy = 0; dy < f.h; dy++) {
-          const k = key(f.x + dx, f.y + dy);
-          blocked[k] = true;
-          facilityAt[k] = f.id;
-          if (f.kind === "access") accessKeys.add(k);
+          facilityAt[key(f.x + dx, f.y + dy)] = f.id;
         }
     }
-    for (const f of availableBaseFacilities(this.opts.campaign)) {
+    const fidAt = (x: number, y: number): string | null =>
+      inBounds(x, y) ? (facilityAt[key(x, y)] ?? null) : null;
+
+    // Shared edges between distinct constructed facilities → doorway sites.
+    // Each unordered pair contributes one door at the midpoint of the shared
+    // edge (grid coords may be half-integers for hangar-to-module joins).
+    type DoorSite = { cx: number; cy: number; a: string; b: string; axis: "x" | "z" };
+    const doorSites: DoorSite[] = [];
+    const pairSeen = new Set<string>();
+    for (const f of constructed) {
       for (let dx = 0; dx < f.w; dx++)
-        for (let dy = 0; dy < f.h; dy++) blocked[key(f.x + dx, f.y + dy)] = true;
+        for (let dy = 0; dy < f.h; dy++) {
+          const x = f.x + dx;
+          const y = f.y + dy;
+          for (const [dir, ox, oy] of CORRIDOR_DIRS) {
+            const nx = x + ox;
+            const ny = y + oy;
+            const other = fidAt(nx, ny);
+            if (!other || other === f.id) continue;
+            const pair = f.id < other ? `${f.id}|${other}` : `${other}|${f.id}`;
+            if (pairSeen.has(pair)) continue;
+            pairSeen.add(pair);
+            const axis: "x" | "z" = dir === "east" || dir === "west" ? "x" : "z";
+            doorSites.push({
+              cx: (x + nx) / 2,
+              cy: (y + ny) / 2,
+              a: f.id,
+              b: other,
+              axis,
+            });
+          }
+        }
     }
-    const fidAt = (k: number): string | null => facilityAt[k] ?? null;
-    const isFree = (x: number, y: number): boolean => inBounds(x, y) && !blocked[key(x, y)];
 
-    // Free cells scanned row-major → deterministic component + doorway ordering.
-    const free: Array<[number, number]> = [];
-    for (let y = 0; y < H; y++)
-      for (let x = 0; x < W; x++) if (isFree(x, y)) free.push([x, y]);
+    // Doorway tiles (one per shared edge) — open toward both facilities, no
+    // free-cell paving. Coordinates may be half-integers; buildCorridorTile
+    // still centers via cellCenter with w=h=1 on the fractional cell.
+    const tiles: CorridorTile[] = doorSites.map((d) => {
+      const open: CorridorDir[] = [];
+      const doors: CorridorDir[] =
+        d.axis === "x" ? ["east", "west"] : ["north", "south"];
+      return { cx: d.cx, cy: d.cy, open, doors };
+    });
 
-    // 4-connected components of free cells (flood fill).
-    const comp: number[] = new Array<number>(W * H).fill(-1);
-    const components: Array<Array<[number, number]>> = [];
-    for (const [sx, sy] of free) {
-      if (comp[key(sx, sy)] !== -1) continue;
-      const id = components.length;
-      const cells: Array<[number, number]> = [];
-      const stack: Array<[number, number]> = [[sx, sy]];
-      comp[key(sx, sy)] = id;
+    // Segments link door midpoints that share a facility (crew hops bay→bay).
+    const segments: CorridorSegment[] = [];
+    for (let i = 0; i < doorSites.length; i++) {
+      for (let j = i + 1; j < doorSites.length; j++) {
+        const a = doorSites[i]!;
+        const b = doorSites[j]!;
+        const share =
+          a.a === b.a || a.a === b.b || a.b === b.a || a.b === b.b;
+        if (!share) continue;
+        const dx = Math.abs(a.cx - b.cx);
+        const dy = Math.abs(a.cy - b.cy);
+        // Only connect doors that are roughly aligned (same row or column of
+        // the shared facility) so strips stay orthogonal.
+        if (dx > 0.01 && dy > 0.01) continue;
+        segments.push({
+          ax: a.cx,
+          ay: a.cy,
+          bx: b.cx,
+          by: b.cy,
+          axis: dx >= dy ? "x" : "z",
+        });
+      }
+    }
+
+    // Facility-adjacency graph → connected components → Euler patrols on door
+    // midpoints (fallback: facility centers when a component has <2 doors).
+    const adj = new Map<string, Set<string>>();
+    for (const f of constructed) adj.set(f.id, new Set());
+    for (const d of doorSites) {
+      adj.get(d.a)!.add(d.b);
+      adj.get(d.b)!.add(d.a);
+    }
+    const visited = new Set<string>();
+    const components: string[][] = [];
+    for (const f of constructed) {
+      if (visited.has(f.id)) continue;
+      const stack = [f.id];
+      const cells: string[] = [];
+      visited.add(f.id);
       while (stack.length > 0) {
-        const [x, y] = stack.pop()!;
-        cells.push([x, y]);
-        for (const [, dx, dy] of CORRIDOR_DIRS) {
-          const nx = x + dx;
-          const ny = y + dy;
-          if (!isFree(nx, ny) || comp[key(nx, ny)] !== -1) continue;
-          comp[key(nx, ny)] = id;
-          stack.push([nx, ny]);
+        const id = stack.pop()!;
+        cells.push(id);
+        for (const n of adj.get(id) ?? []) {
+          if (visited.has(n)) continue;
+          visited.add(n);
+          stack.push(n);
         }
       }
       components.push(cells);
     }
 
-    // A component is a real hallway only if a bay opens onto it. Keep those with
-    // >=2 cells; a lone free cell reads as a floating plank, so drop singletons
-    // UNLESS dropping one would orphan a facility from every corridor.
-    const bordersFacility = (cells: Array<[number, number]>): boolean =>
-      cells.some(([x, y]) =>
-        CORRIDOR_DIRS.some(([, dx, dy]) => {
-          const nx = x + dx;
-          const ny = y + dy;
-          return inBounds(nx, ny) && fidAt(key(nx, ny)) !== null;
-        }),
-      );
-    const servedFacilities = (cells: Array<[number, number]>): Set<string> => {
-      const set = new Set<string>();
-      for (const [x, y] of cells)
-        for (const [, dx, dy] of CORRIDOR_DIRS) {
-          const nx = x + dx;
-          const ny = y + dy;
-          const fid = inBounds(nx, ny) ? fidAt(key(nx, ny)) : null;
-          if (fid) set.add(fid);
-        }
-      return set;
-    };
-
-    const kept = new Set<number>();
-    const reachable = new Set<string>();
-    for (let i = 0; i < components.length; i++) {
-      const cells = components[i]!;
-      if (cells.length >= 2 && bordersFacility(cells)) {
-        kept.add(i);
-        for (const fid of servedFacilities(cells)) reachable.add(fid);
-      }
-    }
-    // Orphan guard: re-admit any singleton that is the ONLY corridor a facility
-    // can reach, so no bay is left doorless.
-    for (let i = 0; i < components.length; i++) {
-      if (kept.has(i)) continue;
-      const cells = components[i]!;
-      const serves = servedFacilities(cells);
-      if (serves.size === 0) continue;
-      if ([...serves].some((fid) => !reachable.has(fid))) {
-        kept.add(i);
-        for (const fid of serves) reachable.add(fid);
-      }
-    }
-
-    const paved = new Set<number>();
-    for (const i of kept) for (const [x, y] of components[i]!) paved.add(key(x, y));
-
-    // Row-major paved order so tiles/segments/doorways are emitted deterministically.
-    const orderedPaved: Array<[number, number]> = [];
-    for (let y = 0; y < H; y++)
-      for (let x = 0; x < W; x++) if (paved.has(key(x, y))) orderedPaved.push([x, y]);
-
-    // Tiles: classify each side. Each constructed facility gets exactly ONE
-    // doorway (the first paved edge, in row-major N/E/S/W order, that borders it)
-    // so every bay reads with a single clear entrance onto the hall.
-    const tiles: CorridorTile[] = [];
-    const doorAssigned = new Set<string>();
-    for (const [x, y] of orderedPaved) {
-      const open: CorridorDir[] = [];
-      const doors: CorridorDir[] = [];
-      for (const [dir, dx, dy] of CORRIDOR_DIRS) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (!inBounds(nx, ny)) continue;
-        const nk = key(nx, ny);
-        if (paved.has(nk)) {
-          open.push(dir);
-          continue;
-        }
-        const fid = fidAt(nk);
-        if (fid !== null && !doorAssigned.has(fid)) {
-          doors.push(dir);
-          doorAssigned.add(fid);
-        }
-      }
-      tiles.push({ cx: x, cy: y, open, doors });
-    }
-
-    // Segments: one per adjacent paved pair (scan east + south only to dedup).
-    const segments: CorridorSegment[] = [];
-    for (const [x, y] of orderedPaved) {
-      if (x + 1 < W && paved.has(key(x + 1, y)))
-        segments.push({ ax: x, ay: y, bx: x + 1, by: y, axis: "x" });
-      if (y + 1 < H && paved.has(key(x, y + 1)))
-        segments.push({ ax: x, ay: y, bx: x, by: y + 1, axis: "z" });
-    }
-
-    // Patrol loops (largest component first, so the biggest gets the most crew).
     const patrols: Array<Array<readonly [number, number]>> = [];
     let spine = -1;
-    const keptSorted = [...kept].sort((a, b) => components[b]!.length - components[a]!.length);
-    for (const i of keptSorted) {
-      const loop = this.eulerTour(components[i]!, paved);
+    const sorted = [...components].sort((a, b) => b.length - a.length);
+    for (const comp of sorted) {
+      const compSet = new Set(comp);
+      const doors = doorSites.filter((d) => compSet.has(d.a) && compSet.has(d.b));
+      let loop: Array<readonly [number, number]>;
+      if (doors.length >= 2) {
+        // Walk door midpoints in a stable order around the component.
+        const pts = doors.map((d) => [d.cx, d.cy] as const);
+        // Nearest-neighbour tour from the lowest row-major door, then reverse
+        // back so the closing wrap is adjacent.
+        const used = new Array(pts.length).fill(false);
+        let cur = 0;
+        for (let i = 1; i < pts.length; i++) {
+          const a = pts[i]!;
+          const b = pts[cur]!;
+          if (a[1] < b[1] || (a[1] === b[1] && a[0] < b[0])) cur = i;
+        }
+        const order: Array<readonly [number, number]> = [];
+        for (let n = 0; n < pts.length; n++) {
+          used[cur] = true;
+          order.push(pts[cur]!);
+          let best = -1;
+          let bestD = Infinity;
+          for (let i = 0; i < pts.length; i++) {
+            if (used[i]) continue;
+            const dx = pts[i]![0] - pts[cur]![0];
+            const dy = pts[i]![1] - pts[cur]![1];
+            const dist = dx * dx + dy * dy;
+            if (dist < bestD) {
+              bestD = dist;
+              best = i;
+            }
+          }
+          if (best < 0) break;
+          cur = best;
+        }
+        // Out-and-back keeps consecutive steps short for crew lerping.
+        loop = order.length >= 2 ? [...order, ...order.slice(1, -1).reverse()] : order;
+      } else {
+        // Isolated / single-door component: patrol facility centers.
+        loop = comp.map((id) => {
+          const f = byId.get(id)!;
+          return [f.x + f.w / 2 - 0.5, f.y + f.h / 2 - 0.5] as const;
+        });
+      }
       if (loop.length < 2) continue;
       const idx = patrols.length;
       patrols.push(loop);
-      if (
-        spine === -1 &&
-        components[i]!.some(([x, y]) =>
-          CORRIDOR_DIRS.some(([, dx, dy]) => {
-            const nx = x + dx;
-            const ny = y + dy;
-            return inBounds(nx, ny) && accessKeys.has(key(nx, ny));
-          }),
-        )
-      ) {
+      if (spine === -1 && comp.some((id) => byId.get(id)?.kind === "access")) {
         spine = idx;
       }
     }
 
     return { tiles, segments, patrols, spine };
-  }
-
-  /** Euler tour of a free-cell component's spanning tree: visit every cell and
-   *  return toward the start so every consecutive pair — AND the closing wrap
-   *  from the last cell back to the first — is orthogonally adjacent. That yields
-   *  a clean crew loop that never cuts across a bay. Deterministic: the start is
-   *  the lowest row-major cell and neighbours are walked in fixed N/E/S/W order. */
-  private eulerTour(
-    cells: Array<[number, number]>,
-    paved: Set<number>,
-  ): Array<readonly [number, number]> {
-    const W = STARTER_BASE_GRID.width;
-    const H = STARTER_BASE_GRID.height;
-    const key = (x: number, y: number): number => y * W + x;
-    const visited = new Set<number>();
-    const order: Array<readonly [number, number]> = [];
-    const start = cells.reduce((a, b) => (key(a[0], a[1]) <= key(b[0], b[1]) ? a : b));
-    const walk = (x: number, y: number): void => {
-      visited.add(key(x, y));
-      order.push([x, y]);
-      for (const [, dx, dy] of CORRIDOR_DIRS) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
-        const nk = key(nx, ny);
-        if (!paved.has(nk) || visited.has(nk)) continue;
-        walk(nx, ny);
-        order.push([x, y]); // backtrack edge keeps every step adjacent
-      }
-    };
-    walk(start[0], start[1]);
-    // The tour ends back at `start`; drop that trailing duplicate so the closing
-    // wrap (last -> first) is a genuine single-cell hop, not a zero-length hold.
-    if (order.length > 1) order.pop();
-    return order;
   }
 
   /** The routed corridor network derived from the current facility layout.
@@ -2745,70 +2752,29 @@ export class BaseView {
     );
   }
 
-  /** Lay the corridor geometry from the routed graph: a paved floor tile per
-   *  cell, lit rails along every travel segment, and per-tile walls/doorways.
-   *  Shared floor/strip/steel materials are created once in buildScene. */
+  /** Lay doorway markers from the routed graph. Classic basescape has no free
+   *  hallway tiles — only thin thresholds on shared module edges — so we skip
+   *  paving and only mark the joins the crew walks through. */
   private buildCorridorGrid(): void {
-    for (const tile of this.corridorGraph.tiles) this.buildCorridorTile(tile);
+    for (const tile of this.corridorGraph.tiles) this.buildDoorMarker(tile);
     for (const segment of this.corridorGraph.segments) this.buildCorridorStrip(segment);
   }
 
-  /** One paved hallway cell: recessed-flush concrete floor, steel curbs + dim
-   *  strip-lights on WALL sides (rock/pad), an open gap + bright threshold on
-   *  DOORWAY sides (a bay entrance), and a seamless join on OPEN sides (another
-   *  corridor tile). Strictly orthogonal — no diagonal or floating segments. */
-  private buildCorridorTile(tile: CorridorTile): void {
-    const steel = this.sharedSteel!;
+  /** Thin lit threshold on a shared module edge (no paved hallway cell). */
+  private buildDoorMarker(tile: CorridorTile): void {
     const group = new Group();
     group.position.copy(this.cellCenter(tile.cx, tile.cy, 1, 1));
     this.baseGroup.add(group);
-
-    const floor = new Mesh(CORRIDOR_GEO.floor, this.corridorFloor!);
-    floor.position.y = 0.035;
-    floor.receiveShadow = true;
-    group.add(floor);
-
-    const half = CELL / 2;
-    const edge = half - CURB_T / 2 - 0.03;
-    const openSet = new Set(tile.open);
-    const doorSet = new Set(tile.doors);
-    // north=-z, south=+z, east=+x, west=-x; `alongX` = the wall runs on the x axis.
-    const sides: ReadonlyArray<{ dir: CorridorDir; x: number; z: number; alongX: boolean }> = [
-      { dir: "north", x: 0, z: -edge, alongX: true },
-      { dir: "south", x: 0, z: edge, alongX: true },
-      { dir: "east", x: edge, z: 0, alongX: false },
-      { dir: "west", x: -edge, z: 0, alongX: false },
-    ];
-    for (const s of sides) {
-      if (openSet.has(s.dir)) continue; // seamless join — no wall between tiles
-      if (doorSet.has(s.dir)) {
-        // Doorway: leave the gap open, mark it with a bright threshold strip.
-        const threshold = new Mesh(
-          s.alongX ? CORRIDOR_GEO.thresholdX : CORRIDOR_GEO.thresholdZ,
-          this.corridorStripMat!,
-        );
-        threshold.position.set(s.x, 0.085, s.z);
-        group.add(threshold);
-        continue;
-      }
-      // WALL: steel curb hugging the edge + a dim edge strip-light on top.
-      const curb = new Mesh(s.alongX ? CORRIDOR_GEO.curbX : CORRIDOR_GEO.curbZ, steel);
-      curb.position.set(s.x, CURB_H / 2 + 0.03, s.z);
-      curb.castShadow = true;
-      curb.receiveShadow = true;
-      group.add(curb);
-      const strip = new Mesh(
-        s.alongX ? CORRIDOR_GEO.stripX : CORRIDOR_GEO.stripZ,
-        this.corridorStripMat!,
-      );
-      strip.position.set(s.x, 0.12, s.z);
-      group.add(strip);
-    }
-
-    // Faint center travel dot so a through-tile still reads as lit hallway.
-    const center = new Mesh(CORRIDOR_GEO.center, this.corridorStripMat!);
-    center.position.y = 0.078;
-    group.add(center);
+    const alongX = tile.doors.includes("north") || tile.doors.includes("south");
+    const marker = new Mesh(
+      alongX ? CORRIDOR_GEO.thresholdX : CORRIDOR_GEO.thresholdZ,
+      this.corridorStripMat!,
+    );
+    // Stretch the threshold to read as a doorway across the shared edge.
+    if (alongX) marker.scale.set(1.6, 1, 1);
+    else marker.scale.set(1, 1, 1.6);
+    marker.position.y = 0.09;
+    group.add(marker);
   }
 
   /** Twin lit rails spanning a travel segment (the gap between two adjacent tile
@@ -2846,7 +2812,9 @@ export class BaseView {
     const recess = 0.2;
     const floorY = 0.02 - recess;
 
-    // Recessed concrete niche floor — the bay is carved into the level slab.
+    // Classic module shell: a raised concrete box with steel walls — reads as a
+    // basescape tile, not a neon pile on a flat slab.
+    const shellH = 0.72;
     const floor = new Mesh(new BoxGeometry(width, 0.14, depth), this.sharedConcrete!);
     floor.position.y = floorY - 0.07;
     floor.receiveShadow = true;
@@ -2856,8 +2824,8 @@ export class BaseView {
     // Accent-glow hit pad: carries userData.facilityId so the existing hover
     // tooltip + emissive highlight + click→open-room raycasting still works.
     // Its OWN accentMaterial instance so applyFacilityHighlight can boost it.
-    const padMat = accentMaterial(role, 0.32);
-    const pad = new Mesh(new BoxGeometry(width - 0.18, 0.04, depth - 0.18), padMat);
+    const padMat = accentMaterial(role, 0.22);
+    const pad = new Mesh(new BoxGeometry(width - 0.14, 0.04, depth - 0.14), padMat);
     pad.position.y = floorY + 0.03;
     pad.receiveShadow = true;
     pad.userData.facilityId = facility.id;
@@ -2865,26 +2833,25 @@ export class BaseView {
     group.add(pad);
 
     const trim = new LineSegments(
-      new EdgesGeometry(pad.geometry),
+      new EdgesGeometry(new BoxGeometry(width, shellH, depth)),
       new MeshBasicMaterial({
         color: accent,
         transparent: true,
-        opacity: 0.7,
+        opacity: 0.55,
         blending: AdditiveBlending,
         depthWrite: false,
       }),
     );
-    trim.position.copy(pad.position);
+    trim.position.y = floorY + shellH / 2;
     group.add(trim);
 
-    // Raised steel partition walls frame the sunken niche as a room (door gaps
-    // connect neighbouring bays).
-    this.addPartitionCurbs(group, width, depth, floorY);
+    // Raised steel partition walls frame the module. Door gaps open ONLY onto
+    // orthogonally adjacent constructed facilities — dirt-facing sides stay solid.
+    const neighbors = this.adjacentFacilityDirs(facility);
+    this.addPartitionCurbs(group, width, depth, floorY, neighbors, shellH);
 
-    // The detailed facility diorama — distinct silhouette per role, built from
-    // the shared palette materials + its signature accent glow. Scaled up to
-    // fill the bay and dropped onto the recessed niche floor. Reactor cores
-    // tag themselves (userData.reactorPulse) so the frame loop can pulse them.
+    // Facility diorama — kept SMALLER than the shell so silhouettes don't spill
+    // into neighbouring modules (the classic "lab on top of workshop" look).
     const model = buildFacilityModel(role);
     model.traverse((child) => {
       if (child instanceof Mesh) {
@@ -2896,25 +2863,21 @@ export class BaseView {
       }
     });
     model.position.y = floorY;
-    // Scale the (≈1-unit) diorama to fill its bay on the SHORT axis with a
-    // margin, clamped so bigger modules read at gameplay distance (~1.5x in the
-    // roomy 2x2 bays) while narrow 1x1 bays never let equipment collide with
-    // the partition walls. Bay-adaptive => robust to the facility geometry.
     const baySpan = Math.min(width, depth);
-    const modelScale = Math.min(1.5, Math.max(1.0, (baySpan - 0.16) * 0.92));
+    const modelScale = Math.min(0.95, Math.max(0.55, (baySpan - 0.28) * 0.72));
     model.scale.setScalar(modelScale);
     group.add(model);
 
-    // Per-bay accent point light — rooms glow from within (the hero detail).
-    const baseIntensity = 5.0;
-    const bayLight = new PointLight(accent, baseIntensity, 6.5, 2);
-    bayLight.position.set(0, floorY + 0.9, 0);
+    // Soft per-bay fill — enough to tint the shell, not enough to bleach labels.
+    const baseIntensity = facility.kind === "hangar" ? 2.4 : 1.8;
+    const bayLight = new PointLight(accent, baseIntensity, 4.2, 2);
+    bayLight.position.set(0, floorY + 0.55, 0);
     group.add(bayLight);
     this.bayLights.push({ light: bayLight, facilityId: facility.id, base: baseIntensity });
 
     const label = makeLabel(facility.label, accent);
-    const labelBaseY = floorY + 0.92;
-    label.position.set(0, labelBaseY, -depth * 0.32);
+    const labelBaseY = floorY + shellH + 0.28;
+    label.position.set(0, labelBaseY, 0);
     group.add(label);
     // Register for the one-shot de-overlap pass (layoutFacilityLabels). The bay
     // group sits at y=0, so the label's LOCAL y equals its world y — safe to
@@ -2953,19 +2916,50 @@ export class BaseView {
     }
   }
 
-  /** Low steel partition curbs around a bay — frames it as a room while leaving
-   *  a central door gap in each side so bays read as connected niches. */
-  private addPartitionCurbs(group: Group, width: number, depth: number, baseY: number): void {
+  /** Cardinal directions on which `facility` shares an edge with another
+   *  constructed module — those sides get a doorway gap in the partition curb. */
+  private adjacentFacilityDirs(facility: BaseFacility): Set<CorridorDir> {
+    const constructed = constructedFacilities(this.opts.campaign);
+    const dirs = new Set<CorridorDir>();
+    const touches = (ox: number, oy: number, ow: number, oh: number): boolean => {
+      // Orthogonally adjacent rectangles (share an edge, not just a corner).
+      const xOverlap = facility.x < ox + ow && facility.x + facility.w > ox;
+      const yOverlap = facility.y < oy + oh && facility.y + facility.h > oy;
+      const xTouch =
+        facility.x + facility.w === ox || ox + ow === facility.x;
+      const yTouch =
+        facility.y + facility.h === oy || oy + oh === facility.y;
+      return (xOverlap && yTouch) || (yOverlap && xTouch);
+    };
+    for (const other of constructed) {
+      if (other.id === facility.id) continue;
+      if (!touches(other.x, other.y, other.w, other.h)) continue;
+      // Classify which side of `facility` the neighbor sits on.
+      if (other.y + other.h === facility.y) dirs.add("north");
+      if (other.y === facility.y + facility.h) dirs.add("south");
+      if (other.x + other.w === facility.x) dirs.add("west");
+      if (other.x === facility.x + facility.w) dirs.add("east");
+    }
+    return dirs;
+  }
+
+  /** Low steel partition curbs around a bay. Sides listed in `doors` leave a
+   *  central gap (module-to-module join); every other side is a solid wall so
+   *  dirt-facing edges read as sealed rock niches. */
+  private addPartitionCurbs(
+    group: Group,
+    width: number,
+    depth: number,
+    baseY: number,
+    doors: Set<CorridorDir> = new Set(),
+    wallH = 0.55,
+  ): void {
     const steel = this.sharedSteel!;
-    const h = 0.55;
-    const t = 0.07;
-    const gap = Math.min(0.52, Math.min(width, depth) * 0.3);
+    const h = wallH;
+    const t = 0.08;
+    const gap = Math.min(0.48, Math.min(width, depth) * 0.28);
     const halfW = width / 2;
     const halfD = depth / 2;
-    const segX = (width - gap) / 2;
-    const segZ = (depth - gap) / 2;
-    const gx = gap / 2 + segX / 2;
-    const gz = gap / 2 + segZ / 2;
     const y = h / 2 + baseY;
     const make = (geoX: number, geoZ: number, x: number, z: number): void => {
       const curb = new Mesh(new BoxGeometry(geoX, h, geoZ), steel);
@@ -2974,14 +2968,29 @@ export class BaseView {
       curb.receiveShadow = true;
       group.add(curb);
     };
-    make(segX, t, -gx, halfD - t / 2);
-    make(segX, t, gx, halfD - t / 2);
-    make(segX, t, -gx, -halfD + t / 2);
-    make(segX, t, gx, -halfD + t / 2);
-    make(t, segZ, -halfW + t / 2, -gz);
-    make(t, segZ, -halfW + t / 2, gz);
-    make(t, segZ, halfW - t / 2, -gz);
-    make(t, segZ, halfW - t / 2, gz);
+    const side = (dir: CorridorDir, alongX: boolean, edge: number): void => {
+      if (doors.has(dir)) {
+        // Doorway: two curb segments flanking a central gap.
+        const span = alongX ? width : depth;
+        const seg = (span - gap) / 2;
+        const off = gap / 2 + seg / 2;
+        if (alongX) {
+          make(seg, t, -off, edge);
+          make(seg, t, off, edge);
+        } else {
+          make(t, seg, edge, -off);
+          make(t, seg, edge, off);
+        }
+      } else {
+        // Solid wall — no gap onto dirt / rock.
+        if (alongX) make(width, t, 0, edge);
+        else make(t, depth, edge, 0);
+      }
+    };
+    side("south", true, halfD - t / 2);
+    side("north", true, -halfD + t / 2);
+    side("west", false, -halfW + t / 2);
+    side("east", false, halfW - t / 2);
   }
 
   private buildExpansionPad(facility: BaseFacility): void {
@@ -3193,7 +3202,7 @@ export class BaseView {
       ["Armory / Market", "buy weapons and gear from Council suppliers."],
       ["Barracks", "assign weapons & items, then deploy soldiers to the squad."],
       ["Lab / Workshop", "research alien tech and manufacture captured equipment."],
-      ["Command Center", "click it to open the geoscape — scan, intercept, and launch assaults."],
+      ["Access Lift", "click it to open the geoscape — scan, intercept, and launch assaults."],
       ["Resources", "$ buys gear & recruits; alloys, elerium, and alien data fuel research and manufacturing."],
     ];
     for (const [head, copy] of tips) {
@@ -3419,24 +3428,24 @@ export class BaseView {
     if (!contact) {
       title.textContent = "No contact";
       copy.textContent =
-        "Radar array online and sweeping. Advance time in the Command Center to pick up a UFO track.";
+        "Radar array online and sweeping. Advance time from the Access Lift (geoscape) to pick up a UFO track.";
     } else if (contact.status === "engaging") {
       title.textContent = `Tracking ${contact.id} — engaging`;
-      copy.textContent = `Interceptor engaging ${contact.id} over ${contact.region}. Direct the dogfight from the Command Center.`;
+      copy.textContent = `Interceptor engaging ${contact.id} over ${contact.region}. Direct the dogfight from the Access Lift.`;
     } else if (contact.status === "escaped") {
       title.textContent = `${contact.id} — lost`;
-      copy.textContent = `${contact.id} slipped the intercept over ${contact.region}. Resume the sweep from the Command Center.`;
+      copy.textContent = `${contact.id} slipped the intercept over ${contact.region}. Resume the sweep from the Access Lift.`;
     } else if (contact.status === "crashed" || contact.status === "landed") {
       title.textContent = `${contact.id} — grounded`;
-      copy.textContent = `${contact.id} is down over ${contact.region}. Open the Command Center to launch the recovery operation.`;
+      copy.textContent = `${contact.id} is down over ${contact.region}. Open the Access Lift to launch the recovery operation.`;
     } else {
       title.textContent = `Tracking ${contact.id}`;
-      copy.textContent = `${contact.id} is airborne over ${contact.region}. Open the Command Center to intercept.`;
+      copy.textContent = `${contact.id} is airborne over ${contact.region}. Open the Access Lift to intercept.`;
     }
     head.append(title);
     card.append(head, copy);
     const pointer = el("p", "card-copy");
-    pointer.textContent = "Intercepts and launches are run from the Command Center (Earth view).";
+    pointer.textContent = "Intercepts and launches are run from the Access Lift (Earth view).";
     wrap.append(card, pointer);
     return wrap;
   }
@@ -4500,11 +4509,11 @@ export class BaseView {
     return typeof id === "string" ? id : null;
   }
 
-  /** Click a facility floor in the 3D base. The Command Center opens the geoscape
-   *  (it IS the command room); every other buildable facility opens its dedicated
-   *  room and dives the camera INTO its 3D interior. `access` (the lift) has no
-   *  room and returns to the bare overview. Any canvas click also clears a pending
-   *  alert beacon and fades the first-time hint. Ignored while an interior is open. */
+  /** Click a facility floor in the 3D base. The Access Lift (classic command /
+   *  geoscape entry) opens the world map; every other buildable facility opens
+   *  its dedicated room and dives the camera INTO its 3D interior. Any canvas
+   *  click also clears a pending alert beacon and fades the first-time hint.
+   *  Ignored while an interior is open. */
   private onCanvasClick = (event: MouseEvent): void => {
     if (this.disposed || this.facilityMeshes.length === 0 || this.interiorRoot) return;
     if (this.alertBeaconFacilityId) {
@@ -4536,14 +4545,12 @@ export class BaseView {
    *  keyboard activation path so both routes into a room behave identically. */
   private activateFacility(facilityId: string): void {
     const facility = findBaseFacility(facilityId);
-    if (facility?.kind === "command") {
-      // The command room is the geoscape — NAV mounts it; BASE never renders a
-      // DOM room for it.
+    if (facility?.kind === "command" || facility?.kind === "access") {
+      // Access lift / command center open the geoscape — NAV mounts it.
       this.opts.onEnterCommandCenter();
       return;
     }
-    if (!facility || facility.kind === "access") {
-      // No dedicated room (the lift) — stay on the bare overview.
+    if (!facility) {
       this.selectedFacilityId = null;
       this.activeRoom = "overview";
       this.applyFacilityHighlight();

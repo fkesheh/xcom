@@ -16,6 +16,7 @@ import {
   CAMPAIGN_STORAGE_KEY,
   canStartManufacturing,
   chooseInterceptor,
+  completeFacilityConstruction,
   completeResearch,
   craftHullPoints,
   craftSpeedDegPerHour,
@@ -37,10 +38,15 @@ const LAND_LAT = 4;
 const LAND_LON = 22;
 
 function richCampaign(seed = SEED): CampaignState {
-  return {
-    ...createCampaign(BASE, seed),
-    resources: { credits: 8000, alloys: 400, elerium: 200, alienData: 200 },
-  };
+  // Classic starter packs 3 craft into 3 hangars — free a fourth berth so
+  // Phantom fabrication tests aren't blocked by hangar capacity.
+  return completeFacilityConstruction(
+    {
+      ...createCampaign(BASE, seed),
+      resources: { credits: 8000, alloys: 400, elerium: 200, alienData: 200 },
+    },
+    "hangar-4",
+  );
 }
 
 /** A tracked crash-site contact of the given UFO type, parked on land, ready to intercept. */
@@ -458,10 +464,18 @@ describe("legacy save migration: stale contact speed does not invert the air war
 describe("Phantom progression arc", () => {
   it("gates the Phantom behind alienPropulsion research and a free hangar slot", () => {
     const base = richCampaign();
-    expect(canStartManufacturing(base, "phantom")).toBe(false); // needs research
-    const withBio = completeResearch(base, "alienBiotech");
+    // richCampaign already frees a hangar — strip it to prove the slot gate.
+    const full = {
+      ...createCampaign(BASE, SEED),
+      resources: { credits: 8000, alloys: 400, elerium: 200, alienData: 200 },
+    };
+    expect(canStartManufacturing(full, "phantom")).toBe(false); // needs research + hangar
+    const withBio = completeResearch(full, "alienBiotech");
     expect(canStartManufacturing(withBio, "phantom")).toBe(false); // still needs propulsion
-    const ready = completeResearch(withBio, "alienPropulsion");
+    const researched = completeResearch(withBio, "alienPropulsion");
+    expect(canStartManufacturing(researched, "phantom")).toBe(false); // hangars full
+    expect(canStartManufacturing(base, "phantom")).toBe(false); // rich has hangar but not research
+    const ready = completeResearch(completeResearch(base, "alienBiotech"), "alienPropulsion");
     expect(canStartManufacturing(ready, "phantom")).toBe(true);
   });
 
