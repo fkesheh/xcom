@@ -961,6 +961,11 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
 }
 #base-view .build-card.blocked { border-color: rgba(148,163,184,.18); background: rgba(2,12,20,.34); }
 #base-view .build-card.active { border-color: rgba(103,232,249,.38); background: rgba(8,35,47,.36); }
+#base-view .build-card.selected {
+  border-color: rgba(103,232,249,.55);
+  background: rgba(8,45,58,.55);
+  box-shadow: 0 0 0 1px rgba(103,232,249,.25);
+}
 #base-view .build-card .bc-head {
   display: flex;
   justify-content: space-between;
@@ -1843,9 +1848,12 @@ export class BaseView {
     wz: number;
     baseY: number;
   }> = [];
-  /** Expansion-pad niche meshes + their (hidden-by-default) labels, revealed only
-   *  on hover so empty EXPANSION slots don't clutter the cutaway. */
+  /** Expansion-pad niche meshes + their labels. Always labeled so build sites
+   *  are obvious; hover only scales the chip. */
   private readonly expansionHovers: Array<{ mesh: Mesh; label: Sprite; id: string }> = [];
+  /** Invisible hit volumes for empty dirt cells (no assigned expansion facility).
+   *  Clicking one opens Construction so every empty square is selectable. */
+  private readonly dirtHitMeshes: Mesh[] = [];
   /** The expansion-pad meshes, cached once after buildScene (the set is invariant
    *  for a view's life) so pointermove raycasts never re-.map() a fresh array. */
   private expansionMeshCache: Mesh[] | null = null;
@@ -1927,6 +1935,9 @@ export class BaseView {
    *  would land the player on an unrelated project after clicking Start. */
   private researchCarouselProjectId: string | null = null;
   private mfgCarouselProjectId: string | null = null;
+  /** Expansion pad the player clicked in the 3D base — Construction room focuses
+   *  that facility so Build starts on the selected site (not an unfiltered list). */
+  private selectedExpansionId: string | null = null;
   /** Live carousel handles for the currently-mounted room; destroyed (keyboard
    *  listener removed) before every room re-render and on dispose. */
   private roomCarousels: CarouselHandle[] = [];
@@ -1974,11 +1985,14 @@ export class BaseView {
       const expId = id.slice(4);
       this.hoveredFacilityId = null;
       this.hoveredExpansionId = expId;
-      for (const pad of this.expansionHovers) pad.label.visible = pad.id === expId;
     } else {
       this.hoveredFacilityId = id;
       this.hoveredExpansionId = null;
-      for (const pad of this.expansionHovers) pad.label.visible = false;
+    }
+    // Site labels stay visible; keyboard focus only scales the focused pad.
+    for (const pad of this.expansionHovers) {
+      const hot = pad.id === this.hoveredExpansionId;
+      pad.label.scale.set(hot ? 1.15 : 0.95, hot ? 0.32 : 0.26, 1);
     }
     this.applyFacilityHighlight();
   }
@@ -2009,10 +2023,7 @@ export class BaseView {
       if (!id) return;
       e.preventDefault();
       if (id.startsWith("exp:")) {
-        // Expansion pad → Construction room (mirrors the pad-click path).
-        this.selectedFacilityId = null;
-        this.activeRoom = "construction";
-        this.refreshHud();
+        this.openConstructionForSite(id.slice(4));
         return;
       }
       this.activateFacility(id);
@@ -2356,7 +2367,9 @@ export class BaseView {
   }
 
   /** Rock plugs for every grid cell that is neither a constructed facility nor
-   *  a buildable expansion pad — the classic "dirt" tiles of the basescape. */
+   *  a buildable expansion pad — the classic "dirt" tiles of the basescape.
+   *  Kept flush with the slab (never taller than facility floors) so dirt cannot
+   *  visually climb into hangar / module footprints. */
   private buildDirtCells(
     pads: readonly BaseFacility[],
     building: BaseFacility | undefined,
@@ -2373,18 +2386,36 @@ export class BaseView {
     if (building) claim(building);
 
     const rock = this.sharedRock!;
+    this.dirtHitMeshes.length = 0;
+    // Surface dirt tile flush with the concrete slab — never taller than the
+    // slab top, never casting into neighbouring hangar recesses.
+    const plugH = 0.04;
+    // Shared invisible hit material — opacity > 0 so Three.js never culls the
+    // mesh from raycasts (true 0 can be skipped by some GPU/driver paths).
+    const hitMat = new MeshBasicMaterial({
+      transparent: true,
+      opacity: 0.01,
+      depthWrite: false,
+    });
+    hitMat.userData.shared = false;
     for (let y = 0; y < H; y++)
       for (let x = 0; x < W; x++) {
         if (claimed.has(y * W + x)) continue;
         const plug = new Mesh(
-          new BoxGeometry(CELL - 0.06, 0.22, CELL - 0.06),
+          new BoxGeometry(CELL - 0.12, plugH, CELL - 0.12),
           rock,
         );
         const p = this.cellCenter(x, y, 1, 1);
         plug.position.set(p.x, -0.02, p.z);
         plug.receiveShadow = true;
-        plug.castShadow = true;
         this.baseGroup.add(plug);
+
+        // Tall click target so empty dirt is always selectable for Construction.
+        const hit = new Mesh(new BoxGeometry(CELL * 0.92, 0.9, CELL * 0.92), hitMat);
+        hit.position.set(p.x, 0.4, p.z);
+        hit.userData.dirtCell = true;
+        this.baseGroup.add(hit);
+        this.dirtHitMeshes.push(hit);
       }
   }
 
@@ -2394,16 +2425,26 @@ export class BaseView {
     const width = STARTER_BASE_GRID.width * CELL;
     const depth = STARTER_BASE_GRID.height * CELL;
 
-    // The rock mass the facility is carved into — extends past the floor on
-    // every side so the cavity walls (buildCutawayShell) read as continuous.
-    const rockBed = new Mesh(new BoxGeometry(width + 4.6, 1.4, depth + 4.6), rock);
-    rockBed.position.y = -0.7;
-    rockBed.receiveShadow = true;
-    rockBed.castShadow = true;
-    this.baseGroup.add(rockBed);
+    // Perimeter rock ONLY — never a solid bed under the 6×6. A full under-slab
+    // rock mass was reading through hangar niches and "taking over" the bays.
+    const ringT = 1.8;
+    const ringH = 1.2;
+    const ringY = -0.85;
+    const back = new Mesh(new BoxGeometry(width + ringT * 2, ringH, ringT), rock);
+    back.position.set(0, ringY, -depth / 2 - ringT / 2);
+    back.receiveShadow = true;
+    const front = new Mesh(new BoxGeometry(width + ringT * 2, ringH, ringT), rock);
+    front.position.set(0, ringY, depth / 2 + ringT / 2);
+    front.receiveShadow = true;
+    const left = new Mesh(new BoxGeometry(ringT, ringH, depth), rock);
+    left.position.set(-width / 2 - ringT / 2, ringY, 0);
+    left.receiveShadow = true;
+    const right = new Mesh(new BoxGeometry(ringT, ringH, depth), rock);
+    right.position.set(width / 2 + ringT / 2, ringY, 0);
+    right.receiveShadow = true;
+    this.baseGroup.add(back, front, left, right);
 
-    // Concrete floor of the excavated level, sized to the build grid. Receives
-    // the warm key-light contact shadows from every facility silhouette.
+    // Concrete floor of the excavated level, sized to the build grid.
     const slab = new Mesh(new BoxGeometry(width, 0.16, depth), concrete);
     slab.position.y = -0.06;
     slab.receiveShadow = true;
@@ -2448,36 +2489,31 @@ export class BaseView {
     const concrete = this.sharedConcrete!;
     const width = STARTER_BASE_GRID.width * CELL;
     const depth = STARTER_BASE_GRID.height * CELL;
-    const wallHeight = 3.0;
-    const wallT = 1.0;
+    const wallHeight = 2.4;
+    const wallT = 0.7;
+    // Keep every rock wall OUTSIDE the 6×6 footprint — never overhang the grid
+    // (the old cave-roof covered the top hangar and blocked build sites).
+    const margin = 0.08;
 
-    // Back rock wall (far side from camera). Casts shadow so the key light
-    // throws dramatic rock-face shadow across the concrete floor.
-    const backWall = new Mesh(new BoxGeometry(width + 2.6, wallHeight, wallT), rock);
-    backWall.position.set(0, wallHeight / 2 - 0.55, -depth / 2 - wallT / 2);
+    const backWall = new Mesh(new BoxGeometry(width + 1.4, wallHeight, wallT), rock);
+    backWall.position.set(0, wallHeight / 2 - 0.4, -depth / 2 - wallT / 2 - margin);
     backWall.castShadow = true;
     backWall.receiveShadow = true;
-    // Left rock wall.
-    const leftWall = new Mesh(new BoxGeometry(wallT, wallHeight, depth + 2.6), rock);
-    leftWall.position.set(-width / 2 - wallT / 2, wallHeight / 2 - 0.55, 0);
+    const leftWall = new Mesh(new BoxGeometry(wallT, wallHeight, depth + 1.4), rock);
+    leftWall.position.set(-width / 2 - wallT / 2 - margin, wallHeight / 2 - 0.4, 0);
     leftWall.castShadow = true;
     leftWall.receiveShadow = true;
-    // Partial right return enclosing the back-right corner — the front-right
-    // stays open as the cutaway sightline.
-    const returnLen = depth * 0.6;
-    const rightReturn = new Mesh(new BoxGeometry(wallT, wallHeight, returnLen + 0.6), rock);
-    rightReturn.position.set(width / 2 + wallT / 2, wallHeight / 2 - 0.55, -depth / 2 + returnLen / 2);
+    // Short right return at the back corner only — front-right stays open.
+    const returnLen = depth * 0.35;
+    const rightReturn = new Mesh(new BoxGeometry(wallT, wallHeight, returnLen), rock);
+    rightReturn.position.set(
+      width / 2 + wallT / 2 + margin,
+      wallHeight / 2 - 0.4,
+      -depth / 2 + returnLen / 2 - margin,
+    );
     rightReturn.castShadow = true;
     rightReturn.receiveShadow = true;
     this.baseGroup.add(backWall, leftWall, rightReturn);
-
-    // Cave-roof overhang at the enclosed back-left corner — implies the cavern
-    // continues overhead without lid-ing the whole diorama.
-    const overhang = new Mesh(new BoxGeometry(width * 0.62, 0.5, depth * 0.62), rock);
-    overhang.position.set(-width / 4 + 0.2, wallHeight - 0.6, -depth / 4 - 0.2);
-    overhang.castShadow = true;
-    overhang.receiveShadow = true;
-    this.baseGroup.add(overhang);
 
     // Horizontal rock strata (subtle teal veins) — additive glow lines.
     const strataMat = new MeshBasicMaterial({
@@ -2487,23 +2523,26 @@ export class BaseView {
       blending: AdditiveBlending,
       depthWrite: false,
     });
-    for (let i = 0; i < 6; i++) {
-      const y = -0.2 + i * 0.34;
-      const backVein = new Mesh(new BoxGeometry(width + 1.8, 0.016, 0.016), strataMat);
-      backVein.position.set(0, y, -depth / 2 - wallT + 0.04);
-      const leftVein = new Mesh(new BoxGeometry(0.016, 0.016, depth + 1.8), strataMat);
-      leftVein.position.set(-width / 2 - wallT + 0.04, y, 0);
+    for (let i = 0; i < 5; i++) {
+      const y = -0.1 + i * 0.34;
+      const backVein = new Mesh(new BoxGeometry(width + 0.8, 0.016, 0.016), strataMat);
+      backVein.position.set(0, y, -depth / 2 - wallT - margin + 0.04);
+      const leftVein = new Mesh(new BoxGeometry(0.016, 0.016, depth + 0.8), strataMat);
+      leftVein.position.set(-width / 2 - wallT - margin + 0.04, y, 0);
       this.baseGroup.add(backVein, leftVein);
     }
 
     // Clean saw-cut lips on the open cutaway edges (front + front-right).
-    const lipMat = concrete;
-    const frontLip = new Mesh(new BoxGeometry(width + 0.4, 0.22, 0.22), lipMat);
-    frontLip.position.set(0, -0.04, depth / 2 + 0.18);
+    const frontLip = new Mesh(new BoxGeometry(width + 0.3, 0.18, 0.18), concrete);
+    frontLip.position.set(0, -0.04, depth / 2 + 0.16);
     frontLip.castShadow = true;
     frontLip.receiveShadow = true;
-    const rightLip = new Mesh(new BoxGeometry(0.22, 0.22, depth - returnLen + 0.4), lipMat);
-    rightLip.position.set(width / 2 + 0.18, -0.04, depth / 2 - (depth - returnLen) / 2 + 0.1);
+    const rightLip = new Mesh(new BoxGeometry(0.18, 0.18, depth - returnLen + 0.2), concrete);
+    rightLip.position.set(
+      width / 2 + 0.16,
+      -0.04,
+      depth / 2 - (depth - returnLen) / 2 + 0.05,
+    );
     rightLip.castShadow = true;
     rightLip.receiveShadow = true;
     const lipLine = new MeshBasicMaterial({
@@ -2513,14 +2552,9 @@ export class BaseView {
       blending: AdditiveBlending,
       depthWrite: false,
     });
-    const frontLine = new Mesh(new BoxGeometry(width + 0.42, 0.014, 0.03), lipLine);
-    frontLine.position.set(0, 0.08, depth / 2 + 0.28);
+    const frontLine = new Mesh(new BoxGeometry(width + 0.32, 0.014, 0.03), lipLine);
+    frontLine.position.set(0, 0.08, depth / 2 + 0.24);
     this.baseGroup.add(frontLip, rightLip, frontLine);
-
-    const label = makeLabel("Sublevel 01 / interior cutaway", BASE_PALETTE.floorLine);
-    label.position.set(-width / 2 + 1.9, wallHeight - 0.7, -depth / 2 - wallT + 0.06);
-    label.scale.set(1.7, 0.36, 1);
-    this.baseGroup.add(label);
   }
 
   private cellCenter(x: number, y: number, w: number, h: number): Vector3 {
@@ -2807,10 +2841,9 @@ export class BaseView {
 
     const width = facility.w * CELL - ROOM_GAP;
     const depth = facility.h * CELL - ROOM_GAP;
-    // How far the bay floor is sunk below the level slab — bays read as carved
-    // niches, not tiles on a flat surface.
-    const recess = 0.2;
-    const floorY = 0.02 - recess;
+    // Bay floor sits ON the slab (not carved deep into rock) so the underground
+    // rock bed can never fill hangar / module interiors.
+    const floorY = 0.02;
 
     // Classic module shell: a raised concrete box with steel walls — reads as a
     // basescape tile, not a neon pile on a flat slab.
@@ -2864,7 +2897,12 @@ export class BaseView {
     });
     model.position.y = floorY;
     const baySpan = Math.min(width, depth);
-    const modelScale = Math.min(0.95, Math.max(0.55, (baySpan - 0.28) * 0.72));
+    // Keep dioramas inside their shell — hangar craft especially used to spill
+    // into neighbouring dirt and read as "rocks taking over the hangar".
+    const modelScale =
+      facility.kind === "hangar"
+        ? Math.min(0.72, Math.max(0.5, (baySpan - 0.36) * 0.5))
+        : Math.min(0.85, Math.max(0.5, (baySpan - 0.32) * 0.65));
     model.scale.setScalar(modelScale);
     group.add(model);
 
@@ -3000,21 +3038,38 @@ export class BaseView {
 
     const width = facility.w * CELL - ROOM_GAP;
     const depth = facility.h * CELL - ROOM_GAP;
-    // Dark carved niche — unexcavated rock sunk below the concrete level, hint
-    // it can be excavated. Reads as negative space against the lit bays.
-    const niche = new Mesh(new BoxGeometry(width, 0.18, depth), this.sharedRock!);
-    niche.position.y = -0.05;
+    // Raised teal build platform — clearly a selectable site, not flat dirt.
+    const nicheMat = this.sharedConcrete!.clone();
+    nicheMat.color.lerp(new Color(BASE_PALETTE.floorLine), 0.35);
+    nicheMat.emissive = new Color(BASE_PALETTE.floorLine);
+    nicheMat.emissiveIntensity = 0.18;
+    nicheMat.userData.shared = false;
+    const niche = new Mesh(new BoxGeometry(width, 0.16, depth), nicheMat);
+    niche.position.y = 0.06;
     niche.receiveShadow = true;
-    niche.castShadow = true;
     niche.userData.expansionId = facility.id;
     group.add(niche);
+
+    // Tall hit volume (slight opacity so raycasts never skip it).
+    const hit = new Mesh(
+      new BoxGeometry(Math.max(width, CELL * 0.95), 1.0, Math.max(depth, CELL * 0.95)),
+      new MeshBasicMaterial({
+        transparent: true,
+        opacity: 0.01,
+        depthWrite: false,
+      }),
+    );
+    hit.position.y = 0.45;
+    hit.userData.expansionId = facility.id;
+    hit.renderOrder = 2;
+    group.add(hit);
 
     const edge = new LineSegments(
       new EdgesGeometry(niche.geometry),
       new MeshBasicMaterial({
         color: BASE_PALETTE.floorLine,
         transparent: true,
-        opacity: 0.34,
+        opacity: 0.72,
         blending: AdditiveBlending,
         depthWrite: false,
       }),
@@ -3022,14 +3077,15 @@ export class BaseView {
     edge.position.copy(niche.position);
     group.add(edge);
 
-    // EXPANSION label is hidden until the pad is hovered so empty slots don't
-    // clutter the cutaway (revealed by onPointerMove).
-    const marker = makeLabel("Expansion", BASE_PALETTE.floorLine);
-    marker.position.set(0, 0.32, 0);
-    marker.scale.set(0.9, 0.24, 1);
-    marker.visible = false;
+    // Always-visible site label (facility name) so the player knows which build
+    // this pad starts — not a generic "Expansion" that opens an unfiltered list.
+    const marker = makeLabel(facility.label, BASE_PALETTE.floorLine);
+    marker.position.set(0, 0.42, 0);
+    marker.scale.set(0.95, 0.26, 1);
+    marker.visible = true;
     group.add(marker);
-    this.expansionHovers.push({ mesh: niche, label: marker, id: facility.id });
+    // Raycast the tall hit volume (not the thin niche) so clicks register.
+    this.expansionHovers.push({ mesh: hit, label: marker, id: facility.id });
   }
 
   private addOverheadSystems(): void {
@@ -4368,7 +4424,8 @@ export class BaseView {
     return node;
   }
 
-  /** Active construction (remaining hours) + buildable facilities (cost + Build). */
+  /** Active construction (remaining hours) + buildable facilities (cost + Build).
+   *  When the player clicked a 3D expansion pad, that site is pinned at the top. */
   private renderConstructionList(campaign: CampaignState): HTMLElement {
     const wrap = el("div");
     const activeConstruction = campaign.activeConstruction;
@@ -4393,35 +4450,76 @@ export class BaseView {
       wrap.appendChild(card);
     }
     const buildable = availableBaseFacilities(campaign);
-    if (buildable.length > 0) {
-      const label = el("div", "section-label");
-      label.textContent = activeConstruction ? "Queue" : "Buildable";
-      wrap.appendChild(label);
-      const grid = el("div", "build-grid");
-      for (const facility of buildable) {
-        const canBuild = canBuildFacility(campaign, facility.id);
-        const card = el("article", `build-card${canBuild ? "" : " blocked"}`.trim());
-        const cost = facilityCost(facility);
-        const head = el("div", "bc-head");
-        head.append(
-          document.createTextNode(facility.label),
-          Object.assign(el("em"), { textContent: formatCost(cost) }),
-        );
-        const detail = el("p");
-        detail.textContent =
-          `${facility.effect} ` +
-          `Power ${facility.powerUse > 0 ? `+${facility.powerUse} use` : `+${facility.powerOutput} cap`}. ` +
-          `Build ${formatHours(facilityConstructionDuration(campaign, facility.id))}.`;
-        const button = el("button");
-        button.textContent = canBuild ? "Build" : activeConstruction ? "Queue full" : "Need resources";
-        button.disabled = !canBuild;
-        button.addEventListener("click", () => this.opts.onBuildFacility(facility.id));
-        card.append(head, detail, button);
-        grid.appendChild(card);
-      }
-      wrap.appendChild(grid);
+    if (buildable.length === 0) return wrap;
+
+    const selectedId = this.selectedExpansionId;
+    const selected = selectedId
+      ? buildable.find((f) => f.id === selectedId)
+      : undefined;
+    const rest = selected
+      ? buildable.filter((f) => f.id !== selected.id)
+      : buildable;
+
+    if (selected) {
+      const siteLabel = el("div", "section-label");
+      siteLabel.textContent = "Selected site";
+      wrap.appendChild(siteLabel);
+      wrap.appendChild(this.renderBuildCard(campaign, selected, true));
     }
+
+    const label = el("div", "section-label");
+    label.textContent = activeConstruction
+      ? "Queue"
+      : selected
+        ? "Other sites"
+        : "Buildable";
+    wrap.appendChild(label);
+    const grid = el("div", "build-grid");
+    for (const facility of rest) {
+      grid.appendChild(this.renderBuildCard(campaign, facility, false));
+    }
+    wrap.appendChild(grid);
     return wrap;
+  }
+
+  /** One buildable / selected-site card in the Construction room. */
+  private renderBuildCard(
+    campaign: CampaignState,
+    facility: BaseFacility,
+    selected: boolean,
+  ): HTMLElement {
+    const canBuild = canBuildFacility(campaign, facility.id);
+    const activeConstruction = !!campaign.activeConstruction;
+    const card = el(
+      "article",
+      `build-card${canBuild ? "" : " blocked"}${selected ? " selected" : ""}`.trim(),
+    );
+    const cost = facilityCost(facility);
+    const head = el("div", "bc-head");
+    head.append(
+      document.createTextNode(facility.label),
+      Object.assign(el("em"), { textContent: formatCost(cost) }),
+    );
+    const detail = el("p");
+    detail.textContent =
+      `${facility.effect} ` +
+      `Power ${facility.powerUse > 0 ? `+${facility.powerUse} use` : `+${facility.powerOutput} cap`}. ` +
+      `Build ${formatHours(facilityConstructionDuration(campaign, facility.id))}.`;
+    const button = el("button");
+    button.textContent = canBuild
+      ? selected
+        ? "Build here"
+        : "Build"
+      : activeConstruction
+        ? "Queue full"
+        : "Need resources";
+    button.disabled = !canBuild;
+    button.addEventListener("click", () => {
+      this.selectedExpansionId = facility.id;
+      this.opts.onBuildFacility(facility.id);
+    });
+    card.append(head, detail, button);
+    return card;
   }
 
   /** Convert a pointer position to a ray and return the facility floor under it,
@@ -4452,12 +4550,15 @@ export class BaseView {
       this.hoveredFacilityId = id;
       this.applyFacilityHighlight();
     }
-    // Expansion-pad hover (facilities win): reveal only the hovered slot's label.
+    // Expansion-pad hover (facilities win): boost the hovered site's label scale.
     const expId = hit ? null : this.expansionIdAt();
     const expansionChanged = expId !== this.hoveredExpansionId;
     if (expansionChanged) {
       this.hoveredExpansionId = expId;
-      for (const pad of this.expansionHovers) pad.label.visible = pad.id === expId;
+      for (const pad of this.expansionHovers) {
+        const hot = pad.id === expId;
+        pad.label.scale.set(hot ? 1.15 : 0.95, hot ? 0.32 : 0.26, 1);
+      }
     }
     const dom = this.renderer.domElement;
     if (!this.tooltipEl) return;
@@ -4475,13 +4576,20 @@ export class BaseView {
         const note = el("span");
         note.textContent = building ? "Under construction" : (facility?.effect ?? "");
         this.tooltipEl.append(strong, note);
+      } else if (expId === "__dirt__") {
+        this.tooltipEl.replaceChildren();
+        const strong = el("strong");
+        strong.textContent = "Empty lot";
+        const note = el("span");
+        note.textContent = "Click to open Construction";
+        this.tooltipEl.append(strong, note);
       } else if (expId) {
         const facility = findBaseFacility(expId);
         this.tooltipEl.replaceChildren();
         const strong = el("strong");
         strong.textContent = facility?.label ?? "Expansion slot";
         const note = el("span");
-        note.textContent = "Unexcavated — open Construction to build here";
+        note.textContent = "Click to build this facility here";
         this.tooltipEl.append(strong, note);
       }
       this.tooltipEl.classList.toggle("visible", hovering);
@@ -4495,18 +4603,21 @@ export class BaseView {
     }
   };
 
-  /** Raycast the expansion-pad niches under the current pointer ray (already set
-   *  by facilityMeshAt earlier in the same pointermove). Returns the hovered pad
-   *  id, or null. The mesh list is invariant after buildScene, so it is cached. */
+  /** Raycast expansion pads first, then empty dirt cells. Returns a facility id
+   *  for a labeled build site, or `"__dirt__"` for a blank empty square. */
   private expansionIdAt(): string | null {
-    if (this.expansionHovers.length === 0) return null;
+    if (this.expansionHovers.length === 0 && this.dirtHitMeshes.length === 0) return null;
     if (this.expansionMeshCache === null) {
       this.expansionMeshCache = this.expansionHovers.map((pad) => pad.mesh);
     }
-    const hits = this.raycaster.intersectObjects(this.expansionMeshCache, false);
-    if (hits.length === 0) return null;
-    const id = hits[0]!.object.userData.expansionId;
-    return typeof id === "string" ? id : null;
+    const padHits = this.raycaster.intersectObjects(this.expansionMeshCache, false);
+    if (padHits.length > 0) {
+      const id = padHits[0]!.object.userData.expansionId;
+      return typeof id === "string" ? id : null;
+    }
+    if (this.dirtHitMeshes.length === 0) return null;
+    const dirtHits = this.raycaster.intersectObjects(this.dirtHitMeshes, false);
+    return dirtHits.length > 0 ? "__dirt__" : null;
   }
 
   /** Click a facility floor in the 3D base. The Access Lift (classic command /
@@ -4527,19 +4638,34 @@ export class BaseView {
     this.hintDismissed = true;
     const hit = this.facilityMeshAt(event);
     if (!hit) {
-      // Clicking an unexcavated expansion pad (which shows a pointer cursor +
-      // "open Construction to build here" tooltip) opens the Construction room so
-      // the advertised click is not a silent no-op.
+      // Clicking a build site selects THAT facility and opens Construction focused
+      // on it — the player can confirm Build without hunting the list.
       const expId = this.expansionIdAt();
-      if (expId !== null) {
-        this.selectedFacilityId = null;
-        this.activeRoom = "construction";
-        this.refreshHud();
-      }
+      if (expId !== null) this.openConstructionForSite(expId);
       return;
     }
     this.activateFacility(hit.facilityId);
   };
+
+  /** Open Construction with a specific expansion site pre-selected.
+   *  Blank dirt (`__dirt__`) just opens the build list. Affordable labeled sites
+   *  start building immediately so a pad click is a real "build here" action. */
+  private openConstructionForSite(expansionId: string): void {
+    this.selectedFacilityId = null;
+    if (expansionId === "__dirt__") {
+      this.selectedExpansionId = null;
+      this.activeRoom = "construction";
+      this.refreshHud();
+      return;
+    }
+    this.selectedExpansionId = expansionId;
+    this.activeRoom = "construction";
+    if (canBuildFacility(this.opts.campaign, expansionId)) {
+      this.opts.onBuildFacility(expansionId);
+      return;
+    }
+    this.refreshHud();
+  }
 
   /** Open the room for a facility id. Shared by the canvas click raycast and the
    *  keyboard activation path so both routes into a room behave identically. */
@@ -4585,9 +4711,9 @@ export class BaseView {
     // Clear any lingering hover affordance (tooltip + pointer cursor) from the
     // hub facility the player just clicked — the dive replaces that interaction.
     this.hoveredFacilityId = null;
-    if (this.hoveredExpansionId !== null) {
-      this.hoveredExpansionId = null;
-      for (const pad of this.expansionHovers) pad.label.visible = false;
+    this.hoveredExpansionId = null;
+    for (const pad of this.expansionHovers) {
+      pad.label.scale.set(0.95, 0.26, 1);
     }
     if (this.tooltipEl) this.tooltipEl.classList.remove("visible");
     this.renderer.domElement.style.cursor = "default";

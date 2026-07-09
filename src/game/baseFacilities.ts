@@ -118,7 +118,7 @@ for (const a of Object.values(ACCENT)) {
  * proportions are preserved and no extra geometry/material is allocated.
  * baseView sizes the bays to fit these larger modules + the corridor grid.
  */
-const MODEL_SCALE = 1.5;
+const MODEL_SCALE = 1.0;
 
 type Vec3 = readonly [number, number, number];
 
@@ -310,42 +310,38 @@ function buildBarracks(group: Group): void {
 /** Hangar (green): the X-COM ship on a pad, launch ramp, overhead gantry. */
 function buildHangar(group: Group): void {
   const accent = ACCENT.hangar;
-  add(group, GEO.disk, MAT.concrete, [0, 0.02, 0.04], [1.84, 1, 1.84]); // landing pad
-  addHalo(group, accent, 0.46, 0.05);
+  // Compact pad — must stay inside a 2×2 bay after MODEL_SCALE without spilling
+  // dark steel into neighbouring dirt (reads as "rocks in the hangar").
+  add(group, GEO.disk, MAT.concrete, [0, 0.02, 0.04], [1.35, 1, 1.35]); // landing pad
+  addHalo(group, accent, 0.34, 0.05);
   // Pad edge lights.
   for (let i = 0; i < 4; i++) {
     const a = (i / 4) * Math.PI * 2;
-    add(group, GEO.dot, accent.glow, [Math.cos(a) * 0.46, 0.06, 0.04 + Math.sin(a) * 0.46]);
+    add(group, GEO.dot, accent.glow, [Math.cos(a) * 0.34, 0.06, 0.04 + Math.sin(a) * 0.34]);
   }
   // The interceptor — long fuselage, broad swept wings, tall tail, twin glowing
-  // engines. Enlarged + accented so the silhouette reads as a ship at distance.
-  add(group, GEO.core, MAT.steel, [0, 0.32, 0.0], [0.52, 0.36, 1.78]); // fuselage
-  add(group, GEO.box, accent.glow, [0, 0.52, 0.0], [0.07, 0.03, 1.5]); // dorsal spine stripe
-  add(group, GEO.dome, accent.beacon, [0, 0.4, 0.72], [0.5, 0.42, 0.5], [-Math.PI / 2, 0, 0]); // cockpit canopy
-  add(group, GEO.box, MAT.steel, [0, 0.54, -0.46], [0.2, 0.5, 0.2]); // vertical tail
-  add(group, GEO.box, accent.glow, [0, 0.6, -0.46], [0.04, 0.34, 0.16]); // tail fin stripe
-  add(group, GEO.box, MAT.steel, [0, 0.44, -0.24], [0.82, 0.06, 0.26]); // horizontal stabilizer
-  // Broad swept wings with bright green leading edges — the ship's signature.
-  add(group, GEO.box, MAT.steel, [0.4, 0.31, 0.04], [0.9, 0.08, 0.36], [0, -0.5, 0.22]); // starboard wing
-  add(group, GEO.box, MAT.steel, [-0.4, 0.31, 0.04], [0.9, 0.08, 0.36], [0, 0.5, 0.22]); // port wing
-  add(group, GEO.box, accent.glow, [0.4, 0.335, 0.2], [0.9, 0.025, 0.05], [0, -0.5, 0.22]); // starboard leading edge
-  add(group, GEO.box, accent.glow, [-0.4, 0.335, 0.2], [0.9, 0.025, 0.05], [0, 0.5, 0.22]); // port leading edge
-  add(group, GEO.box, accent.beacon, [0.42, 0.315, -0.12], [0.14, 0.05, 0.26]); // starboard wingtip strobe
-  add(group, GEO.box, accent.beacon, [-0.42, 0.315, -0.12], [0.14, 0.05, 0.26]); // port wingtip strobe
-  // Twin glowing engines — the ship's bright green signature at the tail.
-  add(group, GEO.core, accent.beacon, [0.13, 0.32, -0.84], [0.26, 0.26, 0.2]);
-  add(group, GEO.core, accent.beacon, [-0.13, 0.32, -0.84], [0.26, 0.26, 0.2]);
-  // Launch ramp / bay doors at the back.
-  add(group, GEO.box, MAT.steel, [0, 0.12, -0.4], [0.7, 0.06, 0.12], [0.35, 0, 0]);
+  // engines. Sized to read as a ship without overflowing the bay shell.
+  add(group, GEO.core, MAT.steel, [0, 0.28, 0.0], [0.38, 0.28, 1.2]); // fuselage
+  add(group, GEO.box, accent.glow, [0, 0.44, 0.0], [0.05, 0.025, 1.05]); // dorsal spine stripe
+  add(group, GEO.dome, accent.beacon, [0, 0.34, 0.52], [0.38, 0.32, 0.38], [-Math.PI / 2, 0, 0]); // cockpit
+  add(group, GEO.box, MAT.steel, [0, 0.46, -0.34], [0.14, 0.36, 0.14]); // vertical tail
+  add(group, GEO.box, accent.glow, [0, 0.5, -0.34], [0.03, 0.26, 0.12]); // tail fin stripe
+  add(group, GEO.box, MAT.steel, [0, 0.36, -0.18], [0.58, 0.05, 0.2]); // horizontal stabilizer
+  add(group, GEO.box, MAT.steel, [0.28, 0.27, 0.02], [0.62, 0.06, 0.26], [0, -0.5, 0.22]);
+  add(group, GEO.box, MAT.steel, [-0.28, 0.27, 0.02], [0.62, 0.06, 0.26], [0, 0.5, 0.22]);
+  add(group, GEO.box, accent.glow, [0.28, 0.29, 0.14], [0.62, 0.02, 0.04], [0, -0.5, 0.22]);
+  add(group, GEO.box, accent.glow, [-0.28, 0.29, 0.14], [0.62, 0.02, 0.04], [0, 0.5, 0.22]);
+  add(group, GEO.core, accent.beacon, [0.1, 0.28, -0.58], [0.2, 0.2, 0.16]);
+  add(group, GEO.core, accent.beacon, [-0.1, 0.28, -0.58], [0.2, 0.2, 0.16]);
+  add(group, GEO.box, MAT.steel, [0, 0.1, -0.3], [0.5, 0.05, 0.1], [0.35, 0, 0]);
   for (const sx of [-1, 1]) {
-    add(group, GEO.box, MAT.steel, [sx * 0.3, 0.3, -0.42], [0.22, 0.5, 0.04]); // bay doors
+    add(group, GEO.box, MAT.steel, [sx * 0.22, 0.24, -0.32], [0.16, 0.36, 0.03]);
   }
-  // Overhead gantry.
   for (const sx of [-1, 1]) {
-    add(group, GEO.post, MAT.steel, [sx * 0.4, 0.5, 0.3], [1, 0.9, 1]);
+    add(group, GEO.post, MAT.steel, [sx * 0.3, 0.4, 0.22], [1, 0.7, 1]);
   }
-  add(group, GEO.box, MAT.steel, [0, 0.92, 0.3], [0.8, 0.06, 0.1]);
-  addBeacon(group, "hangar", 0.42, 0.6, -0.34);
+  add(group, GEO.box, MAT.steel, [0, 0.72, 0.22], [0.6, 0.05, 0.08]);
+  addBeacon(group, "hangar", 0.32, 0.48, -0.26);
 }
 
 /** Radar (purple): rotating dish silhouette, antenna mast, base unit. */
