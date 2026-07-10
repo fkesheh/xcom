@@ -329,6 +329,9 @@ export function launchDeploymentFlight(campaign: CampaignState, contactId: strin
   if (flights.some((flight) => flight.id === flightId)) return campaign;
   const transport = transportCraft(campaign);
   const craftId = transport?.id ?? "sky-1";
+  // The Skyranger is one physical craft. A return leg is just as unavailable as
+  // an outbound deployment, so never create a second marker for the same hull.
+  if (flights.some((flight) => flight.craftId === craftId)) return campaign;
   const speedDegPerHour = transport
     ? craftSpeedDegPerHour(transport)
     : DEFAULT_TRANSPORT_SPEED_DEG_PER_HOUR;
@@ -352,9 +355,8 @@ export function launchDeploymentFlight(campaign: CampaignState, contactId: strin
 
 /**
  * Removes every deployment-purpose flight from an active-flight roster, preserving
- * interceptor patrols. Returns undefined for an empty result to match the fresh /
- * normalized "no flights" shape. Used to retire the squad's Skyranger run once its
- * mission resolves.
+ * interceptor patrols. Kept for legacy callers; mission completion now reverses
+ * the transport into a visible return flight via {@link returnDeploymentFlights}.
  */
 export function dropDeploymentFlights(
   flights: readonly ActiveFlight[] | undefined,
@@ -362,6 +364,68 @@ export function dropDeploymentFlights(
   if (!flights || flights.length === 0) return undefined;
   const kept = flights.filter((flight) => flight.purpose !== "deployment");
   return kept.length > 0 ? kept : undefined;
+}
+
+/** Great-circle interpolation local to storage, avoiding a reverse dependency on geoscape.ts. */
+function activeFlightPositionForReturn(flight: ActiveFlight): { lat: number; lon: number } {
+  const p = Math.max(0, Math.min(1, flight.progress));
+  if (p <= 0) return { lat: flight.fromLat, lon: flight.fromLon };
+  if (p >= 1) return { lat: flight.toLat, lon: flight.toLon };
+  const toRad = Math.PI / 180;
+  const toDeg = 180 / Math.PI;
+  const phi1 = flight.fromLat * toRad;
+  const phi2 = flight.toLat * toRad;
+  const lam1 = flight.fromLon * toRad;
+  const lam2 = flight.toLon * toRad;
+  const cosCentral = Math.max(
+    -1,
+    Math.min(1, Math.sin(phi1) * Math.sin(phi2) + Math.cos(phi1) * Math.cos(phi2) * Math.cos(lam2 - lam1)),
+  );
+  const central = Math.acos(cosCentral);
+  if (central < 1e-9) return { lat: flight.fromLat, lon: flight.fromLon };
+  const sinCentral = Math.sin(central);
+  const a = Math.sin((1 - p) * central) / sinCentral;
+  const b = Math.sin(p * central) / sinCentral;
+  const x = a * Math.cos(phi1) * Math.cos(lam1) + b * Math.cos(phi2) * Math.cos(lam2);
+  const y = a * Math.cos(phi1) * Math.sin(lam1) + b * Math.cos(phi2) * Math.sin(lam2);
+  const z = a * Math.sin(phi1) + b * Math.sin(phi2);
+  return {
+    lat: Math.atan2(z, Math.sqrt(x * x + y * y)) * toDeg,
+    lon: Math.atan2(y, x) * toDeg,
+  };
+}
+
+/**
+ * Reverse every Skyranger deployment at its live position. The transport remains
+ * airborne until its reverse leg reaches the base, so post-mission navigation never
+ * teleports it back into the hangar.
+ */
+export function returnDeploymentFlights(
+  campaign: CampaignState,
+  departureHour = campaign.clock.elapsedHours,
+): ActiveFlight[] | undefined {
+  const flights = campaign.activeFlights ?? [];
+  let changed = false;
+  const returned = flights.map((flight) => {
+    if (flight.purpose !== "deployment") return flight;
+    changed = true;
+    const pos = activeFlightPositionForReturn(flight);
+    return {
+      id: `${RETURN_ID_PREFIX}${flight.craftId}:${Math.floor(departureHour)}:${flight.id}`,
+      craftId: flight.craftId,
+      kind: flight.kind,
+      fromLat: pos.lat,
+      fromLon: pos.lon,
+      toLat: campaign.base.lat,
+      toLon: campaign.base.lon,
+      progress: 0,
+      speedDegPerHour: flight.speedDegPerHour,
+      startedAtHour: departureHour,
+      purpose: "return" as const,
+    };
+  });
+  if (!changed) return flights.length > 0 ? [...flights] : undefined;
+  return returned.length > 0 ? returned : undefined;
 }
 
 /**
@@ -2353,11 +2417,10 @@ export function recordMissionResult(
     // contact — completing it must not erase an unrelated live contact. Every
     // other operation consumes the contact it was launched against.
     ufoContact: operation.missionType === "alienBaseAssault" ? campaign.ufoContact : undefined,
-    // The non-blocking deployment run that carried the squad here is done once the
-    // mission resolves — clear it so an arrived Skyranger (and its DEPLOY chip) does
-    // not linger on the globe pointing at a now-consumed contact. Interceptor patrols
-    // are independent air ops and are left untouched.
-    activeFlights: dropDeploymentFlights(campaign.activeFlights),
+    // The Skyranger has finished the assault but has not magically returned to the
+    // hangar. Reverse its live route so the globe visibly flies the squad home; the
+    // return leg retires normally only after it reaches the base.
+    activeFlights: returnDeploymentFlights(campaign, completedClock.elapsedHours),
     strategic,
     regionalPanic,
     resources,
@@ -3266,6 +3329,14 @@ function normalizeActiveFlight(value: unknown): ActiveFlight | undefined {
   ) {
     return undefined;
   }
+  const purpose =
+    maybe.purpose === "deployment"
+      ? "deployment"
+      : maybe.purpose === "return" || maybe.id.startsWith(RETURN_ID_PREFIX)
+        ? "return"
+        : maybe.purpose === "patrol"
+          ? "patrol"
+          : undefined;
   return {
     id: maybe.id,
     craftId: maybe.craftId,
@@ -3277,11 +3348,11 @@ function normalizeActiveFlight(value: unknown): ActiveFlight | undefined {
     progress: Math.max(0, Math.min(1, maybe.progress)),
     speedDegPerHour: Math.max(0, maybe.speedDegPerHour),
     startedAtHour: Math.max(0, maybe.startedAtHour),
-    // Non-blocking deployment fields (additive-optional). Only reconstruct a
-    // deployment run's markers — a legacy patrol has none of these and stays a patrol.
-    ...(maybe.purpose === "deployment" ? { purpose: "deployment" as const } : {}),
-    ...(typeof maybe.deployContactId === "string" ? { deployContactId: maybe.deployContactId } : {}),
-    ...(typeof maybe.arrived === "boolean" ? { arrived: maybe.arrived } : {}),
+    ...(purpose ? { purpose } : {}),
+    ...(purpose === "deployment" && typeof maybe.deployContactId === "string"
+      ? { deployContactId: maybe.deployContactId }
+      : {}),
+    ...(purpose === "deployment" && typeof maybe.arrived === "boolean" ? { arrived: maybe.arrived } : {}),
   };
 }
 

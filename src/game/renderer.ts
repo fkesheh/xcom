@@ -23,6 +23,7 @@ import {
   AmbientLight,
   BoxGeometry,
   BufferGeometry,
+  CircleGeometry,
   Color,
   DirectionalLight,
   DoubleSide,
@@ -250,19 +251,21 @@ const TIME_OF_DAY: Record<TimeOfDay, TimeOfDayLighting> = {
   // the field fades to dark. Emissive accents (UFO lights, tracers, visors) and
   // the stronger bloom make it feel dangerous without going pitch-black.
   night: {
-    sunIntensity: 0.15,
+    // Keep the night tactical, but lift the key/fill enough that terrain shape
+    // and cover remain readable outside emissive UFO panels.
+    sunIntensity: 0.24,
     sunColor: 0x5a78b8,
-    hemiIntensity: 0.24,
+    hemiIntensity: 0.32,
     hemiSky: 0x1a2240,
     hemiGround: 0x121418,
-    ambientIntensity: 0.07,
+    ambientIntensity: 0.1,
     ambientColor: 0x6a7ab0,
-    envIntensity: 0.16,
+    envIntensity: 0.22,
     background: 0x05070f,
-    exposure: 0.62,
+    exposure: 0.7,
     bloomStrength: 0.55,
-    fogNearMult: 0.85,
-    fogFarMult: 2.0,
+    fogNearMult: 0.95,
+    fogFarMult: 2.2,
     practical: 2.4, // night: strong warm pools break up the cool blue grade
   },
 };
@@ -353,6 +356,20 @@ function categoryFor(tile: TileType | undefined): string | undefined {
 function groundToneFor(category: string | undefined): number {
   if (category === undefined) return FALLBACK_GROUND;
   return GROUND_TONES[category] ?? FALLBACK_GROUND;
+}
+
+/** Low-saturation tactical-field tint by map theme; purely a presentation backdrop. */
+function theaterTintFor(themeId: string | undefined): number {
+  switch (themeId) {
+    case "urban": return 0x162b42;
+    case "desert": return 0x49351d;
+    case "arctic": return 0x163d52;
+    case "jungle": return 0x123d27;
+    case "forest": return 0x263d22;
+    case "alienBase": return 0x302050;
+    case "farmland":
+    default: return 0x153727;
+  }
 }
 
 /** A lit MeshStandardMaterial part + its base tones, ready for per-tile fog dimming. */
@@ -661,6 +678,11 @@ export class Renderer {
 
   private grid: BattleState["grid"] | null = null;
   private groundPlane: Mesh | null = null;
+  /** Soft tactical field + perimeter ring beneath the playable map (visual only). */
+  private theaterPlate: Mesh | null = null;
+  private theaterPlateMaterial: MeshBasicMaterial | null = null;
+  private theaterRimMaterial: MeshBasicMaterial | null = null;
+  private theaterBaseColor: Color | null = null;
   private readonly tileGroup = new Group();
   // Floor layer: one InstancedMesh (per-tile colour + fog), indexed by cellIndex.
   private floorMesh: InstancedMesh | null = null;
@@ -928,6 +950,7 @@ export class Renderer {
     if (this.scene.background instanceof Color) {
       this.scene.background.setHex(cfg.background);
     }
+    this.updateTheaterBackdrop(cfg);
 
     const size = this.grid ? Math.max(this.grid.width, this.grid.height) : 30;
     if (this.scene.fog instanceof Fog) {
@@ -1129,6 +1152,57 @@ export class Renderer {
   // World construction (static map) + per-frame state sync
   // -------------------------------------------------------------------------
 
+  /**
+   * Give the battlefield a subtle physical envelope instead of letting the board
+   * end abruptly in pure black. The plate stays below every tactical tile and
+   * carries a theme-aware tint; its thin perimeter reads as a command-table
+   * boundary without affecting raycasts, fog, or gameplay geometry.
+   */
+  private buildTheaterBackdrop(state: BattleState): void {
+    const size = Math.max(state.grid.width, state.grid.height);
+    const radius = size * 1.32;
+    const cx = (state.grid.width - 1) / 2;
+    const cz = (state.grid.height - 1) / 2;
+    const base = new Color(theaterTintFor(state.themeId));
+    const plateMaterial = new MeshBasicMaterial({
+      color: base,
+      transparent: true,
+      opacity: 0.3,
+      depthWrite: false,
+    });
+    const plate = new Mesh(new CircleGeometry(radius, 72), plateMaterial);
+    plate.rotation.x = -Math.PI / 2;
+    plate.position.set(cx, -0.075, cz);
+    plate.renderOrder = -2;
+
+    const rimMaterial = new MeshBasicMaterial({
+      color: base.clone().lerp(new Color(COLORS.selectRing), 0.45),
+      transparent: true,
+      opacity: 0.2,
+      depthWrite: false,
+    });
+    const rim = new Mesh(new RingGeometry(radius * 0.94, radius * 0.955, 96), rimMaterial);
+    rim.rotation.x = -Math.PI / 2;
+    rim.position.set(cx, -0.065, cz);
+    rim.renderOrder = -1;
+
+    this.theaterPlate = plate;
+    this.theaterPlateMaterial = plateMaterial;
+    this.theaterRimMaterial = rimMaterial;
+    this.theaterBaseColor = base;
+    this.scene.add(plate, rim);
+  }
+
+  /** Retint the tactical envelope with the same day/dusk/night grade as the board. */
+  private updateTheaterBackdrop(cfg: TimeOfDayLighting): void {
+    if (!this.theaterBaseColor || !this.theaterPlateMaterial || !this.theaterRimMaterial) return;
+    const illumination = cfg.practical > 0 ? 0.72 : 1;
+    this.theaterPlateMaterial.color.copy(this.theaterBaseColor).multiplyScalar(illumination);
+    this.theaterPlateMaterial.opacity = cfg.practical > 0 ? 0.38 : 0.3;
+    this.theaterRimMaterial.color.copy(this.theaterBaseColor).lerp(SCRATCH_COLOR.setHex(COLORS.selectRing), 0.48);
+    this.theaterRimMaterial.opacity = cfg.practical > 0 ? 0.28 : 0.2;
+  }
+
   private buildGrid(state: BattleState): void {
     const { grid } = state;
     this.grid = grid;
@@ -1147,6 +1221,7 @@ export class Renderer {
     plane.receiveShadow = true;
     this.groundPlane = plane;
     this.scene.add(plane);
+    this.buildTheaterBackdrop(state);
 
     // Floor layer: ONE InstancedMesh of flat quads, one instance per tile keyed
     // by cellIndex. The shared white-based floor material (with detail normal +

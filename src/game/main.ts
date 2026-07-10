@@ -460,6 +460,7 @@ function buildGeoscapeCallbacks(campaign: CampaignState | null) {
       // ready interceptor; either way we refresh the geoscape rather than switching
       // screens (no more instant snap to a separate dogfight view).
       geoscape?.update(currentCampaign);
+      geoscape?.beginAutoPursuit();
     },
     onInterceptionAction: (action: InterceptionAction) => {
       // Applied only AFTER the geoscape's combat beat has played (precompute ->
@@ -491,8 +492,8 @@ function buildGeoscapeCallbacks(campaign: CampaignState | null) {
       // The final assault uses the same squad as a ground deployment. If a Skyranger
       // is mid-transit (or on station) delivering that squad to a contact, launching
       // the HQ assault would fight two places at once and recordMissionResult would
-      // silently drop the in-transit flight. Gate it at the model level.
-      if ((current.activeFlights ?? []).some((f) => f.purpose === "deployment")) return;
+      // silently drop the in-transit flight. A returning Skyranger is committed too.
+      if ((current.activeFlights ?? []).some((f) => f.kind === "transport")) return;
       const plan = launchFinalAssault(current);
       if (!plan) return;
       flushSave();
@@ -532,11 +533,9 @@ function buildGeoscapeCallbacks(campaign: CampaignState | null) {
       const contact = current.ufoContact;
       const contactStatus = contact?.status;
       if (!contact || (contactStatus !== "crashed" && contactStatus !== "landed")) return;
-      // Only one deployment flight at a time — the transport (and the squad aboard) is
-      // a single shared asset. Without this a player could launch a second squad to a
-      // different contact while the first is still airborne (the per-contact guard in
-      // launchDeploymentFlight only dedupes the SAME contact).
-      if ((current.activeFlights ?? []).some((f) => f.purpose === "deployment")) return;
+      // Only one Skyranger leg at a time — outbound, on-station, and returning are
+      // all the same physical transport.
+      if ((current.activeFlights ?? []).some((f) => f.kind === "transport")) return;
       // Guard the deployment here too (the geoscape CTA already hides itself for an
       // empty squad): without a deployable operative there is nothing to fly, and the
       // arrival DEPLOY click would enter a battle with no squad. Bail before launch.
@@ -561,8 +560,8 @@ function buildGeoscapeCallbacks(campaign: CampaignState | null) {
       // The ONLY path into the ground battle from a deployment. Fired by the player's
       // DEPLOY chip click on arrival — never automatically. Enter the battlescape via
       // the unchanged startTactical path (generateOperation derives the op from the
-      // live contact). The in-flight deployment flight is cleared once the mission
-      // resolves via recordMissionResult clearing the contact.
+      // live contact). Mission resolution reverses the Skyranger into a visible
+      // return leg before it clears the contact.
       const current = currentCampaign ?? campaign;
       if (!current || current.strategic.status !== "active") return;
       const contact = current.ufoContact;
@@ -678,7 +677,7 @@ async function mountPlaneCombat(campaign: CampaignState): Promise<void> {
         // leaving it on the debounce timer.
         flushSave();
         queueInterceptionOutcomeAlert(outcome);
-        void showGeoscape();
+        void showGeoscape(true);
       },
       onSfx: (kind: "cannon" | "missile" | "bolt" | "explosion") => {
         sfx.interception(kind);
@@ -697,7 +696,7 @@ async function mountPlaneCombat(campaign: CampaignState): Promise<void> {
   }
 }
 
-async function showGeoscape(): Promise<void> {
+async function showGeoscape(autoReturn = false): Promise<void> {
   flushSave();
   // Seed the in-memory campaign once from storage; every geoscape callback then
   // advances from `currentCampaign` instead of re-reading localStorage (which
@@ -718,7 +717,10 @@ async function showGeoscape(): Promise<void> {
     return;
   }
   const view = await mountGeoscape(currentCampaign);
-  if (view) sfx.startAmbience("geoscape");
+  if (view) {
+    if (autoReturn) view.beginAutoReturn();
+    sfx.startAmbience("geoscape");
+  }
 }
 
 async function showBase(campaign: CampaignState): Promise<void> {
@@ -1685,15 +1687,25 @@ async function startTactical(campaign: CampaignState, operation: OperationPlan =
   function abortMissionToGeoscape(): void {
     if (state.status === "playing") completeMission("failure");
     disposeTactical();
-    void showGeoscape();
+    void showGeoscape(true);
   }
 
-  /** Leave the tactical view after mission completion and return to base. */
+  /** Leave the tactical view through the visible Skyranger return leg when one exists. */
   function returnToBase(): void {
     const updated = completedCampaign ?? currentCampaign ?? loadCampaign();
     disposeTactical();
-    if (updated) void showBase(updated);
-    else void showGeoscape();
+    if (
+      updated &&
+      (updated.activeFlights ?? []).some(
+        (flight) => flight.kind === "transport" && flight.purpose === "return",
+      )
+    ) {
+      void showGeoscape(true);
+    } else if (updated) {
+      void showBase(updated);
+    } else {
+      void showGeoscape();
+    }
   }
 
   /** Clear the campaign and present the new-game geoscape. */

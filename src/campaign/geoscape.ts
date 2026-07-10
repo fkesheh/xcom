@@ -137,6 +137,10 @@ export const ENGAGEMENT_RANGE_KM = 100;
 export const POINT_BLANK_KM = 5;
 /** km an engagement "close" (afterburner) beat cuts, when not outrun. */
 export const CLOSE_STEP_KM = 18;
+/** Range opened by one defensive break in the dogfight. */
+export const EVADE_STEP_KM = 14;
+/** Incoming damage multiplier while countermeasures / defensive flying are active. */
+const DEFENSIVE_DAMAGE_MULT = 0.38;
 /** Pursuit rangeKm past which an outrun UFO breaks contact (stern-chase escape). */
 export const STERN_ESCAPE_KM = 140;
 /** Fixed great-circle deg -> km conversion. */
@@ -353,7 +357,10 @@ export function greatCircleDestination(
  * council region where panic is attributed); only the displayed position drifts.
  */
 function moveTrackedContact(contact: UfoContact, hours: number): UfoContact {
-  if (contact.status !== "tracked") return contact;
+  // An interception does not freeze the target in space. While an interceptor is
+  // chasing, the UFO keeps following the same strategic heading; only a landed or
+  // crashed contact is stationary.
+  if (contact.status !== "tracked" && contact.status !== "engaging") return contact;
   const heading = contact.heading;
   // A heading marks a flying (crashSite) contact; ground assaults hold position and
   // carry none. Speed comes from the live ufoType profile (contactSpeedDegPerHour), so
@@ -582,7 +589,12 @@ function applyInterceptionOutcome(
   const totalDamage = Math.max(0, Math.min(100, Math.floor(finalInterceptorDamage)));
   // Route the damage onto the engaging craft (and keep the legacy interceptor field in sync).
   const chosen = chooseInterceptor(campaign);
-  const afterCraft = chosen ? damageCraft(campaign, chosen.id, totalDamage) : campaign;
+  const afterDamage = chosen ? damageCraft(campaign, chosen.id, totalDamage) : campaign;
+  // A sortie never vanishes at the moment combat resolves. Convert the patrol
+  // marker into a real reverse leg before clearing the encounter, so the globe
+  // can show the fighter flying home from the contact rather than teleporting it
+  // back into the hangar.
+  const afterCraft = returnInterceptionFlight(afterDamage, contact.id);
   const kind = outcome.kind;
 
   // A KILL leaving nothing to recover: the small hull was vaporized by heavy ordnance.
@@ -699,6 +711,7 @@ export function interceptUfo(campaign: CampaignState): CampaignState {
 export type InterceptionAction =
   | "keepChasing"
   | "close"
+  | "evade"
   | "attack"
   | "disengage"
   | `fire:${string}`;
@@ -841,28 +854,48 @@ export function startInterceptionEncounter(campaign: CampaignState): CampaignSta
   if (!contact || contact.status !== "tracked") return campaign;
   if (contactMissionType(contact) !== "crashSite") return campaign;
   if (!isInterceptorReady(campaign)) return campaign;
+  const interceptor = chooseInterceptor(campaign);
+  // A ready craft can still be unavailable because it is already on an RTB leg.
+  // Do not create a ghost encounter with a default-stat fighter in that case.
+  if (!interceptor) return campaign;
+  const existingFlight = (campaign.activeFlights ?? []).find(
+    (flight) =>
+      flight.craftId === interceptor.id &&
+      isPatrolFlight(flight) &&
+      flight.id.endsWith(`:${contact.id}`),
+  );
+  // The campaign state, not the renderer, owns the outbound aircraft. This is
+  // the source of truth for a moving pursuit and gives the outcome resolver a
+  // concrete position from which to generate the return leg.
+  const launched = existingFlight
+    ? campaign
+    : {
+        ...campaign,
+        activeFlights: [...(campaign.activeFlights ?? []), makePatrolFlight(interceptor, campaign, contact)],
+      };
   const ufoHpMax = encounterUfoHpMax(contact);
-  const interceptorHp = encounterInterceptorHp(campaign);
-  const rawRangeKm = Math.max(POINT_BLANK_KM, interceptionRangeKm(campaign));
+  const interceptorHp = encounterInterceptorHp(launched);
+  const rawRangeKm = Math.max(POINT_BLANK_KM, interceptionRangeKm(launched));
   const phase: InterceptionEncounter["phase"] = rawRangeKm <= ENGAGEMENT_RANGE_KM ? "engagement" : "pursuit";
   const encounter: InterceptionEncounter = {
     contactId: contact.id,
     phase,
     rangeKm: phase === "engagement" ? Math.min(rawRangeKm, ENGAGEMENT_RANGE_KM) : rawRangeKm,
-    closingSpeedKmH: closingSpeedKmHFor(campaign, contact),
+    closingSpeedKmH: closingSpeedKmHFor(launched, contact),
     ufoHp: ufoHpMax,
     ufoHpMax,
     interceptorHp,
-    interceptorHpMax: engagingHullPoints(campaign),
-    ammo: ammoFor(engagingLoadout(campaign)),
+    interceptorHpMax: engagingHullPoints(launched),
+    ammo: ammoFor(engagingLoadout(launched)),
     lockBeatsLeft: 0,
+    evasionBeatsLeft: 0,
     overkillMargin: 0,
     roundsElapsed: 0,
     ufoAgility: UFO_AGILITY[ufoTypeOf(contact)],
     log: ["Interception engaged"],
   };
   return {
-    ...campaign,
+    ...launched,
     ufoContact: { ...contact, status: "engaging" },
     interception: encounter,
   };
@@ -988,6 +1021,25 @@ function executeEngagementBeat(
   const canFire =
     !!weapon && weapon.rangeKm >= encounter.rangeKm && (encounter.ammo[weapon.id] ?? 0) > 0;
 
+  if (action === "evade") {
+    const rangeKm = Math.min(ENGAGEMENT_RANGE_KM, encounter.rangeKm + EVADE_STEP_KM);
+    return {
+      ...campaign,
+      interception: {
+        ...encounter,
+        rangeKm,
+        evasionBeatsLeft: 2,
+        lockingWeaponId: undefined,
+        lockBeatsLeft: 0,
+        roundsElapsed: round + 1,
+        log: [
+          ...encounter.log,
+          `Defensive break — range ${Math.round(rangeKm)} km; countermeasures primed for 2 beats.`,
+        ],
+      },
+    };
+  }
+
   // A plain "close", or an auto "attack" with nothing in range: afterburner nudge (free).
   // An explicit out-of-range/empty fire is a no-op (the button is disabled in the view).
   if (action === "close" || action === "keepChasing" || (action === "attack" && !canFire)) {
@@ -1017,6 +1069,7 @@ function executeEngagementBeat(
           ...encounter,
           lockingWeaponId: w.id,
           lockBeatsLeft: nextLeft,
+          evasionBeatsLeft: Math.max(0, (encounter.evasionBeatsLeft ?? 0) - 1),
           roundsElapsed: round + 1,
           log: [...encounter.log, `Acquiring lock on ${contact.id} — ${nextLeft} beat${nextLeft === 1 ? "" : "s"} to launch.`],
         },
@@ -1032,15 +1085,21 @@ function executeEngagementBeat(
 
   // UFO return fire only when the interceptor is inside its envelope.
   const envelope = returnEnvelopeKm(contact.strength);
-  const ufoDmg = encounter.rangeKm <= envelope ? ufoReturnFireDamageKm(encounter.rangeKm, contact.strength, mult, roundSeed, envelope) : 0;
+  const defensive = (encounter.evasionBeatsLeft ?? 0) > 0;
+  const rawUfoDmg = encounter.rangeKm <= envelope
+    ? ufoReturnFireDamageKm(encounter.rangeKm, contact.strength, mult, roundSeed, envelope)
+    : 0;
+  const ufoDmg = rawUfoDmg > 0
+    ? Math.max(1, Math.round(rawUfoDmg * (defensive ? DEFENSIVE_DAMAGE_MULT : 1)))
+    : 0;
   const interceptorHp = Math.max(0, encounter.interceptorHp - ufoDmg);
   const hull = encounter.interceptorHpMax;
   const afterFuel = burnEngagingFuel(campaign);
   const log = [
     ...encounter.log,
     shot.hit
-      ? `${w.name} hits ${contact.id} for ${Math.round(shot.damage)}${ufoDmg > 0 ? `; ${contact.id} returns ${ufoDmg}` : ""}.`
-      : `${contact.id} jinks — ${w.name} misses${ufoDmg > 0 ? `; ${contact.id} returns ${ufoDmg}` : ""}.`,
+      ? `${w.name} hits ${contact.id} for ${Math.round(shot.damage)}${ufoDmg > 0 ? `; ${contact.id} returns ${ufoDmg}${defensive ? " through countermeasures" : ""}` : ""}.`
+      : `${contact.id} jinks — ${w.name} misses${ufoDmg > 0 ? `; ${contact.id} returns ${ufoDmg}${defensive ? " through countermeasures" : ""}` : ""}.`,
   ];
 
   // Terminal: UFO destroyed.
@@ -1070,6 +1129,7 @@ function executeEngagementBeat(
       ammo,
       lockingWeaponId: undefined,
       lockBeatsLeft: 0,
+      evasionBeatsLeft: Math.max(0, (encounter.evasionBeatsLeft ?? 0) - 1),
       roundsElapsed: round + 1,
       log,
     },
@@ -1094,19 +1154,48 @@ function closeEngagementGap(
       interception: {
         ...encounter,
         rangeKm,
+        evasionBeatsLeft: Math.max(0, (encounter.evasionBeatsLeft ?? 0) - 1),
         roundsElapsed: round + 1,
         log: [...encounter.log, `${contact.id} pulls away — range opens to ${Math.round(rangeKm)} km.`],
       },
     };
   }
   const rangeKm = Math.max(POINT_BLANK_KM, encounter.rangeKm - CLOSE_STEP_KM);
+  const envelope = returnEnvelopeKm(contact.strength);
+  const defensive = (encounter.evasionBeatsLeft ?? 0) > 0;
+  const roundSeed = encounterRoundSeed(campaign, contact, round);
+  const mult = difficultyConfig(campaign).interceptionDamageMult;
+  const rawUfoDmg = rangeKm <= envelope
+    ? ufoReturnFireDamageKm(rangeKm, contact.strength, mult, roundSeed, envelope)
+    : 0;
+  const ufoDmg = rawUfoDmg > 0
+    ? Math.max(1, Math.round(rawUfoDmg * (defensive ? DEFENSIVE_DAMAGE_MULT : 1)))
+    : 0;
+  const interceptorHp = Math.max(0, encounter.interceptorHp - ufoDmg);
+  if (interceptorHp <= 0) {
+    const beforeDmg = engagingDamage(campaign);
+    return applyInterceptionOutcome(
+      campaign,
+      contact,
+      { kind: "brokeOff", salvageQuality: 0 },
+      100,
+      Math.max(0, 100 - beforeDmg),
+    );
+  }
   return {
     ...campaign,
     interception: {
       ...encounter,
       rangeKm,
+      interceptorHp,
+      evasionBeatsLeft: Math.max(0, (encounter.evasionBeatsLeft ?? 0) - 1),
       roundsElapsed: round + 1,
-      log: [...encounter.log, `Closing to ${Math.round(rangeKm)} km.`],
+      log: [
+        ...encounter.log,
+        ufoDmg > 0
+          ? `Afterburner close to ${Math.round(rangeKm)} km — ${contact.id} snap-fires for ${ufoDmg}${defensive ? " through countermeasures" : ""}.`
+          : `Afterburner close to ${Math.round(rangeKm)} km.`,
+      ],
     },
   };
 }
@@ -1746,6 +1835,7 @@ export function makePatrolFlight(craft: Craft, campaign: CampaignState, contact:
     // craft still overtakes and shadows a slower one.
     speedDegPerHour: craftSpeedDegPerHour(craft),
     startedAtHour: campaign.clock.elapsedHours,
+    purpose: "patrol",
   };
 }
 
@@ -1762,7 +1852,20 @@ function makeReturnFlight(patrol: ActiveFlight, campaign: CampaignState): Active
     progress: 0,
     speedDegPerHour: patrol.speedDegPerHour,
     startedAtHour: campaign.clock.elapsedHours,
+    purpose: "return",
   };
+}
+
+/** Convert the interceptor pursuing `contactId` into a reverse leg at its live position. */
+function returnInterceptionFlight(campaign: CampaignState, contactId: string): CampaignState {
+  const flights = campaign.activeFlights ?? [];
+  let changed = false;
+  const returned = flights.map((flight) => {
+    if (!isPatrolFlight(flight) || !flight.id.endsWith(`:${contactId}`)) return flight;
+    changed = true;
+    return makeReturnFlight(flight, campaign);
+  });
+  return changed ? { ...campaign, activeFlights: returned } : campaign;
 }
 
 /** A patrol only has a live target while its UFO is still tracked (or engaging). */
@@ -1882,16 +1985,19 @@ function manageActiveFlights(
   dt: number,
 ): { flights: ActiveFlight[]; fleet: Craft[] } {
   const flights = campaign.activeFlights ?? [];
-  const tracked = contact?.status === "tracked";
+  // A launched interception remains a live chase after the contact switches to
+  // `engaging`; it must keep homing on the moving UFO instead of freezing its
+  // destination at the position where the commander clicked Intercept.
+  const chasing = contact?.status === "tracked" || contact?.status === "engaging";
   const baseFleet = campaign.fleet ?? [];
-  if (flights.length === 0 && !tracked) {
+  if (flights.length === 0 && !chasing) {
     return { flights: [], fleet: refuelAtBase(baseFleet, [], dt) };
   }
 
   // 1. Re-aim existing patrols at the tracked UFO's latest position (homing).
   //    (No auto-scramble — craft stay in hangar until the player hits Intercept.)
   const withSpawn = flights.map((flight) =>
-    isPatrolFlight(flight) && tracked ? { ...flight, toLat: contact!.lat, toLon: contact!.lon } : flight,
+    isPatrolFlight(flight) && chasing ? { ...flight, toLat: contact!.lat, toLon: contact!.lon } : flight,
   );
 
   // 2. Advance every flight along its route by dt and burn fuel from each engaging
@@ -1908,7 +2014,7 @@ function manageActiveFlights(
 
   // 3. Patrols that have caught a still-tracked UFO shadow it (clamp below arrival).
   const shadowed = advanced.map((flight) =>
-    isPatrolFlight(flight) && tracked && flight.progress >= PATROL_SHADOW_PROGRESS
+    isPatrolFlight(flight) && chasing && flight.progress >= PATROL_SHADOW_PROGRESS
       ? { ...flight, progress: PATROL_SHADOW_PROGRESS }
       : flight,
   );
@@ -1925,28 +2031,81 @@ function manageActiveFlights(
   });
   // Patrol/return legs that reach their end (progress 1) are retired. A NON-BLOCKING
   // deployment run is the exception: on arrival it stays on the globe (progress clamped
-  // to 1 by advanceFlightProgress) so the geoscape can detect the arrival, fire the
-  // toast, and dock the "DEPLOY — begin assault" chip. It is retired only when the
-  // mission it delivered resolves (recordMissionResult -> dropDeploymentFlights) OR —
-  // crucially — when the contact it targets vanishes: a UFO/crash site can expire while
-  // the transport is still in transit or loitering on-station. If we kept such a flight,
-  // the transport would be stranded forever, the DEPLOY chip would become a permanent
-  // dead button, and geoscape's `flightInProgress` launch-suppression would block EVERY
-  // future ground mission — a save-persisted softlock making the campaign unwinnable.
-  // So a deployment flight survives only while its deployContactId still matches the live
-  // contact; a stale (or version-skewed, id-less) deployment flight is dropped here.
+  // to 1 by advanceFlightProgress) so the geoscape can offer DEPLOY. If its target
+  // disappears before an assault, turn the Skyranger home from its live position —
+  // dropping the marker would be another visible teleport and would still leave the
+  // transport logically unavailable.
   const liveContactId = contact?.id;
-  const finalFlights = [...kept, ...converted].filter((flight) => {
+  const finalFlights = [...kept, ...converted].flatMap((flight) => {
     if (flight.purpose === "deployment") {
-      return flight.deployContactId != null && flight.deployContactId === liveContactId;
+      return flight.deployContactId != null && flight.deployContactId === liveContactId
+        ? [flight]
+        : [makeReturnFlight(flight, campaign)];
     }
-    return flight.progress < 1;
+    return flight.progress < 1 ? [flight] : [];
   });
 
   // 5. Refuel crafts sitting in the hangar (no active flight) for the elapsed dt.
   const finalFleet = refuelAtBase(burnedFleet, finalFlights, dt);
 
   return { flights: finalFlights, fleet: finalFleet };
+}
+
+/**
+ * Advance the active globe pursuit from elapsed strategic time. The old flow only
+ * changed range when the player pressed "Keep Chasing", leaving a cinematic craft
+ * moving while the actual clock was paused. Here range, UFO motion, and the patrol
+ * marker all advance from the same `dt`.
+ */
+function advancePursuitWithClock(campaign: CampaignState, dt: number): CampaignState {
+  const encounter = campaign.interception;
+  const contact = campaign.ufoContact;
+  if (!encounter || encounter.phase !== "pursuit" || !contact || contact.status !== "engaging" || dt <= 0) {
+    return campaign;
+  }
+
+  const patrol = (campaign.activeFlights ?? []).find(
+    (flight) => isPatrolFlight(flight) && flight.id.endsWith(`:${contact.id}`),
+  );
+  // A fuel-constrained patrol may have turned around in manageActiveFlights this
+  // tick. Resolve the chase immediately instead of letting an absent craft keep
+  // closing an invisible range.
+  if (!patrol) return resolveEscape(campaign, contact, encounter);
+
+  const rangeKm = encounter.rangeKm - encounter.closingSpeedKmH * dt;
+  if (encounter.closingSpeedKmH <= 0 && rangeKm >= STERN_ESCAPE_KM) {
+    return resolveEscape(campaign, contact, encounter);
+  }
+
+  const engaged = rangeKm <= ENGAGEMENT_RANGE_KM;
+  const nextRange = engaged ? ENGAGEMENT_RANGE_KM : Math.max(POINT_BLANK_KM, rangeKm);
+  const routeKm = greatCircleDistanceDeg(
+    patrol.fromLat,
+    patrol.fromLon,
+    patrol.toLat,
+    patrol.toLon,
+  ) * DEG_TO_KM;
+  // Position the craft from the same true range used by the encounter. This keeps a
+  // fast interceptor from visually overtaking a moving UFO before the model has
+  // reached the 100km dogfight handoff.
+  const progress = routeKm > 1e-6
+    ? Math.max(0, Math.min(PATROL_SHADOW_PROGRESS, 1 - nextRange / routeKm))
+    : 0;
+  const flights = (campaign.activeFlights ?? []).map((flight) =>
+    flight.id === patrol.id ? { ...flight, progress } : flight,
+  );
+  return {
+    ...campaign,
+    activeFlights: flights,
+    interception: {
+      ...encounter,
+      phase: engaged ? "engagement" : "pursuit",
+      rangeKm: nextRange,
+      log: engaged
+        ? [...encounter.log, `Closed to engagement range (${ENGAGEMENT_RANGE_KM} km).`]
+        : encounter.log,
+    },
+  };
 }
 
 export function advanceGeoscape(
@@ -1966,8 +2125,8 @@ export function advanceGeoscape(
   clock = nextCampaign.clock;
   strategic = nextCampaign.strategic;
   contact = nextCampaign.ufoContact;
-  // Tracked UFOs fly across the globe as time flows (drifting even with fractional dt).
-  if (contact && contact.status === "tracked") {
+  // Airborne UFOs keep flying during both radar tracking and an active pursuit.
+  if (contact && (contact.status === "tracked" || contact.status === "engaging")) {
     contact = moveTrackedContact(contact, dt);
   }
 
@@ -1994,13 +2153,17 @@ export function advanceGeoscape(
   }
 
   const { flights: activeFlights, fleet: advancedFleet } = manageActiveFlights(nextCampaign, contact, dt);
-  const composed = repairInterceptor(completeFinishedConstruction(completeFinishedManufacturing(recoverWoundedSoldiers(completeFinishedResearch({
+  const withFlights: CampaignState = {
     ...nextCampaign,
     clock,
     strategic,
     ufoContact: contact,
     activeFlights,
     fleet: advancedFleet,
+  };
+  const pursuitAdvanced = advancePursuitWithClock(withFlights, dt);
+  const composed = repairInterceptor(completeFinishedConstruction(completeFinishedManufacturing(recoverWoundedSoldiers(completeFinishedResearch({
+    ...pursuitAdvanced,
   })))));
   return restockMarket(completeFinishedBaseConstruction(composed), Math.max(0, Math.floor(hours)));
 }

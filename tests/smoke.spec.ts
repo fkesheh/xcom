@@ -21,6 +21,7 @@ import type {
   CampaignState,
   DifficultyLevel,
   InterceptionEncounter,
+  UfoContact,
 } from "../src/campaign/types";
 
 const SHOTS_DIR = path.resolve(process.cwd(), "tests", "smoke-shots");
@@ -203,6 +204,9 @@ test.describe("Blacksite boot smoke", () => {
     await enterRoom(page, "command");
 
     await expect(page.locator("#plane-combat")).toBeVisible();
+    await page.getByRole("button", { name: /evasive break/i }).click();
+    await expect(page.locator(".pc-range-num")).toContainText("54");
+    await expect(page.getByRole("button", { name: /countermeasures · 2 beats/i })).toBeVisible();
     await page.screenshot({ path: path.join(SHOTS_DIR, "03-interception.png") });
   });
 
@@ -387,5 +391,60 @@ test.describe("Blacksite boot smoke", () => {
     await expect(page.locator("#geoscape .geo-speed-btn[data-speed='1']")).toBeVisible();
     await expect(page.locator("#geoscape .geo-speed-btn[data-speed='5']")).toBeVisible();
     await expect(page.locator("#geoscape .geo-speed-btn[data-speed='30']")).toBeVisible();
+  });
+
+  test("G) intercept pursuit auto-flows, has no chase popup, and truly freezes on pause", async ({ page }) => {
+    const fresh = createCampaign(BASE, 91, "veteran");
+    const contact: UfoContact = {
+      id: "ufo-auto-pursuit",
+      status: "tracked",
+      missionType: "crashSite",
+      ufoType: "scout",
+      lat: 48.2,
+      lon: 28,
+      region: "Europe",
+      detectedAtHour: 0,
+      expiresAtHour: 100,
+      missionSeed: 91,
+      strength: 1,
+      heading: 90,
+      speed: 28.2,
+    };
+    const campaign: CampaignState = { ...fresh, ufoContact: contact };
+    await page.addInitScript((state: CampaignState) => {
+      window.localStorage.setItem("blacksite.campaign.v1", JSON.stringify(state));
+    }, campaign);
+    await page.goto("/");
+    await expect(page.locator("#base-view")).toBeVisible();
+    await enterRoom(page, "command");
+    await expect(page.locator("#geoscape")).toBeVisible();
+
+    await page.getByRole("button", { name: /^intercept$/i }).click();
+    await expect(page.locator("#geoscape .geo-intercept")).toHaveCount(0);
+    await expect(page.locator('#geoscape .geo-speed-btn[data-speed="5"]')).toHaveAttribute("aria-pressed", "true");
+
+    const marker = async () => page.evaluate(() => {
+      const probe = (window as unknown as {
+        __geoMarkers?: () => { flights: Array<{ id: string; x: number; y: number }>; ufo: { x: number; y: number } | null };
+      }).__geoMarkers?.();
+      return probe;
+    });
+    await expect.poll(async () => (await marker())?.flights.length ?? 0).toBeGreaterThan(0);
+    const before = await marker();
+    await page.waitForTimeout(180);
+    const moving = await marker();
+    expect(moving?.flights[0]?.x).not.toBe(before?.flights[0]?.x);
+
+    await page.locator('#geoscape .geo-speed-btn[data-speed="0"]').click();
+    const paused = await marker();
+    await page.waitForTimeout(500);
+    const still = await marker();
+    expect(still?.flights[0]?.x).toBeCloseTo(paused?.flights[0]?.x ?? 0, 3);
+    expect(still?.ufo?.x).toBeCloseTo(paused?.ufo?.x ?? 0, 3);
+
+    // Resume without touching a chase dialog; the model itself carries the fighter
+    // through the 100km threshold and opens the dogfight.
+    await page.locator('#geoscape .geo-speed-btn[data-speed="5"]').click();
+    await expect(page.locator("#plane-combat")).toBeVisible({ timeout: 12_000 });
   });
 });

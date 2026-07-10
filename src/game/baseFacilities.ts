@@ -82,11 +82,8 @@ interface AccentSet {
 }
 
 function makeAccent(role: FacilityRole): AccentSet {
-  // Art-upgrade: stronger emissive accents so each facility's signature glow
-  // reads at gameplay distance (glow = panels/strips, beacon = bright points).
-  // Tuned just above the original (1.55/3.0) but below the ACES bleach point so
-  // the signature COLOR survives tone mapping instead of washing to white.
-  return { glow: accentMaterial(role, 1.8), beacon: accentMaterial(role, 3.2) };
+  // Keep the role colour legible without clipping small machinery to white.
+  return { glow: accentMaterial(role, 0.9), beacon: accentMaterial(role, 1.55) };
 }
 
 /** One shared accent pair per role. */
@@ -375,7 +372,7 @@ function buildReactor(group: Group): void {
   add(group, GEO.core, MAT.steel, [0, 0.48, 0], [0.72, 0.96, 0.72]);
   // Large glowing inner core — pulses. Dedicated material (not the shared
   // accent) so only the core animates; tagged for the baseView frame loop.
-  const coreGlow = accentMaterial("reactor", 2.1);
+  const coreGlow = accentMaterial("reactor", 1.2);
   const core = add(group, GEO.core, coreGlow, [0, 0.5, 0], [0.52, 0.86, 0.52]);
   core.userData.reactorPulse = true;
   // Vented cap.

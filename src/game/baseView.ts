@@ -186,10 +186,32 @@ const BASE_VIEW_YAW = -0.28;
 
 /** Consumable item ids rendered in the barracks backpack, in display order. */
 const ITEM_IDS: readonly string[] = Object.keys(ITEMS);
-/** Per-item glyph shown beside the label (label always present — never color alone). */
-const ITEM_ICON: Record<string, string> = { grenade: "◆", medkit: "✚", stunRod: "⚡" };
+/** Generated equipment art. Labels remain the accessible source of truth. */
+const ITEM_ART: Readonly<Record<string, string>> = {
+  grenade: "assets/items/grenade.png",
+  medkit: "assets/items/medkit.png",
+  smoke: "assets/items/smoke.png",
+  scanner: "assets/items/scanner.png",
+  proxMine: "assets/items/prox-mine.png",
+  stunRod: "assets/items/stun-rod.png",
+};
+/** Six consistent generated roster portraits; later recruits cycle deterministically. */
+const PORTRAIT_FILES = ["vega", "rook", "mason", "pike", "cole", "reyes"] as const;
 /** Max copies of a single item type one soldier may carry. */
 const MAX_ITEM_CARRY = 3;
+
+function publicAsset(path: string): string {
+  return new URL(path, document.baseURI).href;
+}
+
+function soldierPortrait(soldier: CampaignSoldier): string {
+  const named = soldier.name.trim().toLowerCase();
+  const direct = PORTRAIT_FILES.find((file) => file === named);
+  if (direct) return publicAsset(`assets/portraits/${direct}.png`);
+  const suffix = Number.parseInt(soldier.id.match(/(\d+)$/)?.[1] ?? "1", 10);
+  const index = Number.isFinite(suffix) ? Math.max(0, suffix - 1) % PORTRAIT_FILES.length : 0;
+  return publicAsset(`assets/portraits/${PORTRAIT_FILES[index]}.png`);
+}
 
 /** Rank insignia glyph shown beside a soldier's name in the barracks dossier —
  *  a quick visual ladder (rank word is always shown too, so it's never color/
@@ -776,37 +798,46 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
 #base-view .deploy-toggle input { width: 15px; height: 15px; accent-color: var(--ui-cyan); }
 #base-view .deploy-toggle:has(input:disabled) { color: var(--ui-dim); opacity: .65; }
 #base-view .soldier-items {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
-  align-items: center;
 }
 #base-view .backpack-capacity {
-  flex-basis: 100%;
   color: var(--ui-muted);
   font: 700 var(--ui-text-xs)/1 ui-monospace, monospace;
   letter-spacing: .03em;
 }
 #base-view .backpack-capacity.full { color: #f87171; }
 #base-view .item-control {
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 4px;
-  padding: 3px 6px;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 6px;
   border: 1px solid rgba(103,232,249,.2);
-  border-radius: 6px;
-  background: rgba(1,9,15,.55);
+  border-radius: 8px;
+  background: linear-gradient(90deg, rgba(6,25,37,.84), rgba(1,9,15,.55));
   color: var(--ui-text);
   font: 600 var(--ui-text-xs)/1 ui-monospace, monospace;
-  white-space: nowrap;
 }
-#base-view .item-icon { color: var(--ui-cyan); font-size: var(--ui-text-xs); }
-#base-view .item-label { color: var(--ui-text); }
+#base-view .item-art {
+  width: 38px;
+  height: 38px;
+  border: 1px solid rgba(103,232,249,.24);
+  border-radius: 7px;
+  object-fit: cover;
+  background: #030914;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.025), 0 0 12px rgba(34,211,238,.08);
+}
+#base-view .item-copy { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+#base-view .item-label { overflow: hidden; color: var(--ui-text); text-overflow: ellipsis; white-space: nowrap; }
 #base-view .item-held { color: #fde68a; font-weight: 700; }
-#base-view .item-stock { color: var(--ui-muted); }
+#base-view .item-stock { overflow: hidden; color: var(--ui-muted); text-overflow: ellipsis; white-space: nowrap; }
+#base-view .item-stepper { display: inline-flex; gap: 4px; }
 #base-view .item-btn {
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 26px;
   padding: 0;
   border: 1px solid rgba(103,232,249,.3);
   border-radius: 5px;
@@ -1407,11 +1438,22 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
 #base-view .dossier.kia { border-color: rgba(148,163,184,.3); opacity: .82; }
 #base-view .dossier.wounded { border-color: rgba(251,191,36,.4); }
 #base-view .dossier-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
 }
+#base-view .dossier-portrait {
+  grid-row: 1;
+  width: 74px;
+  height: 74px;
+  border: 1px solid rgba(103,232,249,.42);
+  border-radius: 10px;
+  object-fit: cover;
+  background: #020811;
+  box-shadow: 0 0 18px rgba(34,211,238,.13), inset 0 0 0 1px rgba(255,255,255,.04);
+}
+#base-view .dossier.kia .dossier-portrait { filter: grayscale(1) brightness(.58); }
 #base-view .dossier-id { display: flex; align-items: center; gap: 10px; min-width: 0; }
 #base-view .dossier-insignia {
   flex: none;
@@ -2284,7 +2326,7 @@ export class BaseView {
     // wash. Tint pulled less toward neutral so warm key reads against cool fill.
     const key = new DirectionalLight(
       new Color(BASE_PALETTE.accent.reactor).lerp(new Color(1, 1, 1), 0.5),
-      4.2,
+      2.65,
     );
     key.position.set(5, 7.5, 6);
     key.target.position.set(0, 0, 0);
@@ -2857,7 +2899,11 @@ export class BaseView {
     // Accent-glow hit pad: carries userData.facilityId so the existing hover
     // tooltip + emissive highlight + click→open-room raycasting still works.
     // Its OWN accentMaterial instance so applyFacilityHighlight can boost it.
-    const padMat = accentMaterial(role, 0.22);
+    const padMat = accentMaterial(role, 0.03);
+    // Facility identity belongs in the glow/trim, not a flat neon floor. Darken
+    // the albedo toward concrete so machinery and personnel keep their silhouette.
+    padMat.color.lerp(new Color(BASE_PALETTE.concrete), 0.88);
+    padMat.roughness = 0.7;
     const pad = new Mesh(new BoxGeometry(width - 0.14, 0.04, depth - 0.14), padMat);
     pad.position.y = floorY + 0.03;
     pad.receiveShadow = true;
@@ -2907,7 +2953,7 @@ export class BaseView {
     group.add(model);
 
     // Soft per-bay fill — enough to tint the shell, not enough to bleach labels.
-    const baseIntensity = facility.kind === "hangar" ? 2.4 : 1.8;
+    const baseIntensity = facility.kind === "hangar" ? 1.05 : 0.78;
     const bayLight = new PointLight(accent, baseIntensity, 4.2, 2);
     bayLight.position.set(0, floorY + 0.55, 0);
     group.add(bayLight);
@@ -3763,6 +3809,12 @@ export class BaseView {
 
     // --- Header: identity + deploy toggle ---
     const head = el("div", "dossier-head");
+    const portrait = el("img", "dossier-portrait");
+    portrait.src = soldierPortrait(soldier);
+    portrait.alt = "";
+    portrait.setAttribute("aria-hidden", "true");
+    portrait.loading = "lazy";
+    portrait.decoding = "async";
     const idBlock = el("div", "dossier-id");
     const insignia = el("span", "dossier-insignia");
     insignia.textContent = RANK_INSIGNIA[soldier.rank] ?? "•";
@@ -3774,7 +3826,7 @@ export class BaseView {
     rankEl.textContent = soldier.rank;
     nameWrap.append(nameEl, rankEl);
     idBlock.append(insignia, nameWrap);
-    head.append(idBlock, this.renderSoldierStatus(campaign, soldier));
+    head.append(portrait, idBlock, this.renderSoldierStatus(campaign, soldier));
     node.appendChild(head);
 
     // --- Deploy toggle (own row, clearly tappable) ---
@@ -3786,7 +3838,7 @@ export class BaseView {
     // the Skyranger — editing (or emptying) it would strand the arrival DEPLOY chip on
     // a squad that no longer exists (a silent no-op in onBeginAssault). Lock the roster
     // for the duration of the flight.
-    const deploymentAirborne = (campaign.activeFlights ?? []).some((f) => f.purpose === "deployment");
+    const deploymentAirborne = (campaign.activeFlights ?? []).some((f) => f.kind === "transport");
     deployCheckbox.disabled =
       campaign.strategic.status !== "active" ||
       deploymentAirborne ||
@@ -3918,14 +3970,20 @@ export class BaseView {
       const stock = availableItemCount(campaign, itemId);
       const fitsBackpack = canAddToBackpack(carried, itemId);
       const group = el("div", "item-control");
-      const icon = el("span", "item-icon");
-      icon.textContent = ITEM_ICON[itemId] ?? "■";
+      const art = el("img", "item-art");
+      art.src = publicAsset(ITEM_ART[itemId] ?? "assets/items/scanner.png");
+      art.alt = "";
+      art.setAttribute("aria-hidden", "true");
+      art.loading = "lazy";
+      art.decoding = "async";
+      const copy = el("span", "item-copy");
       const label = el("span", "item-label");
       label.textContent = meta?.name ?? itemId;
       const heldEl = el("span", "item-held");
       heldEl.textContent = `×${held}`;
       const stockEl = el("span", "item-stock");
       stockEl.textContent = `${stock} in armory`;
+      copy.append(label, stockEl);
       const minusBtn = el("button", "item-btn");
       minusBtn.type = "button";
       minusBtn.textContent = "−";
@@ -3956,7 +4014,9 @@ export class BaseView {
         event.stopPropagation();
         this.opts.onAssignItem?.(soldier.id, itemId);
       });
-      group.append(icon, label, heldEl, stockEl, minusBtn, plusBtn);
+      const stepper = el("span", "item-stepper");
+      stepper.append(minusBtn, plusBtn);
+      group.append(art, copy, heldEl, stepper);
       wrap.appendChild(group);
     }
     return wrap;
@@ -4732,7 +4792,7 @@ export class BaseView {
 
     const key = new DirectionalLight(
       new Color(0xfff0e0).lerp(new Color(accentHex), 0.15),
-      2.4,
+      1.7,
     );
     key.position.set(2.8, 4.2, 3.5);
     key.target.position.set(0, 0.8, 0);
@@ -4751,12 +4811,12 @@ export class BaseView {
 
     const fill = new DirectionalLight(
       new Color(BASE_PALETTE.floorLine).lerp(new Color(1, 1, 1), 0.35),
-      0.85,
+      0.58,
     );
     fill.position.set(-3.2, 2.8, -1.5);
     lights.add(fill);
 
-    const accent = new PointLight(accentHex, 2.2, 8, 1.6);
+    const accent = new PointLight(accentHex, 1.05, 7, 1.8);
     accent.position.set(0, 2.4, 0.4);
     lights.add(accent);
 
@@ -4829,14 +4889,14 @@ export class BaseView {
       const mat = entry.mesh.material;
       if (mat instanceof MeshStandardMaterial) {
         mat.emissiveIntensity =
-          entry.facilityId === selected ? 1.1
-          : entry.facilityId === hovered ? 0.72
-          : 0.32;
+          entry.facilityId === selected ? 0.72
+          : entry.facilityId === hovered ? 0.42
+          : 0.08;
       }
     }
     for (const bay of this.bayLights) {
       const boosted = bay.facilityId === selected || bay.facilityId === hovered;
-      bay.light.intensity = boosted ? bay.base * 1.9 : bay.base;
+      bay.light.intensity = boosted ? bay.base * 1.55 : bay.base;
     }
   }
 
@@ -4860,7 +4920,9 @@ export class BaseView {
     // tab / first frame can't catapult actors; no per-frame allocation.
     const dt = this.prevTimeMs === 0 ? 16 : Math.min(50, now - this.prevTimeMs);
     this.prevTimeMs = now;
-    this.baseGroup.rotation.y = BASE_VIEW_YAW + (this.reducedMotion ? 0 : Math.sin(elapsed * 0.16) * 0.028);
+    // Keep the overview frame stable. Sub-pixel whole-base yaw was combining with
+    // dense procedural textures and thin emissive edges to produce temporal shimmer.
+    this.baseGroup.rotation.y = BASE_VIEW_YAW;
     // Camera direction is one of: an in-progress dive/back tween (priority),
     // a resting interior hero frame (when a diorama is mounted), or the hub
     // idle drift. All branches write position + currentLookAt in place — no
@@ -4873,25 +4935,10 @@ export class BaseView {
       this.currentLookAt.lerpVectors(this.camFromTarget, this.camToTarget, e);
       if (t01 >= 1) this.camAnimating = false;
     } else if (this.interiorRoot) {
-      // Subtle idle drift around the interior hero frame — reuses the resting
-      // position/target (allocation-free) so the diorama feels alive up close.
-      if (this.reducedMotion) {
-        this.camera.position.copy(this.interiorCamPos);
-      } else {
-        this.camera.position.x = this.interiorCamPos.x + Math.sin(elapsed * 0.18) * 0.05;
-        this.camera.position.y = this.interiorCamPos.y + Math.sin(elapsed * 0.13 + 0.7) * 0.03;
-        this.camera.position.z = this.interiorCamPos.z + Math.cos(elapsed * 0.15) * 0.05;
-      }
+      this.camera.position.copy(this.interiorCamPos);
       this.currentLookAt.copy(this.interiorCamTarget);
     } else {
-      // Hub idle drift — reuses camHome (no per-frame allocation).
-      if (this.reducedMotion) {
-        this.camera.position.copy(this.camHome);
-      } else {
-        this.camera.position.x = this.camHome.x + Math.sin(elapsed * 0.12) * 0.14;
-        this.camera.position.y = this.camHome.y + Math.sin(elapsed * 0.09 + 1.1) * 0.1;
-        this.camera.position.z = this.camHome.z + Math.cos(elapsed * 0.1) * 0.12;
-      }
+      this.camera.position.copy(this.camHome);
       this.currentLookAt.set(0, 0, 0);
     }
     this.camera.lookAt(this.currentLookAt);
@@ -4900,11 +4947,11 @@ export class BaseView {
       for (const item of this.pulseMaterials) item.material.opacity = item.opacity;
       for (const mat of this.reactorCores) mat.emissiveIntensity = 1.4;
     } else {
-      const pulse = 0.82 + Math.sin(elapsed * 3) * 0.18;
+      const pulse = 0.94 + Math.sin(elapsed * 2.2) * 0.06;
       for (const item of this.pulseMaterials) item.material.opacity = item.opacity * pulse;
       // Reactor cores visibly pulse — mutates the pre-collected materials (no
       // per-frame allocation/traversal).
-      const reactorPulse = 1.4 + Math.sin(elapsed * 2.2) * 0.7;
+      const reactorPulse = 1.25 + Math.sin(elapsed * 1.8) * 0.18;
       for (const mat of this.reactorCores) mat.emissiveIntensity = reactorPulse;
       this.updateRotators(elapsed);
     }

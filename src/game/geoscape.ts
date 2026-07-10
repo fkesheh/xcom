@@ -47,6 +47,7 @@ import type {
 import {
   canLaunchInterceptor,
   contactSpeedDegPerHour,
+  DEG_TO_KM,
   ENGAGEMENT_RANGE_KM,
   formatCampaignClock,
   GEOSCAPE_SCAN_HOURS,
@@ -108,7 +109,7 @@ interface GeoscapeOptions {
   onAdvanceTime: (hours: number) => void;
   onInterceptUfo: () => void;
   onResetCampaign: () => void;
-  /** Fires for each Keep Chasing / Disengage choice during an active pursuit. */
+  /** Legacy/manual pursuit action hook retained for saved encounters and harnesses. */
   onInterceptionAction?: (action: InterceptionAction) => void;
   /** Presentation-only SFX cue for the interceptor launching on a fresh pursuit. */
   onInterceptorSfx?: (kind: "launch") => void;
@@ -305,6 +306,9 @@ const SPEED_TICKS: Record<number, { hours: number; ms: number }> = {
   5: { hours: 5 / 60, ms: 400 }, // ~5 game-min/tick  ≈ 0.21 game-h/s (~12.5 game-min/s)
   30: { hours: 1.0, ms: 250 }, //  60 game-min/tick ≈ 4 game-h/s (a full day in ~6s)
 };
+
+/** A scramble or return should be visible, not an instant 30× skip. */
+const AUTO_FLIGHT_SPEED = 5;
 
 /** Auto-pause toast kind; pairs an icon with the color so the alert is never color-alone. */
 type EventKind = "info" | "won" | "lost" | "council";
@@ -2136,28 +2140,42 @@ export class GeoscapeView {
     this.interceptorMarker.add(nose, tail, finR, finL, ring);
   }
 
-  /** Very sparse, dim, deterministic starfield behind the globe (no grid). */
+  /** Layered, deterministic starfield behind the globe — richer depth, still quiet. */
   private makeStars(): Points {
     const positions: number[] = [];
-    for (let i = 0; i < 150; i++) {
+    const colors: number[] = [];
+    for (let i = 0; i < 420; i++) {
       const a = Math.sin(i * 12.9898) * 43758.5453;
       const b = Math.sin(i * 78.233) * 24634.6345;
       const c = Math.sin(i * 37.719) * 13579.1234;
-      const x = ((a - Math.floor(a)) * 2 - 1) * 18;
-      const y = ((b - Math.floor(b)) * 2 - 1) * 10;
-      const z = -7 - (c - Math.floor(c)) * 10;
+      const d = Math.sin(i * 19.913) * 9758.313;
+      const brightness = 0.22 + (d - Math.floor(d)) * 0.78;
+      const x = ((a - Math.floor(a)) * 2 - 1) * 20;
+      const y = ((b - Math.floor(b)) * 2 - 1) * 11;
+      const z = -7 - (c - Math.floor(c)) * 13;
       positions.push(x, y, z);
+      // Mostly cool stars with a sparse warm population; intensity carries the
+      // depth without introducing animated visual noise.
+      const warm = i % 11 === 0;
+      colors.push(
+        brightness * (warm ? 1 : 0.72),
+        brightness * (warm ? 0.76 : 0.88),
+        brightness * (warm ? 0.5 : 1),
+      );
     }
     const geometry = new BufferGeometry();
     geometry.setAttribute("position", new Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("color", new Float32BufferAttribute(colors, 3));
     return new Points(
       geometry,
       new PointsMaterial({
-        color: 0x9fb8cc,
-        size: 0.013,
+        color: 0xffffff,
+        size: 0.017,
         transparent: true,
-        opacity: 0.5,
+        opacity: 0.62,
         sizeAttenuation: true,
+        vertexColors: true,
+        depthWrite: false,
       }),
     );
   }
@@ -2375,6 +2393,8 @@ export class GeoscapeView {
     if (!this.hintEl) return;
     this.hintEl.textContent = this.buildMode
       ? "Click a site on the globe to build a new radar base (2000c, 48h)."
+      : this.isPursuing()
+        ? "Interceptor pursuing autonomously — dogfight begins at 100 km"
       : this.campaign
         ? "Time controls scan the globe / intercept UFOs / launch recovery from base"
         : "Drag to rotate / wheel to zoom / click Earth to designate base";
@@ -2390,6 +2410,33 @@ export class GeoscapeView {
   private isPursuing(): boolean {
     const c = this.campaign;
     return !!c?.interception && c.ufoContact?.status === "engaging" && c.interception.phase !== "engagement";
+  }
+
+  /** True once pursuit has reached the dogfight handoff and the globe must stop time. */
+  private isDogfightHandoff(): boolean {
+    return this.isEngaging() && this.campaign?.interception?.phase === "engagement";
+  }
+
+  /** True when an active pursuit is backed by the authoritative campaign flight marker. */
+  private hasPhysicalPursuit(): boolean {
+    const contactId = this.campaign?.ufoContact?.id;
+    if (!contactId || !this.isPursuing()) return false;
+    return (this.campaign?.activeFlights ?? []).some(
+      (flight) => flight.id.startsWith("patrol:") && flight.id.endsWith(`:${contactId}`),
+    );
+  }
+
+  /** Start a newly-scrambled fighter at a readable live speed instead of leaving it paused. */
+  beginAutoPursuit(): void {
+    if (!this.isPursuing()) return;
+    this.setTimeSpeed(AUTO_FLIGHT_SPEED);
+  }
+
+  /** Let a fresh RTB leg visibly leave the site after air combat or an assault. */
+  beginAutoReturn(): void {
+    const hasReturn = (this.campaign?.activeFlights ?? []).some((flight) => flight.purpose === "return");
+    if (!hasReturn) return;
+    this.setTimeSpeed(AUTO_FLIGHT_SPEED);
   }
 
   /**
@@ -2442,11 +2489,11 @@ export class GeoscapeView {
     lastEventSnapshot = snapshot;
   }
 
-  /** Force pause whenever an overlay is up or the campaign is no longer active. */
+  /** Force pause only for the dogfight handoff or a finished campaign. */
   private refreshForcedPause(): void {
-    // Deployment no longer freezes time — the Skyranger flies while the globe stays
-    // live. Only an active interception encounter or a finished campaign pauses.
-    if (this.isEngaging() && this.timeSpeed !== 0) this.setTimeSpeed(0);
+    // A pursuit is regular strategic time: both markers advance from campaign state.
+    // Freeze only at the 100km dogfight handoff, immediately before NAV swaps views.
+    if (this.isDogfightHandoff() && this.timeSpeed !== 0) this.setTimeSpeed(0);
     else if (this.campaign && this.campaign.strategic.status !== "active" && this.timeSpeed !== 0) {
       this.setTimeSpeed(0);
     }
@@ -2470,7 +2517,7 @@ export class GeoscapeView {
     const interactive =
       !!this.campaign &&
       this.campaign.strategic.status === "active" &&
-      !this.isEngaging();
+      !this.isDogfightHandoff();
     for (const btn of this.speedButtons) {
       const speed = Number(btn.dataset.speed);
       btn.setAttribute("aria-pressed", String(this.timeSpeed === speed));
@@ -2496,7 +2543,7 @@ export class GeoscapeView {
     const show =
       inTransit &&
       c.strategic.status === "active" &&
-      !this.isEngaging() &&
+      !this.isDogfightHandoff() &&
       this.timeSpeed !== 30;
     if (!show) {
       this.fastForwardChip?.remove();
@@ -2757,17 +2804,23 @@ export class GeoscapeView {
       onClick: () => this.openGeoModal("contact"),
     });
 
-    // Fleet chip — interceptor readiness.
+    // Fleet chip — surface the transport's live leg before generic interceptor
+    // readiness so an outbound/returning craft is never implied to be back home.
     const repairedAt = c.interceptor.repairedAtHour;
     const repairing = repairedAt !== undefined && repairedAt > c.clock.elapsedHours;
+    const transportFlight = (c.activeFlights ?? []).find((flight) => flight.kind === "transport");
     descs.push({
       key: "fleet",
       icon: "✦",
       label: "Fleet",
-      sub: repairing
+      sub: transportFlight?.purpose === "return"
+        ? "Skyranger returning to base"
+        : transportFlight
+          ? "Skyranger deployed"
+          : repairing
         ? `Interceptor repair · ${formatHours(repairedAt - c.clock.elapsedHours)}`
         : "Interceptor ready",
-      tone: repairing ? "warn" : "info",
+      tone: transportFlight ? "warn" : repairing ? "warn" : "info",
       onClick: () => this.openGeoModal("fleet"),
     });
 
@@ -3103,7 +3156,7 @@ export class GeoscapeView {
     // The HQ assault shares the squad with a ground deployment: suppress it while a
     // Skyranger is airborne/on-station so the player can't launch both (main.ts gates
     // this at the model level too, but a hidden button beats a no-op one).
-    const deployInFlight = (c.activeFlights ?? []).some((f) => f.purpose === "deployment");
+    const deployInFlight = (c.activeFlights ?? []).some((f) => f.kind === "transport");
     if (canLaunchFinalAssault(c) && !deployInFlight) {
       const assault = el("button", "primary ui-cta geo-assault-cta");
       assault.textContent = "ASSAULT ALIEN HQ";
@@ -3140,16 +3193,9 @@ export class GeoscapeView {
   }
 
   private refreshOverlay(): void {
-    if (this.isPursuing()) {
-      // Mount the pursuit HUD once per pursuit and just resync its numbers on every
-      // later refresh — no beat/reveal delay: keepChasing/disengage apply immediately.
-      if (this.interceptOverlayEl) {
-        this.syncInterceptionOverlay();
-        return;
-      }
-      this.overlaySlot.replaceChildren(this.buildInterceptionOverlay());
-      return;
-    }
+    // The former "Keep Chasing" modal gated every few seconds of pursuit behind a
+    // click and obscured the globe. Pursuit is now automatic strategic time, so the
+    // globe stays clear until the real 100km dogfight handoff.
     this.interceptOverlayEl = null;
     this.interceptButtons = [];
     this.overlaySlot.replaceChildren();
@@ -3278,6 +3324,17 @@ export class GeoscapeView {
     wingL.rotation.z = 0.4;
     const tail = new Mesh(new BoxGeometry(0.005, 0.024, 0.016), body);
     tail.position.set(0, -0.044, 0.009);
+    const engine = new Mesh(
+      new SphereGeometry(kind === "interceptor" ? 0.014 : 0.017, 10, 8),
+      new MeshBasicMaterial({
+        color: kind === "interceptor" ? 0xa5f3fc : 0xd9f99d,
+        transparent: true,
+        opacity: 0.9,
+        blending: AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    engine.position.y = -0.072;
     const ringColor = kind === "interceptor" ? 0x67e8f9 : 0xbbf7d0;
     const ring = new Mesh(
       new RingGeometry(0.055, 0.078, 18),
@@ -3290,7 +3347,7 @@ export class GeoscapeView {
       }),
     );
     ring.rotation.x = -Math.PI / 2;
-    group.add(fuselage, nose, wingR, wingL, tail, ring);
+    group.add(fuselage, nose, wingR, wingL, tail, engine, ring);
     return group;
   }
 
@@ -3335,7 +3392,10 @@ export class GeoscapeView {
         marker.visible = false;
         trail.visible = false;
         this.earthGroup.add(marker, trail);
-        entry = { marker, trail, points: [] };
+        // Seed the route at its departure point so a newly-launched craft reads as
+        // a mission immediately, rather than waiting for two clock refreshes before
+        // its contrail becomes visible.
+        entry = { marker, trail, points: [{ lat: flight.fromLat, lon: flight.fromLon }] };
         this.flightMarkers.set(flight.id, entry);
       }
       const fromN = latLonToVector(flight.fromLat, flight.fromLon, 1).normalize();
@@ -3356,7 +3416,7 @@ export class GeoscapeView {
           if (entry.points.length > FLIGHT_TRAIL_MAX) entry.points.shift();
         }
       }
-      this.refillFlightTrail(entry.trail, entry.points, flight.kind);
+      this.refillFlightTrail(entry.trail, entry.points, flight.kind, flight.purpose);
     }
     // Drop markers + trails for flights no longer active.
     for (const [id, entry] of this.flightMarkers) {
@@ -3379,14 +3439,16 @@ export class GeoscapeView {
    * smooths the clock/terminator. It is presentation-only: campaign state is never
    * written; the next tick's refresh() snaps the marker to the authoritative position
    * (which this exactly predicted, so the motion is continuous). Guarded by
-   * isTimeFlowing(), so a paused globe or an active interception stays put.
+   * isTimeFlowing(), so a paused globe always stays put.
    */
   private smoothMarkers(): void {
     const c = this.campaign;
     if (!c || !this.isTimeFlowing()) return;
     const extraHours = this.displayHours() - c.clock.elapsedHours;
     if (extraHours <= 0) return;
-    // Transports in transit + interceptor patrols: nudge each along its route arc.
+    // Transports and patrols: nudge each along its route arc. A live interception
+    // uses its closing-speed range model rather than raw craft speed so the marker
+    // reaches the same 100km handoff that the campaign state will reach next tick.
     for (const flight of c.activeFlights ?? []) {
       const entry = this.flightMarkers.get(flight.id);
       if (!entry || !entry.marker.visible) continue;
@@ -3396,20 +3458,35 @@ export class GeoscapeView {
       const toN = latLonToVector(flight.toLat, flight.toLon, 1).normalize();
       const arcDeg = fromN.angleTo(toN) * (180 / Math.PI);
       if (arcDeg < 1e-6) continue;
-      const disp = Math.min(1, flight.progress + (flight.speedDegPerHour * extraHours) / arcDeg);
+      const encounter = c.interception;
+      const pursuit =
+        this.isPursuing() &&
+        encounter !== undefined &&
+        c.ufoContact &&
+        flight.id.startsWith("patrol:") &&
+        flight.id.endsWith(`:${c.ufoContact.id}`);
+      const disp = pursuit && encounter
+        ? Math.max(
+            0,
+            Math.min(
+              0.99,
+              1 - Math.max(ENGAGEMENT_RANGE_KM, encounter.rangeKm - encounter.closingSpeedKmH * extraHours) /
+                (arcDeg * DEG_TO_KM),
+            ),
+          )
+        : Math.min(1, flight.progress + (flight.speedDegPerHour * extraHours) / arcDeg);
       slerpUnit(fromN, toN, disp, this.scratchA); // unit direction at the craft
       this.scratchB.copy(this.scratchA); // posUnit (surface normal)
       this.scratchA.multiplyScalar(EARTH_RADIUS + 0.14);
       entry.marker.position.copy(this.scratchA);
       this.orientMarker(entry.marker, this.scratchB, toN);
     }
-    // The tracked UFO flies too — drift its marker along heading × profile speed. Only
-    // a tracked (airborne) contact with a heading moves; crashed/landed hold position,
-    // and the interactive-engagement pursuit drift (applyPursuitDrift) owns it otherwise.
+    // Airborne UFOs fly during both radar tracking and an interception. Crashed/landed
+    // contacts hold position.
     const contact = c.ufoContact;
     if (
       contact &&
-      contact.status === "tracked" &&
+      (contact.status === "tracked" || contact.status === "engaging") &&
       contact.heading !== undefined &&
       this.ufoMarker.visible
     ) {
@@ -3430,6 +3507,7 @@ export class GeoscapeView {
     trail: Line,
     points: { lat: number; lon: number }[],
     kind: "interceptor" | "transport",
+    purpose: "patrol" | "deployment" | "return" | undefined,
   ): void {
     const count = points.length;
     const geo = trail.geometry;
@@ -3445,7 +3523,13 @@ export class GeoscapeView {
       pos[i * 3 + 2] = this.scratchA.z;
       const fade = count > 1 ? i / (count - 1) : 1;
       const intensity = 0.12 + 0.88 * fade;
-      if (kind === "interceptor") {
+      if (purpose === "return") {
+        // A cool homebound wake distinguishes RTB legs from their outbound mission
+        // route without relying on the small marker silhouette alone.
+        col[i * 3] = intensity * 0.42;
+        col[i * 3 + 1] = intensity * 0.72;
+        col[i * 3 + 2] = intensity;
+      } else if (kind === "interceptor") {
         col[i * 3] = intensity * 0.4;
         col[i * 3 + 1] = intensity * 0.92;
         col[i * 3 + 2] = intensity;
@@ -3540,6 +3624,17 @@ export class GeoscapeView {
   private refreshInterceptor(): void {
     const c = this.campaign;
     const engaging = this.isEngaging();
+    // New interceptions own a real ActiveFlight. Do not layer the old cosmetic
+    // fighter over it: one authoritative marker means Pause freezes both the game
+    // clock and the visible aircraft, and the outgoing path can become a real RTB
+    // path on resolution.
+    if (this.hasPhysicalPursuit()) {
+      this.wasEngaging = engaging;
+      this.interceptorMarker.visible = false;
+      this.trajectoryLine.visible = false;
+      this.interceptorRoute = null;
+      return;
+    }
     // A fresh engagement kicks off the launch flight (reset its clock); the frame
     // loop then flies the craft from base toward the UFO before range closing begins.
     const fresh = engaging && !this.wasEngaging;
@@ -3635,7 +3730,7 @@ export class GeoscapeView {
       speed <= 0 ||
       !this.campaign ||
       this.campaign.strategic.status !== "active" ||
-      this.isEngaging()
+      this.isDogfightHandoff()
     ) {
       return false;
     }
@@ -3906,7 +4001,7 @@ export class GeoscapeView {
       speed <= 0 ||
       !this.campaign ||
       this.campaign.strategic.status !== "active" ||
-      this.isEngaging()
+      this.isDogfightHandoff()
     ) {
       this.lastFlowMs = 0;
       this.timeAccumulatorMs = 0;
@@ -3932,7 +4027,7 @@ export class GeoscapeView {
    * hidden outright for prefers-reduced-motion, and outside the chase.
    */
   private updateContrails(): void {
-    if (this.reducedMotion || !this.isEngaging()) {
+    if (this.reducedMotion || !this.isEngaging() || this.hasPhysicalPursuit()) {
       this.interceptorContrail.visible = false;
       this.ufoContrail.visible = false;
       return;
@@ -4045,7 +4140,7 @@ export class GeoscapeView {
     marker.quaternion.setFromRotationMatrix(this.scratchBasis);
   }
 
-  /** Allocate the planned base->site route line for the active deployment flight once. */
+  /** Allocate the planned route line for the active Skyranger leg once. */
   private buildDeploymentFx(): void {
     const positions = new Float32Array((DEPLOYMENT_SEGMENTS + 1) * 3);
     const geo = new BufferGeometry();
@@ -4073,12 +4168,12 @@ export class GeoscapeView {
   }
 
   /**
-   * Draw the planned base->site route line for an active non-blocking deployment
-   * flight (the Skyranger itself flies via the pooled flight markers). Hidden when
-   * no deployment is in transit. Called from refreshMarkers each state refresh.
+   * Draw the active Skyranger route in either direction. The same line persists for
+   * the return leg, so the transport visibly flies back to base rather than blinking
+   * out when a mission resolves.
    */
   private refreshDeploymentRoute(): void {
-    const flight = (this.campaign?.activeFlights ?? []).find((f) => f.purpose === "deployment");
+    const flight = (this.campaign?.activeFlights ?? []).find((f) => f.kind === "transport");
     if (!flight) {
       this.deploymentLine.visible = false;
       return;
@@ -4086,6 +4181,10 @@ export class GeoscapeView {
     const baseN = latLonToVector(flight.fromLat, flight.fromLon, 1).normalize();
     const siteN = latLonToVector(flight.toLat, flight.toLon, 1).normalize();
     this.fillDeploymentTrajectory(baseN, siteN);
+    const material = this.deploymentLine.material as LineBasicMaterial;
+    const returning = flight.purpose === "return";
+    material.color.setHex(returning ? 0x7dd3fc : 0xbbf7d0);
+    material.opacity = returning ? 0.7 : 0.5;
     this.deploymentLine.visible = true;
   }
 
@@ -4191,7 +4290,7 @@ export class GeoscapeView {
     // A Skyranger already inbound / on station owns the launch flow (its DEPLOY chip
     // drives the assault). Re-showing "Launch Operation" here would append a second
     // deployment flight to activeFlights, so suppress it while one is in transit.
-    const flightInProgress = (c?.activeFlights ?? []).some((f) => f.purpose === "deployment");
+    const flightInProgress = (c?.activeFlights ?? []).some((f) => f.kind === "transport");
     if (launchable && this.opts.onLaunchMission && !flightInProgress) {
       const squad = c ? deploymentSoldiers(c).length : 0;
       const roster = c ? activeSoldiers(c).length : 0;
@@ -4408,10 +4507,22 @@ export class GeoscapeView {
     const campaign = this.campaign!;
     const repairedAt = campaign.interceptor.repairedAtHour;
     const repairing = repairedAt !== undefined && repairedAt > campaign.clock.elapsedHours;
+    const transportFlight = (campaign.activeFlights ?? []).find((flight) => flight.kind === "transport");
     const card = el("section", repairing ? "geo-row alert" : "geo-row");
     const title = el("strong");
     const copy = el("p");
-    if (repairedAt !== undefined && repairedAt > campaign.clock.elapsedHours) {
+    if (transportFlight?.purpose === "return") {
+      title.textContent = "Skyranger returning to base";
+      copy.textContent =
+        `${Math.round(transportFlight.progress * 100)}% through RTB leg. ` +
+        "The transport is unavailable until it lands.";
+    } else if (transportFlight) {
+      title.textContent = "Skyranger deployed";
+      copy.textContent =
+        transportFlight.arrived || transportFlight.progress >= 1
+          ? "On station awaiting deployment orders."
+          : `${Math.round(transportFlight.progress * 100)}% en route to the mission site.`;
+    } else if (repairedAt !== undefined && repairedAt > campaign.clock.elapsedHours) {
       title.textContent = `Interceptor repair · ${formatPercent(campaign.interceptor.damage)} damage`;
       copy.textContent =
         `${formatHours(repairedAt - campaign.clock.elapsedHours)} until airborne. ` +

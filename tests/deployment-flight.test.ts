@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import { advanceGeoscape } from "../src/campaign/geoscape";
+import { generateOperation } from "../src/campaign/operations";
 import {
   createCampaign,
   dropDeploymentFlights,
   launchDeploymentFlight,
+  recordMissionResult,
+  returnDeploymentFlights,
 } from "../src/campaign/storage";
 import type { ActiveFlight, CampaignState, UfoContact } from "../src/campaign/types";
 
@@ -115,7 +118,7 @@ describe("deployment flight persists on arrival (non-blocking model)", () => {
 });
 
 describe("deployment flight cleanup when its contact expires (softlock guard)", () => {
-  it("drops an in-transit deployment flight once its target contact expires", () => {
+  it("turns an in-transit deployment flight home once its target contact expires", () => {
     const fresh = createCampaign(BASE, SEED);
     // A crash site far from base with a SHORT life: the Skyranger cannot arrive before
     // the contact expires, so the flight must be cleaned up (else it strands forever and
@@ -131,13 +134,14 @@ describe("deployment flight cleanup when its contact expires (softlock guard)", 
     const advanced = advanceGeoscape(launched, 6);
     // Contact has expired…
     expect(advanced.ufoContact?.id).not.toBe("ufo-1");
-    // …and the deployment flight targeting it is gone, so no `flightInProgress`
-    // suppression can block the next contact's launch.
+    // …and the stale deployment becomes a reverse leg, so no dead DEPLOY chip or
+    // teleport can strand the Skyranger.
     const deploy = (advanced.activeFlights ?? []).find((f) => f.purpose === "deployment");
     expect(deploy).toBeUndefined();
+    expect((advanced.activeFlights ?? []).find((f) => f.kind === "transport")?.purpose).toBe("return");
   });
 
-  it("drops an on-station (arrived) deployment flight if its contact then expires", () => {
+  it("turns an on-station Skyranger home if its contact then expires", () => {
     const fresh = createCampaign(BASE, SEED);
     // Close crash site so the Skyranger arrives (progress 1) before expiry, then let the
     // contact lapse: the on-station flight (and its dead DEPLOY chip) must be retired.
@@ -151,10 +155,12 @@ describe("deployment flight cleanup when its contact expires (softlock guard)", 
     const arrived = advanceGeoscape(launched, 12);
     expect((arrived.activeFlights ?? []).find((f) => f.purpose === "deployment")?.progress).toBe(1);
 
-    // Now push time past the contact's expiry.
+    // Now push time past the contact's expiry. The transport begins a visible RTB
+    // leg instead of disappearing from the mission site.
     const afterExpiry = advanceGeoscape(arrived, 40);
     expect(afterExpiry.ufoContact?.id).not.toBe("ufo-1");
     expect((afterExpiry.activeFlights ?? []).find((f) => f.purpose === "deployment")).toBeUndefined();
+    expect((afterExpiry.activeFlights ?? []).find((f) => f.kind === "transport")?.purpose).toBe("return");
   });
 });
 
@@ -199,5 +205,44 @@ describe("dropDeploymentFlights", () => {
   it("returns undefined for an empty or absent roster", () => {
     expect(dropDeploymentFlights([])).toBeUndefined();
     expect(dropDeploymentFlights(undefined)).toBeUndefined();
+  });
+});
+
+describe("deployment return flights", () => {
+  it("reverses the Skyranger route after the mission instead of deleting the craft", () => {
+    const launched = launchDeploymentFlight(campaignWithContact(), "ufo-1");
+    const onStation: CampaignState = {
+      ...launched,
+      activeFlights: launched.activeFlights?.map((flight) => ({ ...flight, progress: 1, arrived: true })),
+    };
+
+    const flights = returnDeploymentFlights(onStation);
+    const returning = flights?.find((flight) => flight.kind === "transport");
+    expect(returning).toBeDefined();
+    expect(returning?.purpose).toBe("return");
+    expect(returning?.fromLat).toBe(20);
+    expect(returning?.fromLon).toBe(30);
+    expect(returning?.toLat).toBe(BASE.lat);
+    expect(returning?.toLon).toBe(BASE.lon);
+    expect(returning?.progress).toBe(0);
+    expect(returning?.deployContactId).toBeUndefined();
+    expect(returning?.arrived).toBeUndefined();
+  });
+
+  it("records a completed mission with a Skyranger RTB leg", () => {
+    const launched = launchDeploymentFlight(campaignWithContact(), "ufo-1");
+    const onStation: CampaignState = {
+      ...launched,
+      activeFlights: launched.activeFlights?.map((flight) => ({ ...flight, progress: 1, arrived: true })),
+    };
+    const resolved = recordMissionResult(onStation, "success", generateOperation(onStation));
+    const returning = resolved.activeFlights?.find((flight) => flight.kind === "transport");
+
+    expect(returning?.purpose).toBe("return");
+    expect(returning?.fromLat).toBe(20);
+    expect(returning?.fromLon).toBe(30);
+    expect(returning?.toLat).toBe(BASE.lat);
+    expect(returning?.toLon).toBe(BASE.lon);
+    expect(resolved.ufoContact).toBeUndefined();
   });
 });

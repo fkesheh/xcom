@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   advanceGeoscape,
+  activeFlightPosition,
   autoResolveInterception,
   canLaunchInterceptor,
   canResolveInterception,
@@ -181,6 +182,20 @@ describe("startInterceptionEncounter (km model)", () => {
 // ===========================================================================
 
 describe("pursuit act (globe km)", () => {
+  it("launches a physical interceptor and closes the chase as strategic time advances", () => {
+    const started = startInterceptionEncounter(stage(freshCampaign(), trackedContact("scout", LAND_LAT, LAND_LON)));
+    const launched = started.activeFlights?.find((flight) => flight.id.startsWith("patrol:"));
+    expect(launched).toBeDefined();
+    expect(launched?.purpose).toBe("patrol");
+    expect(launched?.progress).toBe(0);
+
+    const advanced = advanceGeoscape(started, 0.05);
+    const inFlight = advanced.activeFlights?.find((flight) => flight.id === launched?.id);
+    expect(inFlight?.progress).toBeGreaterThan(0);
+    expect(advanced.ufoContact?.lat).not.toBe(started.ufoContact?.lat);
+    expect(advanced.interception?.rangeKm).toBeLessThan(started.interception!.rangeKm);
+  });
+
   it("closes the gap on keepChasing and crosses into engagement at 100km (THE ZOOM)", () => {
     const started = startInterceptionEncounter(stage(freshCampaign(), trackedContact("scout", LAND_LAT, LAND_LON)));
     const first = executeInterceptionAction(started, "keepChasing");
@@ -203,6 +218,38 @@ describe("pursuit act (globe km)", () => {
     expect(done.outcome.kind).toBe("escaped");
     expect(done.campaign.ufoContact).toBeUndefined();
     expect(done.campaign.lastInterceptionReport?.result).toBe("escaped");
+  });
+
+  it("turns a resolved interceptor sortie into a visible return leg", () => {
+    const contact = trackedContact("scout", LAND_LAT, LAND_LON);
+    const patrol = {
+      id: `patrol:int-1:${contact.id}`,
+      craftId: "int-1",
+      kind: "interceptor" as const,
+      fromLat: BASE.lat,
+      fromLon: BASE.lon,
+      toLat: contact.lat,
+      toLon: contact.lon,
+      progress: 0.65,
+      speedDegPerHour: 36.2,
+      startedAtHour: contact.detectedAtHour,
+      purpose: "patrol" as const,
+    };
+    const staged = {
+      ...stage(freshCampaign(), contact),
+      activeFlights: [patrol],
+    };
+    const expectedOrigin = activeFlightPosition(patrol);
+    const resolved = autoResolveInterception(startInterceptionEncounter(staged)).campaign;
+    const returning = resolved.activeFlights?.find((flight) => flight.id.startsWith("return:int-1:"));
+
+    expect(returning).toBeDefined();
+    expect(returning?.purpose).toBe("return");
+    expect(returning?.fromLat).toBeCloseTo(expectedOrigin.lat, 5);
+    expect(returning?.fromLon).toBeCloseTo(expectedOrigin.lon, 5);
+    expect(returning?.toLat).toBe(BASE.lat);
+    expect(returning?.toLon).toBe(BASE.lon);
+    expect(returning?.progress).toBe(0);
   });
 });
 
@@ -232,6 +279,35 @@ describe("engagement act (dogfight)", () => {
     expect(fired.interception!.ammo.stingray).toBe(ammoBefore - 1);
     expect(fired.interception!.roundsElapsed).toBe(beatsBefore + 1);
     expect(fired.interception!.log.length).toBeGreaterThan(s.interception!.log.length);
+  });
+
+  it("lets the pilot trade range for two beats of defensive countermeasures", () => {
+    const engaged = toEngagement(
+      startInterceptionEncounter(stage(freshCampaign(), trackedContact("harvester", LAND_LAT, LAND_LON))),
+    );
+    const closeState: CampaignState = {
+      ...engaged,
+      interception: { ...engaged.interception!, rangeKm: 10, evasionBeatsLeft: 0 },
+    };
+    const defensive = executeInterceptionAction(closeState, "evade");
+    expect(defensive.interception!.rangeKm).toBeGreaterThan(closeState.interception!.rangeKm);
+    expect(defensive.interception!.evasionBeatsLeft).toBe(2);
+    expect(defensive.interception!.log.at(-1)).toContain("countermeasures primed");
+
+    // Identical close beat and seed: defensive flying must blunt the UFO snap-fire.
+    const protectedClose: CampaignState = {
+      ...closeState,
+      interception: { ...closeState.interception!, evasionBeatsLeft: 2 },
+    };
+    const exposed = executeInterceptionAction(closeState, "close");
+    const protectedResult = executeInterceptionAction(protectedClose, "close");
+    expect(exposed.interception).toBeDefined();
+    expect(protectedResult.interception).toBeDefined();
+    const exposedDamage = closeState.interception!.interceptorHp - exposed.interception!.interceptorHp;
+    const protectedDamage = closeState.interception!.interceptorHp - protectedResult.interception!.interceptorHp;
+    expect(exposedDamage).toBeGreaterThan(0);
+    expect(protectedDamage).toBeGreaterThan(0);
+    expect(protectedDamage).toBeLessThan(exposedDamage);
   });
 
   it("a heavy missile burns lock beats before the shot leaves the rail", () => {

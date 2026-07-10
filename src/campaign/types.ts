@@ -211,10 +211,10 @@ export interface ActiveFlight {
   startedAtHour: number;
   /**
    * What this flight is for. Absent (or "patrol") means a legacy interceptor
-   * patrol/return leg; "deployment" is a non-blocking Skyranger run carrying the
-   * squad to a mission site — the globe stays live while it flies.
+   * patrol; "deployment" is a non-blocking Skyranger run carrying the squad to a
+   * mission site; "return" is a visible return-to-base leg for either craft.
    */
-  purpose?: "patrol" | "deployment";
+  purpose?: "patrol" | "deployment" | "return";
   /** For a deployment flight: the ufoContact id this run is assaulting. */
   deployContactId?: string;
   /** For a deployment flight: true once it reached the site and is awaiting the player's DEPLOY click. */
@@ -300,6 +300,8 @@ export interface InterceptionEncounter {
   lockingWeaponId?: string;
   /** Beats remaining on the active lock (0 = ready). */
   lockBeatsLeft: number;
+  /** Defensive flying beats remaining. While positive, incoming fire is reduced. */
+  evasionBeatsLeft?: number;
   /** Set on the killing blow: max(0,(blowDmg-hpBeforeBlow)/hpMax). */
   overkillMargin: number;
   roundsElapsed: number;

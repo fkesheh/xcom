@@ -1,4 +1,5 @@
 import {
+  ACESFilmicToneMapping,
   AdditiveBlending,
   AmbientLight,
   BoxGeometry,
@@ -11,6 +12,8 @@ import {
   Float32BufferAttribute,
   Group,
   Line,
+  LineBasicMaterial,
+  LineSegments,
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
@@ -22,6 +25,7 @@ import {
   Scene,
   SphereGeometry,
   SRGBColorSpace,
+  TorusGeometry,
   Vector3,
   WebGLRenderer,
 } from "three";
@@ -33,6 +37,7 @@ import {
   ENGAGEMENT_RANGE_KM,
   POINT_BLANK_KM,
   CLOSE_STEP_KM,
+  EVADE_STEP_KM,
 } from "../campaign/geoscape";
 import { type AirWeapon, airWeapon } from "../campaign/airWeapons";
 import { UI_TOKENS, UI_BASE, UI_COMPONENTS, UI_PRIMITIVES } from "./uiTheme";
@@ -69,6 +74,8 @@ const RESOLVE_DISENGAGE_DELAY_MS = 550;
 const FX_MISS_MS = 520;
 /** Fade time for a beam shown with no travel tween (reducedMotion — see fireShot). */
 const FX_BEAM_STATIC_MS = 260;
+/** Duration of a close / evasive-break banking beat. */
+const FX_MANEUVER_MS = 720;
 
 /** Missile/cannon travel time by weapon class (ms) — heavy telegraphs, cannon is instant. */
 const TRAVEL_MS: Record<AirWeapon["cls"], number> = { heavy: 900, light: 560, cannon: 160 };
@@ -90,7 +97,7 @@ const CAMERA_ORBIT_HEIGHT = 1.1;
 /** Radians per second the camera orbits (slow, for drama). Frozen under reducedMotion. */
 const CAMERA_ORBIT_RATE = 0.12;
 /** Camera field of view (deg). Wider frames both craft large at close orbit. */
-const CAMERA_FOV = 52;
+const CAMERA_FOV = 58;
 
 const STYLE_ID = "plane-combat-style";
 
@@ -146,10 +153,11 @@ const PLANE_CSS = `
   z-index: 2;
   pointer-events: none;
   background:
+    radial-gradient(circle at 71% 56%, transparent 0 13.8%, rgba(103,232,249,.11) 14%, transparent 14.3% 27.8%, rgba(103,232,249,.075) 28%, transparent 28.3% 41.8%, rgba(103,232,249,.045) 42%, transparent 42.3%),
     linear-gradient(90deg, rgba(56,232,210,.04) 1px, transparent 1px),
     linear-gradient(rgba(56,232,210,.03) 1px, transparent 1px),
     radial-gradient(circle at 50% 50%, transparent 55%, rgba(0,0,0,.55) 100%);
-  background-size: 44px 44px, 44px 44px, auto;
+  background-size: auto, 44px 44px, 44px 44px, auto;
   mix-blend-mode: screen;
 }
 #plane-combat .pc-alarm {
@@ -353,8 +361,20 @@ const PLANE_CSS = `
 }
 #plane-combat .pc-log p { margin: 0 0 4px; }
 #plane-combat .pc-log p.miss { color: var(--ui-red); font-weight: 700; }
-#plane-combat .pc-actions { display: flex; gap: var(--ui-sp-2); }
-#plane-combat .pc-actions button { flex: 1; }
+#plane-combat .pc-log p.defensive { color: var(--ui-green); font-weight: 700; }
+#plane-combat .pc-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--ui-sp-2);
+}
+#plane-combat .pc-actions button { min-width: 0; }
+#plane-combat .pc-actions .pc-disengage { grid-column: 1 / -1; }
+#plane-combat .pc-evade.armed {
+  border-color: var(--ui-green);
+  color: #bbf7d0;
+  background: rgba(20,83,45,.34);
+  box-shadow: 0 0 14px rgba(74,222,128,.16);
+}
 #plane-combat .pc-titlebar {
   position: absolute;
   top: max(18px, env(safe-area-inset-top));
@@ -543,7 +563,8 @@ export class PlaneCombatView {
   private readonly stage = new Group();
   private readonly interceptorMarker = new Group();
   private readonly ufoMarker = new Group();
-  private readonly midpoint = new Vector3(0, 0.08, 0);
+  /** Bias the camera focus left so both craft compose clear of the HUD panel. */
+  private readonly midpoint = new Vector3(-0.32, 0.08, 0);
   private readonly interceptorAnchor = new Vector3();
   private readonly ufoAnchor = new Vector3();
   private raf = 0;
@@ -573,6 +594,7 @@ export class PlaneCombatView {
   private readonly weaponsBox: HTMLDivElement;
   private readonly logBox: HTMLDivElement;
   private readonly closeBtn: HTMLButtonElement;
+  private readonly evadeBtn: HTMLButtonElement;
   private readonly disengageBtn: HTMLButtonElement;
   private readonly alarmEl: HTMLDivElement;
   private readonly missFlagEl: HTMLDivElement;
@@ -605,6 +627,9 @@ export class PlaneCombatView {
   private prevUfoHp: number | null;
   private prevInterceptorHp: number | null;
   private prevAmmo: Record<string, number> | null;
+  private prevRangeKm: number | null;
+  private readonly engineTrails: Mesh[] = [];
+  private speedLines!: LineSegments;
 
   // Traveling-beam state: armed on fire, cleared once travel completes.
   private beamActive = false;
@@ -633,6 +658,8 @@ export class PlaneCombatView {
   /** UFO evasive-jink offset (world units); decays back to zero. Frozen (0) under reducedMotion. */
   private jinkStartMs = 0;
   private jinkActive = false;
+  private maneuverStartMs = 0;
+  private maneuverKind: "close" | "evade" | null = null;
 
   // Reusable scratch (no per-frame allocation).
   private readonly scratchA = new Vector3();
@@ -657,6 +684,7 @@ export class PlaneCombatView {
     this.prevUfoHp = enc?.ufoHp ?? null;
     this.prevInterceptorHp = enc?.interceptorHp ?? null;
     this.prevAmmo = enc ? { ...enc.ammo } : null;
+    this.prevRangeKm = enc?.rangeKm ?? null;
 
     this.root = el("div");
     this.root.id = "plane-combat";
@@ -665,6 +693,8 @@ export class PlaneCombatView {
 
     this.renderer.outputColorSpace = SRGBColorSpace;
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    this.renderer.toneMapping = ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 0.92;
 
     this.buildScene();
     this.buildCombatFx();
@@ -682,6 +712,7 @@ export class PlaneCombatView {
     this.weaponsBox = panels.weaponsBox;
     this.logBox = panels.log;
     this.closeBtn = panels.closeBtn;
+    this.evadeBtn = panels.evadeBtn;
     this.disengageBtn = panels.disengageBtn;
     this.alarmEl = panels.alarm;
     this.missFlagEl = panels.missFlag;
@@ -732,14 +763,14 @@ export class PlaneCombatView {
     this.camera.position.set(0, CAMERA_ORBIT_HEIGHT, CAMERA_ORBIT_RADIUS);
     this.camera.lookAt(this.midpoint);
 
-    this.scene.add(new AmbientLight(0x6b8aa8, 1.5));
-    const key = new DirectionalLight(0xbfe0ff, 2.4);
+    this.scene.add(new AmbientLight(0x68839c, 1.0));
+    const key = new DirectionalLight(0xcfe6ff, 1.75);
     key.position.set(2.4, 3.2, 2.6);
     this.scene.add(key);
-    const rim = new DirectionalLight(0xfb7185, 1.1);
+    const rim = new DirectionalLight(0xfb7185, 1.25);
     rim.position.set(-3, -1, -2);
     this.scene.add(rim);
-    const fill = new DirectionalLight(0x67e8f9, 0.7);
+    const fill = new DirectionalLight(0x67e8f9, 0.42);
     fill.position.set(-2, 1.4, 1);
     this.scene.add(fill);
 
@@ -747,117 +778,160 @@ export class PlaneCombatView {
     this.stage.add(this.interceptorMarker, this.ufoMarker);
     this.buildInterceptor();
     this.buildUfo();
-    this.scene.add(this.makeStarfield());
+    this.speedLines = this.makeSpeedLines();
+    this.scene.add(this.makeStarfield(), this.speedLines);
   }
 
-  /** Interceptor: fuselage + nose + swept wings + tail + canopy + halo (cyan). */
+  /** Interceptor: dark armored fuselage, swept wings, hot engine and readable cyan trim. */
   private buildInterceptor(): void {
-    const body = new MeshStandardMaterial({
-      color: 0x22d3ee,
-      emissive: new Color(0x06b6d4),
-      emissiveIntensity: 1.4,
-      roughness: 0.3,
+    const hull = new MeshStandardMaterial({
+      color: 0x244b69,
+      emissive: new Color(0x102c3e),
+      emissiveIntensity: 0.42,
+      roughness: 0.44,
+      metalness: 0.38,
+    });
+    const armor = new MeshStandardMaterial({
+      color: 0x547e99,
+      roughness: 0.34,
       metalness: 0.45,
     });
-    const fuselage = new Mesh(new CylinderGeometry(0.11, 0.19, 1.5, 10), body);
-    const nose = new Mesh(new ConeGeometry(0.11, 0.4, 10), body);
-    nose.position.y = 0.95;
-    const wingGeo = new BoxGeometry(0.62, 0.34, 0.06);
-    const wingR = new Mesh(wingGeo, body);
-    wingR.position.set(0.4, -0.12, 0);
-    wingR.rotation.z = -0.4;
-    const wingL = new Mesh(wingGeo, body);
-    wingL.position.set(-0.4, -0.12, 0);
-    wingL.rotation.z = 0.4;
-    const tail = new Mesh(new BoxGeometry(0.06, 0.3, 0.2), body);
-    tail.position.set(0, -0.55, 0.11);
+    const cyan = new MeshBasicMaterial({ color: 0x67e8f9, toneMapped: false });
+    const fuselage = new Mesh(new CylinderGeometry(0.14, 0.23, 1.62, 12), hull);
+    const nose = new Mesh(new ConeGeometry(0.14, 0.5, 12), armor);
+    nose.position.y = 1.05;
+    const wingGeo = new BoxGeometry(0.78, 0.42, 0.065);
+    const wingR = new Mesh(wingGeo, hull);
+    wingR.position.set(0.52, -0.12, 0);
+    wingR.rotation.z = -0.5;
+    const wingL = new Mesh(wingGeo, hull);
+    wingL.position.set(-0.52, -0.12, 0);
+    wingL.rotation.z = 0.5;
+    const tail = new Mesh(new BoxGeometry(0.08, 0.38, 0.28), armor);
+    tail.position.set(0, -0.58, 0.15);
+    const spine = new Mesh(new BoxGeometry(0.12, 0.72, 0.1), armor);
+    spine.position.set(0, 0.08, 0.12);
     const canopy = new Mesh(
-      new SphereGeometry(0.08, 10, 8),
+      new SphereGeometry(0.11, 14, 10),
       new MeshStandardMaterial({
-        color: 0x0e7490,
+        color: 0x071b2b,
         emissive: new Color(0x0891b2),
-        emissiveIntensity: 0.9,
-        roughness: 0.2,
-        metalness: 0.6,
+        emissiveIntensity: 0.55,
+        roughness: 0.16,
+        metalness: 0.78,
       }),
     );
-    canopy.position.set(0, 0.45, 0.04);
-    canopy.scale.set(1, 1.5, 0.75);
-    const halo = new Mesh(
-      new RingGeometry(0.7, 1.0, 28),
+    canopy.position.set(0, 0.46, 0.08);
+    canopy.scale.set(1, 1.65, 0.72);
+
+    const engine = new Mesh(new CylinderGeometry(0.115, 0.15, 0.2, 12), armor);
+    engine.position.y = -0.88;
+    const engineCore = new Mesh(new SphereGeometry(0.1, 12, 8), cyan);
+    engineCore.position.y = -0.99;
+    engineCore.scale.y = 0.45;
+    const trail = new Mesh(
+      new ConeGeometry(0.13, 0.62, 14, 1, true),
       new MeshBasicMaterial({
         color: 0x67e8f9,
         transparent: true,
-        opacity: 0.42,
+        opacity: 0.46,
         side: DoubleSide,
         blending: AdditiveBlending,
+        depthWrite: false,
+        toneMapped: false,
       }),
     );
-    halo.rotation.x = -Math.PI / 2;
-    halo.position.y = -0.18;
-    this.interceptorMarker.add(fuselage, nose, wingR, wingL, tail, canopy, halo);
+    trail.position.y = -1.25;
+    trail.rotation.z = Math.PI;
+    this.engineTrails.push(trail);
+
+    const trimGeo = new BoxGeometry(0.34, 0.035, 0.075);
+    const trimL = new Mesh(trimGeo, cyan);
+    trimL.position.set(-0.44, -0.12, 0.055);
+    trimL.rotation.z = 0.5;
+    const trimR = new Mesh(trimGeo, cyan);
+    trimR.position.set(0.44, -0.12, 0.055);
+    trimR.rotation.z = -0.5;
+    const reticle = new Mesh(
+      new RingGeometry(0.83, 0.86, 36),
+      new MeshBasicMaterial({
+        color: 0x67e8f9,
+        transparent: true,
+        opacity: 0.13,
+        side: DoubleSide,
+        blending: AdditiveBlending,
+        depthWrite: false,
+      }),
+    );
+    reticle.rotation.x = -Math.PI / 2;
+    reticle.position.y = -0.2;
+    this.interceptorMarker.add(
+      fuselage, nose, wingR, wingL, tail, spine, canopy,
+      engine, engineCore, trail, trimL, trimR, reticle,
+    );
+    this.interceptorMarker.scale.setScalar(0.68);
     // Built with forward axis +Y; face the UFO (which sits toward +X from the
     // interceptor's left-stage anchor) by rotating -90deg around Z (+Y -> +X).
     this.interceptorMarker.rotation.z = -Math.PI / 2;
   }
 
-  /** UFO: glowing saucer core + double rings + underside beam (red). */
+  /** UFO: weighty alien alloy saucer with a hot dome and segmented running lights. */
   private buildUfo(): void {
     const color = 0xfb7185;
-    const core = new Mesh(
-      new SphereGeometry(0.42, 18, 12),
-      new MeshBasicMaterial({
-        color,
-        transparent: true,
-        opacity: 0.96,
-        blending: AdditiveBlending,
-      }),
-    );
-    core.scale.y = 0.42;
     const saucer = new Mesh(
-      new SphereGeometry(0.62, 22, 10),
+      new SphereGeometry(0.7, 28, 14),
       new MeshStandardMaterial({
-        color: 0x4a1320,
+        color: 0x381620,
         emissive: new Color(0x7f1d2b),
-        emissiveIntensity: 0.8,
-        roughness: 0.4,
-        metalness: 0.5,
+        emissiveIntensity: 0.28,
+        roughness: 0.3,
+        metalness: 0.52,
       }),
     );
-    saucer.scale.y = 0.22;
-    const ring = new Mesh(
-      new RingGeometry(0.7, 1.05, 32),
+    saucer.scale.y = 0.2;
+    const lower = new Mesh(
+      new CylinderGeometry(0.5, 0.7, 0.18, 28),
+      new MeshStandardMaterial({ color: 0x160d17, roughness: 0.42, metalness: 0.6 }),
+    );
+    lower.position.y = -0.12;
+    const dome = new Mesh(
+      new SphereGeometry(0.24, 20, 12, 0, Math.PI * 2, 0, Math.PI * 0.55),
       new MeshBasicMaterial({
         color,
         transparent: true,
-        opacity: 0.6,
-        side: DoubleSide,
+        opacity: 0.82,
         blending: AdditiveBlending,
+        toneMapped: false,
       }),
     );
-    ring.rotation.x = -Math.PI / 2;
-    const outerRing = new Mesh(
-      new RingGeometry(1.2, 1.42, 32),
+    dome.position.y = 0.06;
+    const rim = new Mesh(
+      new TorusGeometry(0.69, 0.035, 8, 48),
       new MeshBasicMaterial({
         color,
         transparent: true,
-        opacity: 0.32,
-        side: DoubleSide,
+        opacity: 0.72,
         blending: AdditiveBlending,
+        depthWrite: false,
+        toneMapped: false,
       }),
     );
-    outerRing.rotation.x = -Math.PI / 2;
-    const beam = new Mesh(
-      new ConeGeometry(0.4, 1.1, 18),
-      new MeshBasicMaterial({
-        color,
-        transparent: true,
-        opacity: 0.4,
-        blending: AdditiveBlending,
-      }),
+    rim.rotation.x = Math.PI / 2;
+    const emitter = new Mesh(
+      new CylinderGeometry(0.14, 0.22, 0.16, 18),
+      new MeshBasicMaterial({ color: 0xff8aa2, toneMapped: false }),
     );
-    beam.position.y = -0.7;
-    this.ufoMarker.add(saucer, core, ring, outerRing, beam);
+    emitter.position.y = -0.28;
+    this.ufoMarker.add(saucer, lower, dome, rim, emitter);
+    const nodeGeo = new SphereGeometry(0.045, 10, 8);
+    const nodeMat = new MeshBasicMaterial({ color: 0xff9aae, toneMapped: false });
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      const node = new Mesh(nodeGeo, nodeMat);
+      node.position.set(Math.cos(a) * 0.59, 0, Math.sin(a) * 0.59);
+      this.ufoMarker.add(node);
+    }
+    this.ufoMarker.scale.setScalar(0.74);
   }
 
   /** Deep-space starfield: deterministic hash-scattered Points (no RNG). */
@@ -884,6 +958,41 @@ export class PlaneCombatView {
         transparent: true,
         opacity: 0.85,
         sizeAttenuation: true,
+      }),
+    );
+  }
+
+  /** Fine deterministic velocity streaks: enough motion parallax to sell a chase. */
+  private makeSpeedLines(): LineSegments {
+    const count = 110;
+    const positions = new Float32Array(count * 6);
+    for (let i = 0; i < count; i++) {
+      const a = Math.sin(i * 29.41) * 43758.5453;
+      const b = Math.sin(i * 67.17) * 24634.6345;
+      const c = Math.sin(i * 11.73) * 13579.1234;
+      const x = ((a - Math.floor(a)) * 2 - 1) * 12;
+      const y = ((b - Math.floor(b)) * 2 - 1) * 7;
+      const z = -2 - (c - Math.floor(c)) * 18;
+      const length = 0.18 + ((a * 7.1) - Math.floor(a * 7.1)) * 0.52;
+      const at = i * 6;
+      positions[at] = x;
+      positions[at + 1] = y;
+      positions[at + 2] = z;
+      positions[at + 3] = x - length;
+      positions[at + 4] = y;
+      positions[at + 5] = z;
+    }
+    const geo = new BufferGeometry();
+    geo.setAttribute("position", new Float32BufferAttribute(positions, 3));
+    return new LineSegments(
+      geo,
+      new LineBasicMaterial({
+        color: 0x8ed8ff,
+        transparent: true,
+        opacity: 0.17,
+        blending: AdditiveBlending,
+        depthWrite: false,
+        toneMapped: false,
       }),
     );
   }
@@ -996,9 +1105,14 @@ export class PlaneCombatView {
         }
         if (intDmg > 0) this.fireInterceptorHit();
       }
+      if (this.prevRangeKm !== null && Math.abs(enc.rangeKm - this.prevRangeKm) > 0.1) {
+        this.maneuverKind = enc.rangeKm < this.prevRangeKm ? "close" : "evade";
+        this.maneuverStartMs = performance.now();
+      }
       this.prevUfoHp = enc.ufoHp;
       this.prevInterceptorHp = enc.interceptorHp;
       this.prevAmmo = { ...enc.ammo };
+      this.prevRangeKm = enc.rangeKm;
       this.wasEngaging = true;
       return;
     }
@@ -1015,6 +1129,7 @@ export class PlaneCombatView {
     this.prevUfoHp = null;
     this.prevInterceptorHp = null;
     this.prevAmmo = null;
+    this.prevRangeKm = null;
     this.wasEngaging = false;
   }
 
@@ -1277,6 +1392,7 @@ export class PlaneCombatView {
     weaponsBox: HTMLDivElement;
     log: HTMLDivElement;
     closeBtn: HTMLButtonElement;
+    evadeBtn: HTMLButtonElement;
     disengageBtn: HTMLButtonElement;
     alarm: HTMLDivElement;
     missFlag: HTMLDivElement;
@@ -1321,13 +1437,16 @@ export class PlaneCombatView {
     left.append(log);
 
     const actions = el("div", "pc-actions");
-    const closeBtn = el("button", "ui-btn");
+    const closeBtn = el("button", "ui-btn ui-cta");
     closeBtn.type = "button";
-    closeBtn.textContent = `Close (−${CLOSE_STEP_KM}km)`;
-    const disengageBtn = el("button", "ui-btn ui-btn--danger");
+    closeBtn.textContent = `Afterburner (−${CLOSE_STEP_KM}km)`;
+    const evadeBtn = el("button", "ui-btn pc-evade");
+    evadeBtn.type = "button";
+    evadeBtn.textContent = `Evasive break (+${EVADE_STEP_KM}km)`;
+    const disengageBtn = el("button", "ui-btn ui-btn--danger pc-disengage");
     disengageBtn.type = "button";
     disengageBtn.textContent = "Disengage";
-    actions.append(closeBtn, disengageBtn);
+    actions.append(closeBtn, evadeBtn, disengageBtn);
     left.append(actions);
     this.root.append(left);
 
@@ -1363,6 +1482,7 @@ export class PlaneCombatView {
     const ufoValue = ufoBar.value;
 
     closeBtn.addEventListener("click", () => this.opts.onAction("close"));
+    evadeBtn.addEventListener("click", () => this.opts.onAction("evade"));
     disengageBtn.addEventListener("click", () => this.opts.onAction("disengage"));
 
     return {
@@ -1379,6 +1499,7 @@ export class PlaneCombatView {
       weaponsBox,
       log,
       closeBtn,
+      evadeBtn,
       disengageBtn,
       alarm,
       missFlag,
@@ -1411,6 +1532,7 @@ export class PlaneCombatView {
       ["Light missile", "shorter reach, moderate damage — preserves the wreck for a clean recovery."],
       ["Cannon", "point-blank, sustained bursts — inside the UFO's own return-fire envelope."],
       ["Close", "cuts the range so shorter-legged weapons come into play."],
+      ["Evasive break", "opens the range and primes countermeasures for two beats, cutting incoming damage."],
       ["Evasion", "every shot can be dodged — the UFO jinks harder at long range and with an agile hull."],
       ["Disengage", "breaks off the chase; the interceptor returns to base, UFO stays tracked."],
     ];
@@ -1455,6 +1577,7 @@ export class PlaneCombatView {
 
   private setActionsEnabled(enabled: boolean): void {
     this.closeBtn.disabled = !enabled;
+    this.evadeBtn.disabled = !enabled;
     this.disengageBtn.disabled = !enabled;
     for (const btn of this.weaponsBox.querySelectorAll("button")) {
       (btn as HTMLButtonElement).disabled = !enabled;
@@ -1476,6 +1599,12 @@ export class PlaneCombatView {
       this.refreshAlarm(enc);
       this.setActionsEnabled(true);
       this.closeBtn.disabled = enc.phase === "pursuit";
+      const defensive = (enc.evasionBeatsLeft ?? 0) > 0;
+      this.evadeBtn.disabled = enc.phase === "pursuit" || enc.rangeKm >= ENGAGEMENT_RANGE_KM;
+      this.evadeBtn.classList.toggle("armed", defensive);
+      this.evadeBtn.textContent = defensive
+        ? `Countermeasures · ${enc.evasionBeatsLeft} beat${enc.evasionBeatsLeft === 1 ? "" : "s"}`
+        : `Evasive break (+${EVADE_STEP_KM}km)`;
       this.resolveOverlay.classList.remove("active");
     } else {
       // Resolved: leave the last log + dim the actions (resolve overlay shown by detect path).
@@ -1602,7 +1731,8 @@ export class PlaneCombatView {
     this.logBox.replaceChildren();
     for (const line of lines) {
       const entry = el("p");
-      if (/evad|miss|jink/i.test(line)) entry.classList.add("miss");
+      if (/defensive break|countermeasures/i.test(line)) entry.classList.add("defensive");
+      else if (/evad|miss|jink/i.test(line)) entry.classList.add("miss");
       entry.textContent = line;
       this.logBox.append(entry);
     }
@@ -1614,8 +1744,8 @@ export class PlaneCombatView {
     const rangeKm = enc?.rangeKm ?? ENGAGEMENT_RANGE_KM;
     const sep = separationForKm(rangeKm);
     // Interceptor left-front, UFO right-back: 3/4 chase framing.
-    this.interceptorAnchor.set(-sep / 2, -0.18, 0.55);
-    this.ufoAnchor.set(sep / 2, 0.42, -0.45);
+    this.interceptorAnchor.set(-sep / 2 + 0.68, -0.38, 0.62);
+    this.ufoAnchor.set(sep / 2 + 0.18, 0.42, -0.45);
     this.interceptorMarker.position.copy(this.interceptorAnchor);
     this.ufoMarker.position.copy(this.ufoAnchor);
   }
@@ -1640,12 +1770,14 @@ export class PlaneCombatView {
 
     if (this.reducedMotion) {
       // Frozen dramatic angle: no orbit, no shake (decorative motion gated).
-      this.camera.position.copy(this.cameraBase.set(0, CAMERA_ORBIT_HEIGHT, CAMERA_ORBIT_RADIUS));
+      this.camera.position.copy(
+        this.cameraBase.set(this.midpoint.x, CAMERA_ORBIT_HEIGHT, CAMERA_ORBIT_RADIUS),
+      );
     } else {
       // Slow dramatic orbit around the engagement midpoint.
       const angle = (now - this.startTimeMs) * 0.001 * CAMERA_ORBIT_RATE;
       this.cameraBase.set(
-        Math.sin(angle) * CAMERA_ORBIT_RADIUS,
+        this.midpoint.x + Math.sin(angle) * CAMERA_ORBIT_RADIUS,
         CAMERA_ORBIT_HEIGHT,
         Math.cos(angle) * CAMERA_ORBIT_RADIUS,
       );
@@ -1673,6 +1805,14 @@ export class PlaneCombatView {
     }
     this.camera.lookAt(this.midpoint);
 
+    // Always rebuild transient craft transforms from the authoritative anchors;
+    // maneuver/jink offsets below never accumulate across frames.
+    this.interceptorMarker.position.x = this.interceptorAnchor.x;
+    this.interceptorMarker.position.z = this.interceptorAnchor.z;
+    this.ufoMarker.position.x = this.ufoAnchor.x;
+    this.ufoMarker.position.z = this.ufoAnchor.z;
+    this.interceptorMarker.rotation.y = 0;
+
     if (this.reducedMotion) {
       this.interceptorMarker.position.y = this.interceptorAnchor.y;
       this.ufoMarker.position.y = this.ufoAnchor.y;
@@ -1682,6 +1822,36 @@ export class PlaneCombatView {
       this.interceptorMarker.position.y = this.interceptorAnchor.y + bob;
       this.ufoMarker.position.y = this.ufoAnchor.y - Math.sin(now * 0.0017) * 0.06;
       this.ufoMarker.rotation.y = now * 0.0006;
+    }
+
+    if (!this.reducedMotion) {
+      const exhaustPulse = 0.86 + Math.sin(now * 0.018) * 0.14;
+      for (const trail of this.engineTrails) {
+        trail.scale.set(1, exhaustPulse, 1);
+        (trail.material as MeshBasicMaterial).opacity = 0.38 + exhaustPulse * 0.12;
+      }
+      this.speedLines.rotation.y = -(now - this.startTimeMs) * 0.000035;
+      (this.speedLines.material as LineBasicMaterial).opacity = 0.13 + Math.sin(now * 0.0017) * 0.035;
+    }
+
+    // Player-commanded maneuver beat: afterburner surges toward the target;
+    // evasive break banks out of plane. State has already advanced, this is the
+    // readable visual hand-off from the old range to the new one.
+    if (this.maneuverKind) {
+      const t = clamp01((now - this.maneuverStartMs) / FX_MANEUVER_MS);
+      if (t >= 1 || this.reducedMotion) {
+        this.maneuverKind = null;
+      } else {
+        const swing = Math.sin(t * Math.PI);
+        if (this.maneuverKind === "close") {
+          this.interceptorMarker.position.x += swing * 0.48;
+          this.interceptorMarker.rotation.y = -swing * 0.42;
+        } else {
+          this.interceptorMarker.position.x -= swing * 0.24;
+          this.interceptorMarker.position.z += swing * 0.5;
+          this.interceptorMarker.rotation.y = swing * 0.72;
+        }
+      }
     }
 
     // Evasive jink: a quick lateral dodge on a revealed MISS. Essential-state FX
