@@ -4,6 +4,7 @@ import {
   advanceGeoscape,
   canResolveInterception,
   createUfoContact,
+  dispatchAreaPatrol,
   startInterceptionEncounter,
 } from "../src/campaign/geoscape";
 import { createCampaign, launchDeploymentFlight, loadCampaign, saveCampaign } from "../src/campaign/storage";
@@ -118,7 +119,7 @@ describe("campaign save/load normalization", () => {
     expect(canResolveInterception(loaded!)).toBe(false);
   });
 
-  it("drops a stale escaped contact on load (matching applyInterceptionOutcome clearing ufoContact)", () => {
+  it("drops an escaped contact from the active-contact slot", () => {
     const campaign = freshCampaign();
     const escaped = { ...createUfoContact(campaign, 18, "crashSite"), status: "escaped" as const };
     saveCampaign({ ...campaign, ufoContact: escaped });
@@ -127,6 +128,27 @@ describe("campaign save/load normalization", () => {
 
     expect(loaded).not.toBeNull();
     expect(loaded!.ufoContact).toBeUndefined();
+  });
+
+  it("preserves an escaped contact in the last-known search slot", () => {
+    const campaign = freshCampaign();
+    const escaped = {
+      ...createUfoContact(campaign, 18, "crashSite"),
+      status: "escaped" as const,
+      lastKnownLat: 12.5,
+      lastKnownLon: -42.25,
+      lostAtHour: 20,
+    };
+    saveCampaign({ ...campaign, lostUfoContact: escaped });
+
+    const loaded = loadCampaign();
+
+    expect(loaded?.lostUfoContact).toMatchObject({
+      status: "escaped",
+      lastKnownLat: 12.5,
+      lastKnownLon: -42.25,
+      lostAtHour: 20,
+    });
   });
 
   it("preserves a landed terror ground-assault contact so it can still seed its mission", () => {
@@ -245,5 +267,19 @@ describe("campaign save/load normalization", () => {
     expect(flight!.purpose).toBeUndefined();
     expect(flight!.deployContactId).toBeUndefined();
     expect(flight!.arrived).toBeUndefined();
+  });
+
+  it("preserves a commander-dispatched area patrol and its station state across save/load", () => {
+    const launched = dispatchAreaPatrol(freshCampaign(), { lat: 4, lon: BASE.lon, region: "Africa" });
+    const stationed = advanceGeoscape(launched, 1);
+    saveCampaign(stationed);
+
+    const loaded = loadCampaign();
+    const flight = loaded!.activeFlights?.find((entry) => entry.patrolMode === "area");
+    expect(flight).toBeDefined();
+    expect(flight!.purpose).toBe("patrol");
+    expect(flight!.stationed).toBe(true);
+    expect(flight!.patrolLat).toBe(4);
+    expect(flight!.patrolLon).toBeCloseTo(BASE.lon, 8);
   });
 });

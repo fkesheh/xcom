@@ -28,6 +28,7 @@ import {
   SphereGeometry,
   SRGBColorSpace,
   type Texture,
+  TextureLoader,
   Vector2,
   Vector3,
   WebGLRenderer,
@@ -45,6 +46,7 @@ import type {
   UfoType,
 } from "../campaign/types";
 import {
+  canDispatchAreaPatrol,
   canLaunchInterceptor,
   contactSpeedDegPerHour,
   DEG_TO_KM,
@@ -67,8 +69,6 @@ import {
   createEarthShaderMaterial,
   createGraticuleMaterial,
   createRimAtmosphere,
-  makeCloudTexture,
-  makeEarthTexture,
   makeGraticuleLatLine,
   makeGraticuleLonLine,
   populateBaseBeacon,
@@ -108,6 +108,8 @@ interface GeoscapeOptions {
   onConfirmBase: (base: BaseLocation, difficulty?: DifficultyLevel) => void;
   onAdvanceTime: (hours: number) => void;
   onInterceptUfo: () => void;
+  /** Dispatch the fastest idle interceptor to a commander-selected globe sector. */
+  onDispatchAreaPatrol?: (area: BaseLocation) => void;
   onResetCampaign: () => void;
   /** Legacy/manual pursuit action hook retained for saved encounters and harnesses. */
   onInterceptionAction?: (action: InterceptionAction) => void;
@@ -1652,6 +1654,8 @@ export class GeoscapeView {
   private readonly extraBaseMarkers = new Group();
   /** True while the player is designating a new base site on the globe. */
   private buildMode = false;
+  /** True while the player is selecting a globe sector for a manual interceptor patrol. */
+  private patrolMode = false;
   /** Hint line below the globe; text refreshed by refreshHint(). */
   private hintEl: HTMLDivElement | null = null;
   private selectedBase: BaseLocation | null;
@@ -1981,12 +1985,20 @@ export class GeoscapeView {
     this.earthGroup.rotation.y = -0.45;
     this.scene.add(this.earthGroup);
 
-    const earthTexture = makeEarthTexture();
-    earthTexture.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+    const textureLoader = new TextureLoader();
+    const dayTexture = textureLoader.load("/assets/earth-day-2048.jpg");
+    const normalTexture = textureLoader.load("/assets/earth-normal-2048.jpg");
+    const specularTexture = textureLoader.load("/assets/earth-specular-2048.jpg");
+    const cloudTexture = textureLoader.load("/assets/earth-cloud-alpha-2048.jpg");
+    dayTexture.colorSpace = SRGBColorSpace;
+    const anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+    for (const texture of [dayTexture, normalTexture, specularTexture, cloudTexture]) {
+      texture.anisotropy = anisotropy;
+    }
 
-    const earthShader = createEarthShaderMaterial(earthTexture);
+    const earthShader = createEarthShaderMaterial(dayTexture, normalTexture, specularTexture);
     this.earthSunUniform = earthShader.uniforms.uSunDir;
-    const ocean = new Mesh(new SphereGeometry(EARTH_RADIUS, 64, 36), earthShader.material);
+    const ocean = new Mesh(new SphereGeometry(EARTH_RADIUS, 128, 80), earthShader.material);
     this.earthGroup.add(ocean);
 
     // Single tight fresnel rim only — no secondary haze sphere (it muddied the
@@ -1995,16 +2007,14 @@ export class GeoscapeView {
     this.rimSunUniform = rim.uniforms.uSunDir;
     this.earthGroup.add(rim.mesh);
 
-    const cloudTexture = makeCloudTexture();
     const cloudMesh = new Mesh(
-      new SphereGeometry(EARTH_RADIUS + 0.05, 48, 24),
-      new MeshStandardMaterial({
-        map: cloudTexture,
+      new SphereGeometry(EARTH_RADIUS + 0.045, 96, 56),
+      new MeshBasicMaterial({
+        color: 0xeaf8ff,
+        alphaMap: cloudTexture,
         transparent: true,
-        opacity: 0.32,
+        opacity: 0.26,
         depthWrite: false,
-        roughness: 1,
-        metalness: 0,
       }),
     );
     cloudMesh.castShadow = false;
@@ -2095,49 +2105,80 @@ export class GeoscapeView {
   }
 
   /**
-   * Small teal interceptor dart: a slim elongated body (nose + tail cone joined
-   * base-to-base) with two short swept fins, plus a subtle selection ring. The
-   * marker's +Y is forward (oriented toward the UFO in animateInterceptor), so
-   * the dart's nose points along the travel tangent. Teal is always paired with
-   * the "INTERCEPTOR" label in the encounter overlay, so the craft is
-   * identifiable without color alone.
+   * Pursuit interceptor: a dark armored fighter with swept wings, canopy, twin
+   * engine plumes, and a quiet tracking ring. Its +Y axis is forward and is
+   * aligned to the live travel tangent in animateInterceptor().
    */
   private buildInterceptorMarker(): void {
-    const body = new MeshStandardMaterial({
-      color: 0x38e8d2,
-      emissive: new Color(0x38e8d2),
-      emissiveIntensity: 1.6,
-      roughness: 0.3,
-      metalness: 0.4,
+    const hull = new MeshStandardMaterial({
+      color: 0x17435d,
+      emissive: new Color(0x082a3a),
+      emissiveIntensity: 0.84,
+      roughness: 0.32,
+      metalness: 0.64,
     });
-    // Long tapered nose pointing forward (+Y).
-    const nose = new Mesh(new ConeGeometry(0.016, 0.11, 10), body);
-    nose.position.y = 0.03;
-    // Short tail cone flared back so the two cones read as a dart lozenge.
-    const tail = new Mesh(new ConeGeometry(0.016, 0.05, 10), body);
-    tail.position.y = -0.05;
-    tail.rotation.x = Math.PI;
-    // Two short swept fins in ±X.
-    const finGeo = new BoxGeometry(0.05, 0.02, 0.004);
-    const finR = new Mesh(finGeo, body);
-    finR.position.set(0.026, -0.028, 0);
-    finR.rotation.z = -0.5;
-    const finL = new Mesh(finGeo, body);
-    finL.position.set(-0.026, -0.028, 0);
-    finL.rotation.z = 0.5;
+    const armor = new MeshStandardMaterial({
+      color: 0x5a93a9,
+      emissive: new Color(0x0c3b4c),
+      emissiveIntensity: 0.52,
+      roughness: 0.26,
+      metalness: 0.72,
+    });
+    const glow = new MeshBasicMaterial({
+      color: 0x8bf7ff,
+      transparent: true,
+      opacity: 0.94,
+      blending: AdditiveBlending,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    const fuselage = new Mesh(new CylinderGeometry(0.014, 0.023, 0.15, 10), hull);
+    const nose = new Mesh(new ConeGeometry(0.015, 0.055, 10), armor);
+    nose.position.y = 0.102;
+    const canopy = new Mesh(
+      new SphereGeometry(0.018, 12, 8),
+      new MeshStandardMaterial({
+        color: 0x0a2636,
+        emissive: new Color(0x0891b2),
+        emissiveIntensity: 1.1,
+        roughness: 0.1,
+        metalness: 0.86,
+      }),
+    );
+    canopy.position.set(0, 0.043, 0.013);
+    canopy.scale.set(1, 1.55, 0.68);
+    const wingGeo = new BoxGeometry(0.082, 0.034, 0.009);
+    const wingR = new Mesh(wingGeo, hull);
+    wingR.position.set(0.05, -0.018, 0);
+    wingR.rotation.z = -0.55;
+    const wingL = new Mesh(wingGeo, hull);
+    wingL.position.set(-0.05, -0.018, 0);
+    wingL.rotation.z = 0.55;
+    const tail = new Mesh(new BoxGeometry(0.01, 0.035, 0.03), armor);
+    tail.position.set(0, -0.067, 0.018);
+    const stripe = new Mesh(new BoxGeometry(0.058, 0.007, 0.011), glow);
+    stripe.position.set(0, -0.014, 0.01);
+    for (const x of [-0.014, 0.014]) {
+      const nozzle = new Mesh(new CylinderGeometry(0.006, 0.009, 0.026, 8), armor);
+      nozzle.position.set(x, -0.081, 0);
+      const flame = new Mesh(new ConeGeometry(0.01, 0.045, 8), glow);
+      flame.position.set(x, -0.115, 0);
+      flame.rotation.x = Math.PI;
+      this.interceptorMarker.add(nozzle, flame);
+    }
     const ring = new Mesh(
-      new RingGeometry(0.05, 0.064, 24),
+      new RingGeometry(0.064, 0.08, 24),
       new MeshBasicMaterial({
         color: 0x38e8d2,
         transparent: true,
-        opacity: 0.4,
+        opacity: 0.3,
         side: DoubleSide,
         blending: AdditiveBlending,
         depthWrite: false,
       }),
     );
     ring.rotation.x = -Math.PI / 2;
-    this.interceptorMarker.add(nose, tail, finR, finL, ring);
+    this.interceptorMarker.add(fuselage, nose, canopy, wingR, wingL, tail, stripe, ring);
   }
 
   /** Layered, deterministic starfield behind the globe — richer depth, still quiet. */
@@ -2393,6 +2434,8 @@ export class GeoscapeView {
     if (!this.hintEl) return;
     this.hintEl.textContent = this.buildMode
       ? "Click a site on the globe to build a new radar base (2000c, 48h)."
+      : this.patrolMode
+        ? "Click a sector to dispatch the fastest ready interceptor on fuel-limited patrol."
       : this.isPursuing()
         ? "Interceptor pursuing autonomously — dogfight begins at 100 km"
       : this.campaign
@@ -2600,6 +2643,7 @@ export class GeoscapeView {
     const tips: Array<[string, string]> = [
       ["Time", "flows at Pause / 1× / 5× / 30× — advance it to detect UFOs and trigger events."],
       ["Globe", "drag to rotate, wheel to zoom (click Earth to place your base in a new game)."],
+      ["Patrol sector", "select a globe sector to station the fastest ready interceptor; it returns automatically at fuel reserve."],
       ["Airborne UFO", "Intercept to scramble your fighter and shoot it down."],
       ["Crash / terror sites", "become assault missions — return to Base to launch your squad."],
       ["Threat & Panic", "rise as aliens act — lose enough regions and the council defunds X-COM."],
@@ -2782,7 +2826,7 @@ export class GeoscapeView {
     });
 
     // Contact chip — pulses once when a new UFO id first appears.
-    const contact = c.ufoContact;
+    const contact = c.ufoContact ?? c.lostUfoContact;
     const contactId = contact?.id ?? null;
     const lostAtSea = !!contact && contact.status === "crashed" && !!contact.overOcean;
     const contactTone: GeoChipTone = !contact
@@ -3147,9 +3191,28 @@ export class GeoscapeView {
     build.setAttribute("aria-pressed", String(this.buildMode));
     build.addEventListener("click", () => {
       this.buildMode = !this.buildMode;
+      if (this.buildMode) this.patrolMode = false;
       this.refresh();
     });
     this.actionsSlot.append(build);
+    const canPatrol = !!this.opts.onDispatchAreaPatrol && canDispatchAreaPatrol(c);
+    const patrol = el("button", this.patrolMode ? "ui-btn ui-btn--danger" : "ui-btn");
+    patrol.type = "button";
+    patrol.textContent = this.patrolMode ? "Cancel patrol" : "Patrol sector";
+    patrol.disabled = !this.patrolMode && !canPatrol;
+    patrol.title = this.patrolMode
+      ? "Exit sector-patrol placement mode"
+      : canPatrol
+        ? "Select a sector on Earth to dispatch the fastest ready interceptor. It returns automatically at fuel reserve."
+        : "No ready interceptor is available for a sector patrol.";
+    patrol.setAttribute("aria-label", this.patrolMode ? "Cancel sector patrol" : "Dispatch interceptor patrol");
+    patrol.setAttribute("aria-pressed", String(this.patrolMode));
+    patrol.addEventListener("click", () => {
+      this.patrolMode = !this.patrolMode;
+      if (this.patrolMode) this.buildMode = false;
+      this.refresh();
+    });
+    this.actionsSlot.append(patrol);
     // The endgame's one urgent action: once the alien HQ is revealed and the
     // assault is unlocked, this takes priority over every other action — placed
     // first so it is unmissable the moment it becomes available.
@@ -3220,11 +3283,15 @@ export class GeoscapeView {
         marker.visible = false;
       }
     }
-    const contact = c?.ufoContact;
+    const contact = c?.ufoContact ?? c?.lostUfoContact;
     if (contact) {
       this.refreshUfoMarkerType(contact.missionType, contact.ufoType, contact.status === "crashed");
-      this.placeUfoMarker(contact);
-      this.refreshUfoTrail(contact);
+      const displayedContact = contact.status === "escaped"
+        ? { ...contact, lat: contact.lastKnownLat ?? contact.lat, lon: contact.lastKnownLon ?? contact.lon }
+        : contact;
+      this.placeUfoMarker(displayedContact);
+      if (contact.status === "escaped") this.clearUfoTrail();
+      else this.refreshUfoTrail(contact);
     } else {
       this.ufoMarker.visible = false;
       this.clearUfoTrail();
@@ -3290,64 +3357,106 @@ export class GeoscapeView {
   }
 
   /**
-   * Small craft silhouette for an active flight: cyan dart for interceptors,
-   * slate transport for the Skyranger (deployment runs render through this pool).
-   * Distinct from the engagement-only interceptorMarker used during interception.
+   * Small but complete craft silhouettes for active flights. The interceptor reads
+   * as a swept-wing fighter with a glass canopy and twin hot engines; the Skyranger
+   * is a broader, heavier transport. These are deliberately layered rather than
+   * single-icon markers so an airborne asset remains readable at globe scale.
    */
   private buildFlightMarker(kind: "interceptor" | "transport"): Group {
     const group = new Group();
-    const body =
-      kind === "interceptor"
-        ? new MeshStandardMaterial({
-            color: 0x22d3ee,
-            emissive: new Color(0x06b6d4),
-            emissiveIntensity: 1.2,
-            roughness: 0.3,
-            metalness: 0.45,
-          })
-        : new MeshStandardMaterial({
-            color: 0xe2e8f0,
-            emissive: new Color(0x94a3b8),
-            emissiveIntensity: 0.7,
-            roughness: 0.4,
-            metalness: 0.5,
-          });
-    const fuselage = new Mesh(new CylinderGeometry(0.009, 0.015, 0.12, 8), body);
-    const nose = new Mesh(new ConeGeometry(0.009, 0.032, 8), body);
-    nose.position.y = 0.076;
-    const wingGeo = new BoxGeometry(0.05, 0.026, 0.005);
-    const wingR = new Mesh(wingGeo, body);
-    wingR.position.set(0.032, -0.01, 0);
-    wingR.rotation.z = -0.4;
-    const wingL = new Mesh(wingGeo, body);
-    wingL.position.set(-0.032, -0.01, 0);
-    wingL.rotation.z = 0.4;
-    const tail = new Mesh(new BoxGeometry(0.005, 0.024, 0.016), body);
-    tail.position.set(0, -0.044, 0.009);
-    const engine = new Mesh(
-      new SphereGeometry(kind === "interceptor" ? 0.014 : 0.017, 10, 8),
+    const interceptor = kind === "interceptor";
+    const hull = new MeshStandardMaterial({
+      color: interceptor ? 0x17435d : 0x53687a,
+      emissive: new Color(interceptor ? 0x082a3a : 0x1a2630),
+      emissiveIntensity: interceptor ? 0.78 : 0.42,
+      roughness: 0.34,
+      metalness: 0.62,
+    });
+    const armor = new MeshStandardMaterial({
+      color: interceptor ? 0x4f95aa : 0xb3c2cd,
+      emissive: new Color(interceptor ? 0x0b394a : 0x273743),
+      emissiveIntensity: 0.42,
+      roughness: 0.28,
+      metalness: 0.7,
+    });
+    const glass = new MeshStandardMaterial({
+      color: interceptor ? 0x102d3c : 0x172733,
+      emissive: new Color(interceptor ? 0x0891b2 : 0x475569),
+      emissiveIntensity: 0.9,
+      roughness: 0.1,
+      metalness: 0.86,
+    });
+    const exhaust = new MeshBasicMaterial({
+      color: interceptor ? 0xa5f3fc : 0xfde68a,
+      transparent: true,
+      opacity: 0.92,
+      blending: AdditiveBlending,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    const fuselage = new Mesh(
+      new CylinderGeometry(interceptor ? 0.011 : 0.017, interceptor ? 0.02 : 0.027, interceptor ? 0.14 : 0.16, 10),
+      hull,
+    );
+    const nose = new Mesh(
+      new ConeGeometry(interceptor ? 0.012 : 0.019, interceptor ? 0.046 : 0.052, 10),
+      armor,
+    );
+    nose.position.y = interceptor ? 0.094 : 0.105;
+    const canopy = new Mesh(new SphereGeometry(interceptor ? 0.015 : 0.021, 10, 8), glass);
+    canopy.position.set(0, interceptor ? 0.038 : 0.042, interceptor ? 0.011 : 0.014);
+    canopy.scale.set(1, 1.45, 0.7);
+    const wingGeo = new BoxGeometry(interceptor ? 0.075 : 0.105, interceptor ? 0.031 : 0.044, interceptor ? 0.008 : 0.011);
+    const wingR = new Mesh(wingGeo, hull);
+    wingR.position.set(interceptor ? 0.045 : 0.06, interceptor ? -0.016 : -0.006, 0);
+    wingR.rotation.z = interceptor ? -0.54 : -0.22;
+    const wingL = new Mesh(wingGeo, hull);
+    wingL.position.set(interceptor ? -0.045 : -0.06, interceptor ? -0.016 : -0.006, 0);
+    wingL.rotation.z = interceptor ? 0.54 : 0.22;
+    const tail = new Mesh(new BoxGeometry(interceptor ? 0.009 : 0.014, interceptor ? 0.032 : 0.04, interceptor ? 0.026 : 0.034), armor);
+    tail.position.set(0, interceptor ? -0.065 : -0.07, interceptor ? 0.016 : 0.02);
+    const stripe = new Mesh(new BoxGeometry(interceptor ? 0.052 : 0.066, 0.006, interceptor ? 0.01 : 0.013), exhaust);
+    stripe.position.set(0, interceptor ? -0.012 : 0.004, interceptor ? 0.009 : 0.012);
+    const engineOffset = interceptor ? 0.012 : 0.018;
+    const engineY = interceptor ? -0.078 : -0.087;
+    for (const x of [-engineOffset, engineOffset]) {
+      const nozzle = new Mesh(new CylinderGeometry(interceptor ? 0.006 : 0.008, interceptor ? 0.009 : 0.012, 0.024, 8), armor);
+      nozzle.position.set(x, engineY, 0);
+      const flame = new Mesh(new ConeGeometry(interceptor ? 0.009 : 0.012, interceptor ? 0.038 : 0.044, 8), exhaust);
+      flame.position.set(x, engineY - (interceptor ? 0.03 : 0.035), 0);
+      flame.rotation.x = Math.PI;
+      group.add(nozzle, flame);
+    }
+    const ringColor = interceptor ? 0x67e8f9 : 0xfde68a;
+    const ring = new Mesh(
+      new RingGeometry(interceptor ? 0.062 : 0.074, interceptor ? 0.078 : 0.094, 20),
       new MeshBasicMaterial({
-        color: kind === "interceptor" ? 0xa5f3fc : 0xd9f99d,
+        color: ringColor,
         transparent: true,
-        opacity: 0.9,
+        opacity: 0.3,
+        side: DoubleSide,
         blending: AdditiveBlending,
         depthWrite: false,
       }),
     );
-    engine.position.y = -0.072;
-    const ringColor = kind === "interceptor" ? 0x67e8f9 : 0xbbf7d0;
-    const ring = new Mesh(
-      new RingGeometry(0.055, 0.078, 18),
-      new MeshBasicMaterial({
-        color: ringColor,
-        transparent: true,
-        opacity: 0.45,
-        side: DoubleSide,
-        blending: AdditiveBlending,
-      }),
-    );
     ring.rotation.x = -Math.PI / 2;
-    group.add(fuselage, nose, wingR, wingL, tail, engine, ring);
+    group.add(fuselage, nose, canopy, wingR, wingL, tail, stripe, ring);
+    if (interceptor) {
+      const radarRing = new Mesh(
+        new RingGeometry(0.5, 0.525, 64),
+        new MeshBasicMaterial({
+          color: 0x67e8f9,
+          transparent: true,
+          opacity: 0.16,
+          side: DoubleSide,
+          blending: AdditiveBlending,
+          depthWrite: false,
+          toneMapped: false,
+        }),
+      );
+      radarRing.rotation.x = -Math.PI / 2;
+      group.add(radarRing);
+    }
     return group;
   }
 
@@ -3458,23 +3567,11 @@ export class GeoscapeView {
       const toN = latLonToVector(flight.toLat, flight.toLon, 1).normalize();
       const arcDeg = fromN.angleTo(toN) * (180 / Math.PI);
       if (arcDeg < 1e-6) continue;
-      const encounter = c.interception;
-      const pursuit =
-        this.isPursuing() &&
-        encounter !== undefined &&
-        c.ufoContact &&
-        flight.id.startsWith("patrol:") &&
-        flight.id.endsWith(`:${c.ufoContact.id}`);
-      const disp = pursuit && encounter
-        ? Math.max(
-            0,
-            Math.min(
-              0.99,
-              1 - Math.max(ENGAGEMENT_RANGE_KM, encounter.rangeKm - encounter.closingSpeedKmH * extraHours) /
-                (arcDeg * DEG_TO_KM),
-            ),
-          )
-        : Math.min(1, flight.progress + (flight.speedDegPerHour * extraHours) / arcDeg);
+      // Move the craft at its own cruise speed. The UFO is animated separately at
+      // its own speed; using only their closing-speed difference here under-advances
+      // the interceptor between ticks, then forces it to catch up when the campaign
+      // applies the full craft motion at the next strategic update.
+      const disp = Math.min(1, flight.progress + (flight.speedDegPerHour * extraHours) / arcDeg);
       slerpUnit(fromN, toN, disp, this.scratchA); // unit direction at the craft
       this.scratchB.copy(this.scratchA); // posUnit (surface normal)
       this.scratchA.multiplyScalar(EARTH_RADIUS + 0.14);
@@ -3605,7 +3702,7 @@ export class GeoscapeView {
    * outruns it (slow closure, range opens). 1 when there is no contact.
    */
   private engagementSpeedRatio(): number {
-    const contact = this.campaign?.ufoContact;
+    const contact = this.campaign?.ufoContact ?? this.campaign?.lostUfoContact;
     if (!contact) return 1;
     const { craft, ufo } = this.engagementSpeeds(contact);
     const ratio = craft / ufo;
@@ -3875,7 +3972,7 @@ export class GeoscapeView {
    * once THE ZOOM hands the encounter to the cinematic dogfight (planeCombatView).
    */
   private buildInterceptionOverlay(): HTMLElement {
-    const contact = this.campaign?.ufoContact;
+    const contact = this.campaign?.ufoContact ?? this.campaign?.lostUfoContact;
     const panel = el("div", "geo-intercept");
     const head = el("div", "geo-intercept-head");
     const title = el("div", "geo-intercept-title");
@@ -4103,7 +4200,10 @@ export class GeoscapeView {
     const active =
       !!contact &&
       this.ufoMarker.visible &&
-      (contact.status === "tracked" || contact.status === "crashed" || contact.status === "landed");
+      (contact.status === "tracked" ||
+        contact.status === "crashed" ||
+        contact.status === "landed" ||
+        contact.status === "escaped");
     if (!active) {
       if (label.style.display !== "none") label.style.display = "none";
       return;
@@ -4117,7 +4217,9 @@ export class GeoscapeView {
       if (label.style.display !== "none") label.style.display = "none";
       return;
     }
-    const text = `${missionTypeInfo(contact?.missionType).icon} ${ufoTypeInfo(contact?.ufoType).label}`;
+    const text = contact.status === "escaped"
+      ? "⌖ LAST KNOWN"
+      : `${missionTypeInfo(contact?.missionType).icon} ${ufoTypeInfo(contact?.ufoType).label}`;
     if (text !== this.contactLabelText) {
       this.contactLabelText = text;
       label.textContent = text;
@@ -4222,7 +4324,7 @@ export class GeoscapeView {
 
   /** Concise contact card: id, status instruction, region, time-left. Drops the prose. */
   private contactCard(): HTMLElement {
-    const contact = this.campaign?.ufoContact;
+    const contact = this.campaign?.ufoContact ?? this.campaign?.lostUfoContact;
     // A UFO downed over the ocean is unrecoverable: it gets a distinct "lost at
     // sea" state (slate card + waves badge) vs the land "Crash site — launch
     // assault". Color is always paired with the "≈ Lost at sea" icon+label.
@@ -4248,8 +4350,10 @@ export class GeoscapeView {
     const status = el("p", "geo-contact-status");
     status.textContent = this.contactStatusLabel(contact);
     const meta = el("p", "geo-contact-meta");
+    const shownLat = contact.status === "escaped" ? (contact.lastKnownLat ?? contact.lat) : contact.lat;
+    const shownLon = contact.status === "escaped" ? (contact.lastKnownLon ?? contact.lon) : contact.lon;
     meta.textContent =
-      `${fmtCoord(contact.lat, "N", "S")} / ${fmtCoord(contact.lon, "E", "W")} · ${formatHours(remaining)} left`;
+      `${fmtCoord(shownLat, "N", "S")} / ${fmtCoord(shownLon, "E", "W")} · ${formatHours(remaining)} left`;
     // The badge TEXT is status-derived so an airborne (tracked/engaging) UFO
     // reads "Airborne UFO", never "Crash site" — matching the status line.
     // missionTypeInfo still drives the marker icon/color/urgent styling; a
@@ -4277,6 +4381,21 @@ export class GeoscapeView {
     // (never conveyed by colour alone) and the raw speeds via uiFormat.
     const speedChip = this.speedMatchupChip(contact);
     if (speedChip) card.append(speedChip);
+    if (
+      contact.status === "escaped" &&
+      this.campaign &&
+      this.opts.onDispatchAreaPatrol &&
+      canDispatchAreaPatrol(this.campaign)
+    ) {
+      const search = el("button", "ui-btn ui-cta");
+      search.type = "button";
+      search.textContent = "Search last known position";
+      search.title = "Dispatch an interceptor to sweep the UFO's last radar position.";
+      search.addEventListener("click", () => {
+        this.opts.onDispatchAreaPatrol?.(makeBase(shownLat, shownLon));
+      });
+      card.append(search);
+    }
     // Mission launch lives on this card now (moved off the base view): a downed-on-
     // land crash site or a landed UFO is directly launchable. A lost-at-sea crash is
     // unrecoverable, so it never offers the CTA (matches the campaign layer's gate).
@@ -4401,6 +4520,8 @@ export class GeoscapeView {
         if (contact.missionType === "terror") return "Terror site — launch assault";
         if (contact.missionType === "baseDefense") return "Base assault — launch defense";
         return "Landed — launch assault";
+      case "escaped":
+        return "Contact lost — search last known position";
       case "tracked":
       default:
         return "Airborne — intercept to engage";
@@ -4421,6 +4542,8 @@ export class GeoscapeView {
         if (contact.missionType === "terror") return "Terror site";
         if (contact.missionType === "baseDefense") return "Base defense";
         return "Landed UFO";
+      case "escaped":
+        return "Last known position";
       case "tracked":
       case "engaging":
       default:
@@ -4508,6 +4631,7 @@ export class GeoscapeView {
     const repairedAt = campaign.interceptor.repairedAtHour;
     const repairing = repairedAt !== undefined && repairedAt > campaign.clock.elapsedHours;
     const transportFlight = (campaign.activeFlights ?? []).find((flight) => flight.kind === "transport");
+    const interceptorFlight = (campaign.activeFlights ?? []).find((flight) => flight.kind === "interceptor");
     const card = el("section", repairing ? "geo-row alert" : "geo-row");
     const title = el("strong");
     const copy = el("p");
@@ -4522,6 +4646,24 @@ export class GeoscapeView {
         transportFlight.arrived || transportFlight.progress >= 1
           ? "On station awaiting deployment orders."
           : `${Math.round(transportFlight.progress * 100)}% en route to the mission site.`;
+    } else if (interceptorFlight?.purpose === "return") {
+      title.textContent = "Interceptor returning to base";
+      copy.textContent =
+        `${Math.round(interceptorFlight.progress * 100)}% through RTB leg. ` +
+        "It will refuel in the hangar after landing.";
+    } else if (interceptorFlight?.patrolMode === "area") {
+      const craft = (campaign.fleet ?? []).find((entry) => entry.id === interceptorFlight.craftId);
+      const fuel = craft?.fuel ?? craft?.maxFuel ?? 0;
+      const maxFuel = craft?.maxFuel ?? 100;
+      const lat = interceptorFlight.patrolLat ?? interceptorFlight.toLat;
+      const lon = interceptorFlight.patrolLon ?? interceptorFlight.toLon;
+      title.textContent = interceptorFlight.stationed ? "Interceptor holding patrol sector" : "Interceptor en route to patrol sector";
+      copy.textContent =
+        `${fmtCoord(lat, "N", "S")} / ${fmtCoord(lon, "E", "W")} · fuel ${Math.round((fuel / Math.max(1, maxFuel)) * 100)}%. ` +
+        "Returns automatically at reserve.";
+    } else if (interceptorFlight) {
+      title.textContent = "Interceptor pursuing UFO";
+      copy.textContent = `${Math.round(interceptorFlight.progress * 100)}% through the active interception route.`;
     } else if (repairedAt !== undefined && repairedAt > campaign.clock.elapsedHours) {
       title.textContent = `Interceptor repair · ${formatPercent(campaign.interceptor.damage)} damage`;
       copy.textContent =
@@ -4679,7 +4821,7 @@ export class GeoscapeView {
 
   /** Globe cursor by mode: crosshair while placing a base, grab otherwise. */
   private cursorForMode(): string {
-    return this.buildMode || canSelectBaseSite(this.opts.campaign) ? "crosshair" : "grab";
+    return this.buildMode || this.patrolMode || canSelectBaseSite(this.opts.campaign) ? "crosshair" : "grab";
   }
 
   private applyCanvasCursor(): void {
@@ -4691,6 +4833,10 @@ export class GeoscapeView {
    *  (UFO / base), otherwise the mode cursor. Skipped mid-drag. */
   private onPointerMove = (event: PointerEvent): void => {
     if (this.disposed || this.down) return;
+    if (this.buildMode || this.patrolMode) {
+      this.renderer.domElement.style.cursor = "crosshair";
+      return;
+    }
     this.updatePointer(event);
     this.raycaster.setFromCamera(this.pointer, this.camera);
     const targets: Object3D[] = [];
@@ -4705,7 +4851,7 @@ export class GeoscapeView {
 
   private onPointerDown = (event: PointerEvent): void => {
     this.down = { x: event.clientX, y: event.clientY };
-    this.renderer.domElement.style.cursor = "grabbing";
+    this.renderer.domElement.style.cursor = this.buildMode || this.patrolMode ? "crosshair" : "grabbing";
   };
 
   private onPointerUp = (event: PointerEvent): void => {
@@ -4727,6 +4873,18 @@ export class GeoscapeView {
       this.refresh();
       return;
     }
+    if (this.patrolMode && this.opts.campaign) {
+      this.updatePointer(event);
+      this.raycaster.setFromCamera(this.pointer, this.camera);
+      const hit = this.raycaster.intersectObject(this.earthMesh, false)[0];
+      if (hit) {
+        const ll = hit.uv ? uvToLatLon(hit.uv) : vectorToLatLon(this.earthGroup.worldToLocal(hit.point.clone()));
+        this.opts.onDispatchAreaPatrol?.(makeBase(ll.lat, ll.lon));
+      }
+      this.patrolMode = false;
+      this.refresh();
+      return;
+    }
     if (!canSelectBaseSite(this.opts.campaign)) return;
 
     this.updatePointer(event);
@@ -4745,7 +4903,7 @@ export class GeoscapeView {
     this.raf = requestAnimationFrame(this.frame);
     const now = performance.now();
     this.baseMarker.scale.setScalar(1 + (this.reducedMotion ? 0 : Math.sin(now * 0.004) * 0.08));
-    const contact = this.campaign?.ufoContact;
+    const contact = this.campaign?.ufoContact ?? this.campaign?.lostUfoContact;
     const urgent = contact ? missionTypeInfo(contact.missionType).urgent : false;
     // Urgent contacts (terror / base defense) pulse faster and harder so they
     // read as higher priority against the steady crash-site markers.

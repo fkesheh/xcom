@@ -418,8 +418,10 @@ describe("campaign state", () => {
     });
     expect(failed.lastInterceptionReport?.summary).toContain("escaped");
     expect(failed.interceptor.sorties).toBe(1);
-    expect(failed.interceptor.damage).toBeGreaterThan(0);
-    expect(failed.interceptor.repairedAtHour).toBeGreaterThan(failed.clock.elapsedHours);
+    // The terror ship outran the Raptor before weapons range: it costs strategic
+    // pressure and fuel, but a clean stern chase does not create repair damage.
+    expect(failed.interceptor.damage).toBe(0);
+    expect(failed.interceptor.repairedAtHour).toBeUndefined();
     expect(failed.clock.lastContactHour).toBe(failed.clock.elapsedHours);
     // Escaped-interception threat gain is scaled by veteran threatGainMult AND the
     // arc-stretch CONTACT_PENALTY_SCALE (0.3): round(6 * 0.55 * 0.3) = 1.

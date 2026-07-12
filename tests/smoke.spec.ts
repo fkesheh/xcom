@@ -189,6 +189,20 @@ test.describe("Blacksite boot smoke", () => {
     ).toBeEnabled();
   });
 
+  test("base Earth View button opens the geoscape", async ({ page }) => {
+    const campaign = createCampaign(BASE, 11, "veteran");
+    await page.addInitScript((state: CampaignState) => {
+      window.localStorage.setItem("blacksite.campaign.v1", JSON.stringify(state));
+    }, campaign);
+    await page.goto("/");
+
+    await expect(page.locator("#base-view")).toBeVisible();
+    const earthView = page.getByRole("button", { name: /open earth view/i });
+    await expect(earthView).toBeVisible();
+    await earthView.click();
+    await expect(page.locator("#geoscape")).toBeVisible();
+  });
+
   test("c) geoscape zoom routes an engaged encounter into the dogfight screen", async ({ page }) => {
     const campaign = dogfightCampaign();
     await page.addInitScript((state: CampaignState) => {
@@ -391,6 +405,40 @@ test.describe("Blacksite boot smoke", () => {
     await expect(page.locator("#geoscape .geo-speed-btn[data-speed='1']")).toBeVisible();
     await expect(page.locator("#geoscape .geo-speed-btn[data-speed='5']")).toBeVisible();
     await expect(page.locator("#geoscape .geo-speed-btn[data-speed='30']")).toBeVisible();
+  });
+
+  test("sector patrol dispatch selects an Earth area and launches an interceptor", async ({ page }) => {
+    const campaign = createCampaign(BASE, 19, "veteran");
+    await page.addInitScript((state: CampaignState) => {
+      window.localStorage.setItem("blacksite.campaign.v1", JSON.stringify(state));
+    }, campaign);
+    await page.goto("/");
+    await expect(page.locator("#base-view")).toBeVisible();
+    await enterRoom(page, "command");
+    await expect(page.locator("#geoscape")).toBeVisible();
+
+    const patrol = page.getByRole("button", { name: /dispatch interceptor patrol/i });
+    await expect(patrol).toBeEnabled();
+    await patrol.click();
+    await expect(page.getByRole("button", { name: /cancel sector patrol/i })).toBeVisible();
+
+    const canvas = page.locator("#geoscape canvas");
+    const box = await canvas.boundingBox();
+    if (!box) throw new Error("Geoscape canvas has no layout box");
+    await canvas.click({ position: { x: box.width / 2, y: box.height / 2 } });
+
+    await expect.poll(async () => page.evaluate(() => {
+      const probe = (window as unknown as {
+        __geoMarkers?: () => { flights: Array<{ id: string }> };
+      }).__geoMarkers?.();
+      return probe?.flights.length ?? 0;
+    })).toBeGreaterThan(0);
+    const fleetChip = page.locator("#geoscape .geo-chip", {
+      has: page.locator(".geo-chip-label", { hasText: /^Fleet$/ }),
+    });
+    await fleetChip.first().click();
+    await expect(page.locator("#geoscape .geo-modal")).toContainText(/patrol sector/i);
+    await page.screenshot({ path: path.join(SHOTS_DIR, "09-geoscape-patrol.png") });
   });
 
   test("G) intercept pursuit auto-flows, has no chase popup, and truly freezes on pause", async ({ page }) => {

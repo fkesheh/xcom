@@ -265,6 +265,10 @@ describe("stern chase: a Raptor cannot catch a battleship", () => {
     expect(state.interception).toBeUndefined();
     expect(state.ufoContact).toBeUndefined();
     expect(state.lastInterceptionReport?.result).toBe("escaped");
+    // A faster UFO escaped before the interceptor ever reached the combat envelope.
+    // No hostile shot was exchanged, so a pure stern chase must not create repair damage.
+    expect(state.lastInterceptionReport?.interceptorDamage).toBe(0);
+    expect(state.fleet?.find((craft) => craft.id === "int-1")?.damage).toBe(0);
   });
 
   it("keepChasing never closes the gap on a faster UFO — it only opens or breaks off", () => {

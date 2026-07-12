@@ -219,6 +219,17 @@ export interface ActiveFlight {
   deployContactId?: string;
   /** For a deployment flight: true once it reached the site and is awaiting the player's DEPLOY click. */
   arrived?: boolean;
+  /**
+   * Patrol intent. Contact patrols shadow a specific UFO; area patrols fly to a
+   * commander-selected sector and keep sweeping it until their fuel reserve calls
+   * them home. Missing is the legacy contact-patrol behaviour.
+   */
+  patrolMode?: "contact" | "area";
+  /** Center of a commander-selected area-patrol sector. */
+  patrolLat?: number;
+  patrolLon?: number;
+  /** True once an area patrol has reached its sector and begun its local sweep. */
+  stationed?: boolean;
 }
 
 export interface UfoContact {
@@ -242,6 +253,11 @@ export interface UfoContact {
   speed?: number;
   /** A UFO shot down over the ocean is lost (no assault mission). */
   overOcean?: boolean;
+  /** Fixed coordinates shown after radar contact is lost while the UFO moves hidden. */
+  lastKnownLat?: number;
+  lastKnownLon?: number;
+  /** Strategic hour at which tracking was lost. */
+  lostAtHour?: number;
   /** 0..1 crash-site condition set at shoot-down; drives crash-site loot + core recovery. Absent => 1 (clean). */
   salvageQuality?: number;
 }
@@ -500,6 +516,8 @@ export interface CampaignState {
   activeFlights?: ActiveFlight[];
   lastInterceptionReport?: InterceptionReport;
   ufoContact?: UfoContact;
+  /** Hidden moving UFO retained briefly after radar loss for last-known-position searches. */
+  lostUfoContact?: UfoContact;
   resources: CampaignResources;
   armory: CampaignArmory;
   market?: EquipmentMarket;

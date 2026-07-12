@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   advanceGeoscape,
   createUfoContact,
+  dispatchAreaPatrol,
   executeInterceptionAction,
   startInterceptionEncounter,
 } from "../src/campaign/geoscape";
@@ -262,6 +263,54 @@ describe("low-fuel auto-return", () => {
     const advanced = advanceGeoscape(start, 1);
     const int1Flight = (advanced.activeFlights ?? []).find((flight) => flight.craftId === "int-1");
     expect(int1Flight!.id.startsWith("return:")).toBe(true);
+  });
+});
+
+// ===========================================================================
+// 2b. AREA PATROL — commander-dispatched interceptor holds its selected sector
+// ===========================================================================
+
+describe("area patrols", () => {
+  it("flies an idle interceptor to the selected sector and keeps it on a local patrol sweep", () => {
+    const start: CampaignState = {
+      ...freshCampaign(),
+      clock: clockAt(10, { lastContactHour: 10 }),
+      ufoContact: undefined,
+      activeFlights: [],
+    };
+
+    const launched = dispatchAreaPatrol(start, { lat: 4, lon: BASE.lon, region: "Africa" });
+    const outbound = (launched.activeFlights ?? []).find((flight) => flight.craftId === "int-1");
+    expect(outbound?.purpose).toBe("patrol");
+    expect(outbound?.patrolMode).toBe("area");
+    expect(outbound?.stationed).toBe(false);
+
+    // The Raptor reaches this nearby sector in under one strategic hour. It must not
+    // disappear on arrival: it becomes a local sweep that continues to consume fuel.
+    const stationed = advanceGeoscape(launched, 1);
+    const onStation = (stationed.activeFlights ?? []).find((flight) => flight.craftId === "int-1");
+    expect(onStation?.purpose).toBe("patrol");
+    expect(onStation?.patrolMode).toBe("area");
+    expect(onStation?.stationed).toBe(true);
+    expect(onStation?.progress).toBeLessThan(1);
+    expect(fuelOf(stationed, "int-1")).toBeLessThan(MAX_FUEL);
+  });
+
+  it("turns an area patrol into a visible return leg at its fuel reserve", () => {
+    const start: CampaignState = {
+      ...patchCraft(freshCampaign(), "int-1", { fuel: MAX_FUEL * FUEL_RESERVE_FRACTION }),
+      clock: clockAt(10, { lastContactHour: 10 }),
+      ufoContact: undefined,
+      activeFlights: [],
+    };
+    const launched = dispatchAreaPatrol(start, { lat: 10, lon: BASE.lon, region: "Africa" });
+    const returned = advanceGeoscape(launched, 0.1);
+    const flight = (returned.activeFlights ?? []).find((entry) => entry.craftId === "int-1");
+
+    expect(flight?.purpose).toBe("return");
+    expect(flight?.id.startsWith("return:")).toBe(true);
+    expect(flight?.toLat).toBe(BASE.lat);
+    expect(flight?.toLon).toBe(BASE.lon);
   });
 });
 

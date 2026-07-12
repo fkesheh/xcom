@@ -390,7 +390,8 @@ describe("interception outcomes", () => {
     expect(resolved.lastInterceptionReport?.result).toBe("escaped");
     expect(resolved.lastInterceptionReport?.summary).toContain("escaped");
     expect(resolved.interceptor.sorties).toBe(1);
-    expect(resolved.interceptor.damage).toBeGreaterThan(0);
+    // An outrun exits from pursuit before return fire can occur.
+    expect(resolved.interceptor.damage).toBe(0);
   });
 
   it("breaks off (interceptor destroyed) when a lopsided hull is lost — UFO gets away", () => {

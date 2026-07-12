@@ -440,13 +440,15 @@ function craftRepairHours(campaign: CampaignState, damage: number): number {
 
 /**
  * Applies interception damage to a single craft: sets total damage, records a sortie,
- * and schedules its repair. The legacy `interceptor` field is mirrored to the damaged
- * craft so UI/migration code that still reads it stays consistent. No-op if the craft
- * is not in the fleet.
+ * and schedules its repair only when it actually took damage. A clean outrun must not
+ * ground a pristine interceptor just because a sortie was recorded. The legacy
+ * `interceptor` field is mirrored so UI/migration code that still reads it stays
+ * consistent. No-op if the craft is not in the fleet.
  */
 export function damageCraft(campaign: CampaignState, craftId: string, damage: number): CampaignState {
   const totalDamage = Math.max(0, Math.min(INTERCEPTOR_DAMAGE_MAX, Math.floor(damage)));
-  const repairedAtHour = campaign.clock.elapsedHours + craftRepairHours(campaign, totalDamage);
+  const repairedAtHour =
+    totalDamage > 0 ? campaign.clock.elapsedHours + craftRepairHours(campaign, totalDamage) : undefined;
   if (Array.isArray(campaign.fleet) && campaign.fleet.length > 0) {
     const idx = campaign.fleet.findIndex((craft) => craft.id === craftId);
     if (idx === -1) return campaign;
@@ -454,24 +456,33 @@ export function damageCraft(campaign: CampaignState, craftId: string, damage: nu
     const sorties = craft.sorties + 1;
     // Spread the existing craft so per-craft stats (speed/hull/weaponPower) survive
     // a sortie — rebuilding field-by-field would silently drop them (the field-list gotcha).
+    const { repairedAtHour: _previousRepair, ...craftWithoutRepair } = craft;
     const updated: Craft = {
-      ...craft,
+      ...craftWithoutRepair,
       damage: totalDamage,
       sorties,
-      repairedAtHour,
+      ...(repairedAtHour !== undefined ? { repairedAtHour } : {}),
     };
     const fleet = [...campaign.fleet.slice(0, idx), updated, ...campaign.fleet.slice(idx + 1)];
     return {
       ...campaign,
       fleet,
-      interceptor: { damage: totalDamage, sorties, repairedAtHour },
+      interceptor: {
+        damage: totalDamage,
+        sorties,
+        ...(repairedAtHour !== undefined ? { repairedAtHour } : {}),
+      },
     };
   }
   // Legacy fallback (no fleet): apply directly to the single interceptor.
   const sorties = campaign.interceptor.sorties + 1;
   return {
     ...campaign,
-    interceptor: { damage: totalDamage, sorties, repairedAtHour },
+    interceptor: {
+      damage: totalDamage,
+      sorties,
+      ...(repairedAtHour !== undefined ? { repairedAtHour } : {}),
+    },
   };
 }
 
@@ -3006,6 +3017,8 @@ export function loadCampaign(): CampaignState | null {
     // orphan. (Cross-version recovery, not a hard version bump — a v2 gate would discard
     // every otherwise-good save.)
     let ufoContact = normalizeUfoContact(parsed.ufoContact, clock);
+    const normalizedLostContact = normalizeUfoContact(parsed.lostUfoContact, clock, true);
+    const lostUfoContact = normalizedLostContact?.status === "escaped" ? normalizedLostContact : undefined;
     let interception = normalizeInterception(parsed.interception, ufoContact);
     const validEngagement =
       ufoContact?.status === "engaging" &&
@@ -3031,6 +3044,7 @@ export function loadCampaign(): CampaignState | null {
       activeFlights: normalizeActiveFlights(parsed.activeFlights),
       lastInterceptionReport: normalizeInterceptionReport(parsed.lastInterceptionReport),
       ufoContact,
+      lostUfoContact,
       interception,
       resources,
       armory,
@@ -3337,6 +3351,21 @@ function normalizeActiveFlight(value: unknown): ActiveFlight | undefined {
         : maybe.purpose === "patrol"
           ? "patrol"
           : undefined;
+  const patrolMode =
+    purpose === "patrol" && (maybe.patrolMode === "contact" || maybe.patrolMode === "area")
+      ? maybe.patrolMode
+      : undefined;
+  const patrolCenter =
+    patrolMode === "area" &&
+    typeof maybe.patrolLat === "number" &&
+    typeof maybe.patrolLon === "number" &&
+    Number.isFinite(maybe.patrolLat) &&
+    Number.isFinite(maybe.patrolLon)
+      ? {
+          patrolLat: Math.max(-90, Math.min(90, maybe.patrolLat)),
+          patrolLon: Math.max(-180, Math.min(180, maybe.patrolLon)),
+        }
+      : undefined;
   return {
     id: maybe.id,
     craftId: maybe.craftId,
@@ -3353,6 +3382,9 @@ function normalizeActiveFlight(value: unknown): ActiveFlight | undefined {
       ? { deployContactId: maybe.deployContactId }
       : {}),
     ...(purpose === "deployment" && typeof maybe.arrived === "boolean" ? { arrived: maybe.arrived } : {}),
+    ...(patrolMode ? { patrolMode } : {}),
+    ...(patrolCenter ?? {}),
+    ...(patrolMode === "area" && typeof maybe.stationed === "boolean" ? { stationed: maybe.stationed } : {}),
   };
 }
 
@@ -3469,7 +3501,11 @@ function migrateLegacyFleet(interceptor: InterceptorState): Craft[] {
   return [int1, { ...STARTING_FLEET[1]! }, { ...STARTING_FLEET[2]! }];
 }
 
-function normalizeUfoContact(value: unknown, clock: CampaignClock): UfoContact | undefined {
+function normalizeUfoContact(
+  value: unknown,
+  clock: CampaignClock,
+  allowEscaped = false,
+): UfoContact | undefined {
   if (!value || typeof value !== "object") return undefined;
   const maybe = value as Partial<UfoContact>;
   if (
@@ -3485,9 +3521,7 @@ function normalizeUfoContact(value: unknown, clock: CampaignClock): UfoContact |
   ) {
     return undefined;
   }
-  // applyInterceptionOutcome clears ufoContact on escape, so a persisted "escaped"
-  // contact is stale (the UFO is gone for good) — drop it rather than revive it.
-  if (maybe.status === "escaped") return undefined;
+  if (maybe.status === "escaped" && !allowEscaped) return undefined;
   return {
     id: maybe.id,
     status:
@@ -3528,6 +3562,12 @@ function normalizeUfoContact(value: unknown, clock: CampaignClock): UfoContact |
     // Consumers derive the current speed from ufoType (contactSpeedDegPerHour), so a
     // reloaded contact always cruises/classifies against the live profile.
     overOcean: typeof maybe.overOcean === "boolean" ? maybe.overOcean : undefined,
+    lastKnownLat:
+      typeof maybe.lastKnownLat === "number" ? Math.max(-90, Math.min(90, maybe.lastKnownLat)) : undefined,
+    lastKnownLon:
+      typeof maybe.lastKnownLon === "number" ? Math.max(-180, Math.min(180, maybe.lastKnownLon)) : undefined,
+    lostAtHour:
+      typeof maybe.lostAtHour === "number" ? Math.max(0, maybe.lostAtHour) : undefined,
     // Crash-site salvage condition (0..1) set at shoot-down; drives crash loot + core
     // recovery. A new UfoContact field — reconstruct it or it is dropped on reload.
     salvageQuality:

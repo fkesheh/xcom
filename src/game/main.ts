@@ -54,6 +54,7 @@ import type {
 } from "../campaign/types";
 import {
   advanceGeoscape,
+  dispatchAreaPatrol,
   startInterceptionEncounter,
   executeInterceptionAction,
   CORE_RECOVER_THRESHOLD,
@@ -461,6 +462,14 @@ function buildGeoscapeCallbacks(campaign: CampaignState | null) {
       // screens (no more instant snap to a separate dogfight view).
       geoscape?.update(currentCampaign);
       geoscape?.beginAutoPursuit();
+    },
+    onDispatchAreaPatrol: (area: BaseLocation) => {
+      if (!currentCampaign) return;
+      const next = dispatchAreaPatrol(currentCampaign, area);
+      if (next === currentCampaign) return;
+      currentCampaign = next;
+      debouncedSave(currentCampaign);
+      geoscape?.update(currentCampaign);
     },
     onInterceptionAction: (action: InterceptionAction) => {
       // Applied only AFTER the geoscape's combat beat has played (precompute ->

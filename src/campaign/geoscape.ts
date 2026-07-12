@@ -69,6 +69,10 @@ import {
 } from "./storage";
 
 export const GEOSCAPE_SCAN_HOURS = 6;
+/** Strategic radar radius carried by every airborne interceptor (great-circle degrees). */
+export const INTERCEPTOR_RADAR_RANGE_DEG = 12;
+/** Time available to search the last-known position before the trail goes cold. */
+export const LOST_CONTACT_SEARCH_HOURS = 8;
 
 export interface UfoTypeProfile {
   strength: number;
@@ -255,9 +259,20 @@ function contactIntervalMonthFactor(elapsedHours: number): number {
 function contactInterval(campaign: CampaignState, elapsedHours: number): number {
   const base = hasBaseFacility(campaign, "radar-2") ? 12 : 18;
   const extra = campaign.bases?.length ?? 0;
-  const raw = base - extra * 3;
+  const airborneRadar = airborneInterceptorRadars(campaign).length;
+  const raw = base - extra * 3 - airborneRadar * 3;
   const monthFactor = contactIntervalMonthFactor(elapsedHours);
   return Math.max(6, Math.round(raw * monthFactor));
+}
+
+/** Area-patrol interceptors actively sweeping with their onboard radar. */
+function airborneInterceptorRadars(campaign: CampaignState): ActiveFlight[] {
+  return (campaign.activeFlights ?? []).filter(
+    (flight) =>
+      flight.kind === "interceptor" &&
+      flight.patrolMode === "area" &&
+      flight.purpose !== "return",
+  );
 }
 
 /** Squared great-circle-ish distance from a base to a lat/lon (lat/lon weighted by cos(lat)). */
@@ -360,7 +375,7 @@ function moveTrackedContact(contact: UfoContact, hours: number): UfoContact {
   // An interception does not freeze the target in space. While an interceptor is
   // chasing, the UFO keeps following the same strategic heading; only a landed or
   // crashed contact is stationary.
-  if (contact.status !== "tracked" && contact.status !== "engaging") return contact;
+  if (contact.status !== "tracked" && contact.status !== "engaging" && contact.status !== "escaped") return contact;
   const heading = contact.heading;
   // A heading marks a flying (crashSite) contact; ground assaults hold position and
   // carry none. Speed comes from the live ufoType profile (contactSpeedDegPerHour), so
@@ -372,8 +387,8 @@ function moveTrackedContact(contact: UfoContact, hours: number): UfoContact {
   const lat = Math.max(-56, Math.min(68, next.lat));
   return {
     ...contact,
-    lat: Math.round(lat * 10) / 10,
-    lon: Math.round(lon * 10) / 10,
+    lat,
+    lon,
   };
 }
 
@@ -391,8 +406,32 @@ export function createUfoContact(
   const zoneLat = Math.max(-56, Math.min(68, zone.lat + offset(hash(seed ^ 0xa511e9b3), 7)));
   const lonRaw = zone.lon + offset(hash(seed ^ 0x63d83595), 11);
   const zoneLon = lonRaw > 180 ? lonRaw - 360 : lonRaw < -180 ? lonRaw + 360 : lonRaw;
-  const lat = atBase ? campaign.base.lat : zoneLat;
-  const lon = atBase ? campaign.base.lon : zoneLon;
+  const airborneRadars = airborneInterceptorRadars(campaign);
+  const radarFlight = airborneRadars.length > 0
+    ? airborneRadars[seed % airborneRadars.length]
+    : undefined;
+  const radarPosition = radarFlight ? activeFlightPosition(radarFlight) : undefined;
+  const radarDetection = radarPosition
+    ? greatCircleDestination(
+      radarPosition.lat,
+      radarPosition.lon,
+      rollFraction(hash(seed ^ 0x4f1bbcdc)) * 360,
+      2 + rollFraction(hash(seed ^ 0x7a85c441)) * (INTERCEPTOR_RADAR_RANGE_DEG - 2),
+    )
+    : undefined;
+  const radarLon = radarDetection
+    ? radarDetection.lon > 180
+      ? radarDetection.lon - 360
+      : radarDetection.lon < -180
+        ? radarDetection.lon + 360
+        : radarDetection.lon
+    : undefined;
+  const lat = atBase
+    ? campaign.base.lat
+    : radarDetection
+      ? Math.max(-56, Math.min(68, radarDetection.lat))
+      : zoneLat;
+  const lon = atBase ? campaign.base.lon : (radarLon ?? zoneLon);
   const all = allBases(campaign);
   const region = atBase
     ? campaign.base.region
@@ -533,7 +572,9 @@ function makeInterceptionReport(
         ? overOcean
           ? `${contact.id} shot down over the ocean and lost at sea. Interceptor took ${damage}% damage.`
           : `${contact.id} forced down over ${contact.region}. Interceptor took ${damage}% damage.`
-        : `${contact.id} escaped over ${contact.region}. Interceptor took ${damage}% damage during failed pursuit.`,
+        : damage > 0
+          ? `${contact.id} escaped over ${contact.region}. Interceptor took ${damage}% damage during the break-off.`
+          : `${contact.id} escaped over ${contact.region}. The interceptor never reached weapons range and is returning intact.`,
   };
 }
 
@@ -546,7 +587,9 @@ export function interceptionForecast(campaign: CampaignState): InterceptionForec
   // simply escapes. Only a matched-or-faster craft can convert a score edge into a kill.
   const outrun = interceptionSpeedAdvantage(campaign, contact) === "outrun";
   const succeeds = !outrun && interceptorScore >= ufoScore;
-  const damage = interceptionDamage(campaign, contact, succeeds);
+  // An outrun is a stern chase, not a dogfight. It should cost fuel and time, but
+  // cannot damage the craft unless it actually reaches the combat envelope.
+  const damage = outrun ? 0 : interceptionDamage(campaign, contact, succeeds);
   const risk = succeeds ? "favorable" : "dangerous";
   return {
     contactId: contact.id,
@@ -559,7 +602,7 @@ export function interceptionForecast(campaign: CampaignState): InterceptionForec
     canLaunch: canLaunchInterceptor(campaign),
     risk,
     summary: outrun
-      ? `Forecast dangerous: this UFO outruns the interceptor and will escape the pursuit (est. ${damage}% damage).`
+      ? "Forecast: this UFO outruns the interceptor and will escape the pursuit (no combat damage expected)."
       : succeeds
         ? `Forecast favorable: forced landing likely, estimated interceptor damage ${damage}%.`
         : `Forecast dangerous: UFO may escape, estimated interceptor damage ${damage}%.`,
@@ -655,6 +698,17 @@ function applyInterceptionOutcome(
       strategic,
       regionalPanic,
       ufoContact: undefined,
+      lostUfoContact: {
+        ...contact,
+        status: "escaped",
+        lastKnownLat: contact.lat,
+        lastKnownLon: contact.lon,
+        lostAtHour: afterCraft.clock.elapsedHours,
+        expiresAtHour: Math.min(
+          contact.expiresAtHour,
+          afterCraft.clock.elapsedHours + LOST_CONTACT_SEARCH_HOURS,
+        ),
+      },
       interception: undefined,
     };
   }
@@ -861,7 +915,7 @@ export function startInterceptionEncounter(campaign: CampaignState): CampaignSta
   const existingFlight = (campaign.activeFlights ?? []).find(
     (flight) =>
       flight.craftId === interceptor.id &&
-      isPatrolFlight(flight) &&
+      isContactPatrolFlight(flight) &&
       flight.id.endsWith(`:${contact.id}`),
   );
   // The campaign state, not the renderer, owns the outbound aircraft. This is
@@ -922,8 +976,10 @@ function classifyKillingBlow(
 
 /**
  * Terminal interceptor damage for a resolved encounter: the actual hull lost this
- * fight, floored at a deterministic baseline so a clean long-range kill still costs the
- * interceptor a real (repair-scheduling) dent. Returns { finalDamage (absolute), reportDamage (new) }.
+ * fight, floored at a deterministic baseline only for a confirmed kill so a clean
+ * long-range shoot-down still costs a real (repair-scheduling) dent. An escaped
+ * contact keeps only hull damage actually dealt: an outrun stern chase has no shots
+ * exchanged and therefore no repair damage. Returns { finalDamage (absolute), reportDamage (new) }.
  */
 function resolveInterceptorDamage(
   campaign: CampaignState,
@@ -934,7 +990,7 @@ function resolveInterceptorDamage(
 ): { finalDamage: number; reportDamage: number } {
   const beforeDmg = engagingDamage(campaign);
   const absolute = encounterDamagePercent(interceptorHp, hull);
-  const baseline = interceptionDamage(campaign, contact, crashed);
+  const baseline = crashed ? interceptionDamage(campaign, contact, true) : 0;
   const finalDamage = Math.min(100, Math.max(absolute, beforeDmg + baseline));
   return { finalDamage, reportDamage: Math.max(0, finalDamage - beforeDmg) };
 }
@@ -1722,6 +1778,8 @@ function rollContactMissionType(campaign: CampaignState, detectedAtHour: number)
  * the player engages or the contact expires, so it never teleports home to respawn.
  */
 const PATROL_SHADOW_PROGRESS = 0.99;
+/** Half-width (in longitude degrees) of the local sweep flown after an area patrol arrives. */
+const AREA_PATROL_SWEEP_DEG = 0.7;
 // PATROL_ID_PREFIX / RETURN_ID_PREFIX are defined in storage (beside the fleet logic)
 // so chooseInterceptor can distinguish a contact's patrol from a return leg; imported above.
 
@@ -1788,6 +1846,27 @@ function isPatrolFlight(flight: ActiveFlight): boolean {
   return flight.id.startsWith(PATROL_ID_PREFIX);
 }
 
+/** A legacy/missing patrol mode means the flight is pursuing a UFO contact. */
+function isContactPatrolFlight(flight: ActiveFlight): boolean {
+  return isPatrolFlight(flight) && flight.patrolMode !== "area";
+}
+
+/** A commander-selected sector patrol, independent of a particular UFO contact. */
+function isAreaPatrolFlight(flight: ActiveFlight): boolean {
+  return isPatrolFlight(flight) && flight.patrolMode === "area";
+}
+
+function clampLatitude(lat: number): number {
+  return Math.max(-89.2, Math.min(89.2, lat));
+}
+
+function wrapLongitude(lon: number): number {
+  const wrapped = ((lon + 180) % 360 + 360) % 360 - 180;
+  // Avoid serializing harmless IEEE remainder noise (e.g. 14.200000000000045)
+  // into campaign saves and UI coordinate readouts.
+  return Math.round(wrapped * 1_000_000) / 1_000_000;
+}
+
 /** Moves a flight a fixed `hours` along its route by speedDegPerHour * hours. */
 function advanceFlightProgress(flight: ActiveFlight, hours: number): ActiveFlight {
   if (hours <= 0) return flight;
@@ -1836,6 +1915,85 @@ export function makePatrolFlight(craft: Craft, campaign: CampaignState, contact:
     speedDegPerHour: craftSpeedDegPerHour(craft),
     startedAtHour: campaign.clock.elapsedHours,
     purpose: "patrol",
+    patrolMode: "contact",
+  };
+}
+
+/** Create the outbound leg for a player-selected sector patrol. */
+function makeAreaPatrolFlight(craft: Craft, campaign: CampaignState, area: BaseLocation): ActiveFlight {
+  const patrolLat = clampLatitude(area.lat);
+  const patrolLon = wrapLongitude(area.lon);
+  const stamp = Math.floor(campaign.clock.elapsedHours * 60);
+  return {
+    id: `${PATROL_ID_PREFIX}${craft.id}:area:${stamp}:${Math.round(patrolLat * 10)}:${Math.round(patrolLon * 10)}`,
+    craftId: craft.id,
+    kind: "interceptor",
+    fromLat: campaign.base.lat,
+    fromLon: campaign.base.lon,
+    toLat: patrolLat,
+    toLon: patrolLon,
+    progress: 0,
+    speedDegPerHour: craftSpeedDegPerHour(craft),
+    startedAtHour: campaign.clock.elapsedHours,
+    purpose: "patrol",
+    patrolMode: "area",
+    patrolLat,
+    patrolLon,
+    stationed: false,
+  };
+}
+
+/** Whether a ready interceptor is available to be dispatched to a map sector. */
+export function canDispatchAreaPatrol(campaign: CampaignState): boolean {
+  return campaign.strategic.status === "active" && !!chooseIdleInterceptor(campaign, campaign.activeFlights ?? []);
+}
+
+/**
+ * Dispatch the fastest idle interceptor to a commander-selected sector. The craft
+ * remains a visible, fuel-burning patrol until its reserve threshold sends it home.
+ */
+export function dispatchAreaPatrol(campaign: CampaignState, area: BaseLocation): CampaignState {
+  if (campaign.strategic.status !== "active") return campaign;
+  const flights = campaign.activeFlights ?? [];
+  const interceptor = chooseIdleInterceptor(campaign, flights);
+  if (!interceptor) return campaign;
+  return {
+    ...campaign,
+    activeFlights: [...flights, makeAreaPatrolFlight(interceptor, campaign, area)],
+  };
+}
+
+/** Turn an arrived area patrol into a continuous local east-west sweep about its selected sector. */
+function beginAreaPatrolSweep(flight: ActiveFlight): ActiveFlight {
+  const centerLat = clampLatitude(flight.patrolLat ?? flight.toLat);
+  const centerLon = wrapLongitude(flight.patrolLon ?? flight.toLon);
+  // Longitude degrees shrink near the poles; widen the authored half-width just
+  // enough to keep the visual sweep legible without crossing a pole.
+  const cosLat = Math.max(0.28, Math.cos((centerLat * Math.PI) / 180));
+  const halfLon = Math.min(2.5, AREA_PATROL_SWEEP_DEG / cosLat);
+  return {
+    ...flight,
+    fromLat: centerLat,
+    fromLon: wrapLongitude(centerLon - halfLon),
+    toLat: centerLat,
+    toLon: wrapLongitude(centerLon + halfLon),
+    progress: 0.5,
+    patrolLat: centerLat,
+    patrolLon: centerLon,
+    stationed: true,
+  };
+}
+
+/** Reverse a completed local sweep at its live endpoint; never teleport the craft. */
+function reverseAreaPatrolSweep(flight: ActiveFlight): ActiveFlight {
+  return {
+    ...flight,
+    fromLat: flight.toLat,
+    fromLon: flight.toLon,
+    toLat: flight.fromLat,
+    toLon: flight.fromLon,
+    progress: 0,
+    stationed: true,
   };
 }
 
@@ -1861,7 +2019,7 @@ function returnInterceptionFlight(campaign: CampaignState, contactId: string): C
   const flights = campaign.activeFlights ?? [];
   let changed = false;
   const returned = flights.map((flight) => {
-    if (!isPatrolFlight(flight) || !flight.id.endsWith(`:${contactId}`)) return flight;
+    if (!isContactPatrolFlight(flight) || !flight.id.endsWith(`:${contactId}`)) return flight;
     changed = true;
     return makeReturnFlight(flight, campaign);
   });
@@ -1994,11 +2152,24 @@ function manageActiveFlights(
     return { flights: [], fleet: refuelAtBase(baseFleet, [], dt) };
   }
 
-  // 1. Re-aim existing patrols at the tracked UFO's latest position (homing).
-  //    (No auto-scramble — craft stay in hangar until the player hits Intercept.)
-  const withSpawn = flights.map((flight) =>
-    isPatrolFlight(flight) && chasing ? { ...flight, toLat: contact!.lat, toLon: contact!.lon } : flight,
-  );
+  // 1. Re-aim existing CONTACT patrols at the tracked UFO's latest position
+  //    (homing). Commander-selected area patrols deliberately keep their own
+  //    sector route; they are not silently retasked by a radar contact.
+  const withSpawn = flights.map((flight) => {
+    if (!isContactPatrolFlight(flight) || !chasing) return flight;
+    // Progress is relative to a specific pair of route endpoints. Preserve the
+    // craft's live position before replacing the moving UFO endpoint; carrying the
+    // old fraction onto the new arc produces a visible snap on every strategic tick.
+    const live = activeFlightPosition(flight);
+    return {
+      ...flight,
+      fromLat: live.lat,
+      fromLon: live.lon,
+      toLat: contact!.lat,
+      toLon: contact!.lon,
+      progress: 0,
+    };
+  });
 
   // 2. Advance every flight along its route by dt and burn fuel from each engaging
   //    craft proportional to the great-circle distance it covered this tick.
@@ -2012,18 +2183,26 @@ function manageActiveFlights(
   });
   const burnedFleet = applyFlightFuelBurn(baseFleet, burnByCraft);
 
-  // 3. Patrols that have caught a still-tracked UFO shadow it (clamp below arrival).
+  // 3. Contact patrols that have caught a still-tracked UFO shadow it (clamp below
+  //    arrival). An area patrol instead turns into a continuous local sweep when it
+  //    reaches its selected sector.
   const shadowed = advanced.map((flight) =>
-    isPatrolFlight(flight) && chasing && flight.progress >= PATROL_SHADOW_PROGRESS
+    isContactPatrolFlight(flight) && chasing && flight.progress >= PATROL_SHADOW_PROGRESS
       ? { ...flight, progress: PATROL_SHADOW_PROGRESS }
       : flight,
   );
+  const stationed = shadowed.map((flight) => {
+    if (!isAreaPatrolFlight(flight) || flight.progress < 1) return flight;
+    return flight.stationed ? reverseAreaPatrolSweep(flight) : beginAreaPatrolSweep(flight);
+  });
 
-  // 4. Patrols whose UFO is gone OR whose craft is low on fuel turn for home.
+  // 4. Contact patrols whose UFO is gone, and ALL patrols whose craft reaches its
+  //    fuel reserve, turn for home from their live position.
   const converted: ActiveFlight[] = [];
-  const kept = shadowed.flatMap((flight) => {
+  const kept = stationed.flatMap((flight) => {
     const outOfFuel = !isReturnFlight(flight) && craftFuelBelowReserve(burnedFleet, flight.craftId);
-    if (isPatrolFlight(flight) && (patrolTargetLost(contact) || outOfFuel)) {
+    const targetLost = isContactPatrolFlight(flight) && patrolTargetLost(contact);
+    if (isPatrolFlight(flight) && (targetLost || outOfFuel)) {
       converted.push(makeReturnFlight(flight, campaign));
       return [];
     }
@@ -2042,6 +2221,9 @@ function manageActiveFlights(
         ? [flight]
         : [makeReturnFlight(flight, campaign)];
     }
+    // Area patrols hold their local sweep indefinitely until fuel sends them home;
+    // unlike a point-to-point transit, reaching a sweep endpoint never retires them.
+    if (isAreaPatrolFlight(flight)) return [flight];
     return flight.progress < 1 ? [flight] : [];
   });
 
@@ -2065,7 +2247,7 @@ function advancePursuitWithClock(campaign: CampaignState, dt: number): CampaignS
   }
 
   const patrol = (campaign.activeFlights ?? []).find(
-    (flight) => isPatrolFlight(flight) && flight.id.endsWith(`:${contact.id}`),
+    (flight) => isContactPatrolFlight(flight) && flight.id.endsWith(`:${contact.id}`),
   );
   // A fuel-constrained patrol may have turned around in manageActiveFlights this
   // tick. Resolve the chase immediately instead of letting an absent craft keep
@@ -2121,6 +2303,7 @@ export function advanceGeoscape(
   let clock: CampaignClock = { ...advanced };
   let strategic = campaign.strategic;
   let contact = campaign.ufoContact;
+  let lostContact = campaign.lostUfoContact;
   let nextCampaign = applyFundingReports({ ...campaign, clock, strategic, ufoContact: contact }, clock);
   clock = nextCampaign.clock;
   strategic = nextCampaign.strategic;
@@ -2129,6 +2312,7 @@ export function advanceGeoscape(
   if (contact && (contact.status === "tracked" || contact.status === "engaging")) {
     contact = moveTrackedContact(contact, dt);
   }
+  if (lostContact?.status === "escaped") lostContact = moveTrackedContact(lostContact, dt);
 
   if (contact && contact.expiresAtHour <= clock.elapsedHours) {
     const expiredContact = contact;
@@ -2136,8 +2320,7 @@ export function advanceGeoscape(
     strategic = nextCampaign.strategic;
     // A UFO that slips away while still an active threat (tracked/landed — never shot down)
     // carries out its mission: terror, harvesting, or recon raise regional panic, scaled by
-    // mission type and difficulty. A crashed (already shot-down) contact only pays the
-    // baseline ignore penalty above — its crew is already wrecked.
+    // mission type and difficulty. A crashed (already-shot-down) contact only pays baseline.
     if (expiredContact.status !== "crashed") {
       nextCampaign = applyContactTerror(nextCampaign, expiredContact);
       strategic = nextCampaign.strategic;
@@ -2146,18 +2329,65 @@ export function advanceGeoscape(
     clock = { ...clock, lastContactHour: clock.elapsedHours };
   }
 
-  if (!contact && clock.elapsedHours >= clock.lastContactHour + contactInterval(campaign, clock.elapsedHours)) {
+  if (lostContact && lostContact.expiresAtHour <= clock.elapsedHours) {
+    // Escape already applied its strategic penalty. A cold search trail simply expires.
+    lostContact = undefined;
+    clock = { ...clock, lastContactHour: clock.elapsedHours };
+  }
+
+  if (!contact && !lostContact && clock.elapsedHours >= clock.lastContactHour + contactInterval(campaign, clock.elapsedHours)) {
     const missionType = rollContactMissionType(nextCampaign, clock.elapsedHours);
     contact = createUfoContact(nextCampaign, clock.elapsedHours, missionType);
     clock = { ...clock, lastContactHour: clock.elapsedHours };
   }
 
-  const { flights: activeFlights, fleet: advancedFleet } = manageActiveFlights(nextCampaign, contact, dt);
+  let { flights: activeFlights, fleet: advancedFleet } = manageActiveFlights(nextCampaign, contact, dt);
+  // An area-patrol interceptor can reacquire a hidden escaped UFO with its onboard
+  // radar. Search both objects at their live post-tick positions. On a hit, retask
+  // that exact craft from its current position so renewed pursuit never teleports.
+  if (lostContact?.status === "escaped") {
+    const radarFlight = activeFlights.find((flight) => {
+      if (!isAreaPatrolFlight(flight) || flight.kind !== "interceptor") return false;
+      const position = activeFlightPosition(flight);
+      return greatCircleDistanceDeg(position.lat, position.lon, lostContact!.lat, lostContact!.lon) <= INTERCEPTOR_RADAR_RANGE_DEG;
+    });
+    if (radarFlight) {
+      const position = activeFlightPosition(radarFlight);
+      contact = {
+        ...lostContact,
+        status: "tracked",
+        detectedAtHour: clock.elapsedHours,
+        expiresAtHour: clock.elapsedHours + UFO_TYPE_PROFILES[ufoTypeOf(lostContact)].lifetimeHours,
+        lastKnownLat: undefined,
+        lastKnownLon: undefined,
+        lostAtHour: undefined,
+      };
+      lostContact = undefined;
+      activeFlights = activeFlights.map((flight) =>
+        flight.id === radarFlight.id
+          ? {
+              ...flight,
+              id: `${PATROL_ID_PREFIX}${flight.craftId}:${contact!.id}`,
+              fromLat: position.lat,
+              fromLon: position.lon,
+              toLat: contact!.lat,
+              toLon: contact!.lon,
+              progress: 0,
+              patrolMode: "contact" as const,
+              patrolLat: undefined,
+              patrolLon: undefined,
+              stationed: undefined,
+            }
+          : flight,
+      );
+    }
+  }
   const withFlights: CampaignState = {
     ...nextCampaign,
     clock,
     strategic,
     ufoContact: contact,
+    lostUfoContact: lostContact,
     activeFlights,
     fleet: advancedFleet,
   };

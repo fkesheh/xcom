@@ -421,6 +421,21 @@ const CSS = UI_TOKENS + "\n" + UI_BASE + "\n" + UI_COMPONENTS + "\n" + UI_PRIMIT
   cursor: pointer;
 }
 #base-view .help-btn:hover { border-color: rgba(103,232,249,.9); background: rgba(14,52,67,.9); }
+#base-view .earth-btn {
+  min-height: 30px;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 7px;
+  border: 1px solid rgba(103,232,249,.52);
+  color: var(--ui-cyan);
+  background: rgba(8,38,53,.78);
+  box-shadow: inset 0 0 14px rgba(34,211,238,.08);
+  font: 800 var(--ui-text-xs)/1 ui-monospace, monospace;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+#base-view .earth-btn:hover { border-color: rgba(103,232,249,.95); background: rgba(14,58,76,.94); }
 /* Base topbar stat chips share the .ui-chip primitive so they read as one system
    with the geoscape stat strip. The label is hidden on the narrowest chips to keep
    the strip compact; icon + value always show. */
@@ -3234,6 +3249,12 @@ export class BaseView {
     help.title = "Base controls — click for help";
     help.setAttribute("aria-label", "Open base help");
     help.addEventListener("click", () => this.toggleHelp(true));
+    const earth = el("button", "earth-btn");
+    earth.type = "button";
+    earth.textContent = "Earth View";
+    earth.title = "Open Earth view";
+    earth.setAttribute("aria-label", "Open Earth view");
+    earth.addEventListener("click", () => this.opts.onEnterCommandCenter());
     // The overview sidebar (which used to host the reset control) is gone, so the
     // "New campaign" action lives in the persistent top-bar tools instead.
     const reset = el("button", "reset-btn");
@@ -3241,7 +3262,7 @@ export class BaseView {
     reset.textContent = "New campaign";
     reset.setAttribute("aria-label", "Abandon this campaign and start a new one");
     reset.addEventListener("click", () => this.opts.onResetCampaign());
-    tools.append(help, reset);
+    tools.append(earth, help, reset);
     const topRight = el("div", "topbar-right");
     topRight.append(chips, tools);
     topbar.append(brand, topRight);
