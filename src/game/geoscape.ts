@@ -1931,15 +1931,45 @@ export class GeoscapeView {
    */
   private installMarkerProbe(): void {
     const probeVec = new Vector3();
+    const radarNormal = new Vector3();
+    const surfaceNormal = new Vector3();
+    const earthCenter = new Vector3();
     const project = (obj: Object3D): { x: number; y: number } => {
       const rect = this.renderer.domElement.getBoundingClientRect();
       obj.getWorldPosition(probeVec).project(this.camera);
       return { x: (probeVec.x * 0.5 + 0.5) * rect.width, y: (-probeVec.y * 0.5 + 0.5) * rect.height };
     };
     (window as unknown as { __geoMarkers?: () => unknown }).__geoMarkers = () => {
-      const flights: Array<{ id: string; x: number; y: number }> = [];
+      const flights: Array<{
+        id: string;
+        x: number;
+        y: number;
+        radarSurfaceDot?: number;
+        indicatorSurfaceDot?: number;
+      }> = [];
       for (const [id, entry] of this.flightMarkers) {
-        if (entry.marker.visible) flights.push({ id, ...project(entry.marker) });
+        if (!entry.marker.visible) continue;
+        const radar = entry.marker.getObjectByName("onboard-radar-footprint");
+        const indicator = entry.marker.getObjectByName("surface-flight-indicator");
+        let radarSurfaceDot: number | undefined;
+        let indicatorSurfaceDot: number | undefined;
+        entry.marker.getWorldPosition(surfaceNormal);
+        this.earthGroup.getWorldPosition(earthCenter);
+        surfaceNormal.sub(earthCenter).normalize();
+        if (radar) {
+          radar.getWorldDirection(radarNormal);
+          radarSurfaceDot = radarNormal.dot(surfaceNormal);
+        }
+        if (indicator) {
+          indicator.getWorldDirection(radarNormal);
+          indicatorSurfaceDot = radarNormal.dot(surfaceNormal);
+        }
+        flights.push({
+          id,
+          ...project(entry.marker),
+          ...(radarSurfaceDot !== undefined ? { radarSurfaceDot } : {}),
+          ...(indicatorSurfaceDot !== undefined ? { indicatorSurfaceDot } : {}),
+        });
       }
       return {
         displayHours: this.displayHours(),
@@ -3439,7 +3469,7 @@ export class GeoscapeView {
         depthWrite: false,
       }),
     );
-    ring.rotation.x = -Math.PI / 2;
+    ring.name = "surface-flight-indicator";
     group.add(fuselage, nose, canopy, wingR, wingL, tail, stripe, ring);
     if (interceptor) {
       const radarRing = new Mesh(
@@ -3454,7 +3484,7 @@ export class GeoscapeView {
           toneMapped: false,
         }),
       );
-      radarRing.rotation.x = -Math.PI / 2;
+      radarRing.name = "onboard-radar-footprint";
       group.add(radarRing);
     }
     return group;
